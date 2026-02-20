@@ -1,16 +1,22 @@
 import { motion } from "framer-motion";
-import { Building2 } from "lucide-react";
-import kaffaLogo from "@assets/images_1771621355563.jpg";
+import kaffaLogo from "@assets/images-removebg-preview_(1)_1771621764244.png";
+import ccdLogo from "@assets/Café_Coffee_Day.svg-removebg-preview_1771621764243.png";
+import starbucksLogo from "@assets/Starbucks_Corporation_Logo_2011.svg-removebg-preview_1771621764245.png";
+import brewgartenLogo from "@assets/images-removebg-preview_1771621764246.png";
+import sipOfHopeLogo from "@assets/SIP_of_Hope-removebg-preview_1771621764247.png";
+import korebiLogo from "@assets/images__2_-removebg-preview_1771621764248.png";
+import blueTokaiLogo from "@assets/blue-tokai-logo_1771621764248.webp";
+import fyroLogo from "@assets/images_(1)_1771621764250.png";
 
 const partners = [
   { name: "Kaffa Coffee Roasters", logo: kaffaLogo },
-  { name: "Third Wave Coffee", logo: null },
-  { name: "Blue Tokai", logo: null },
-  { name: "Starbucks India", logo: null },
-  { name: "The Coffee House", logo: null },
-  { name: "Barista Coffee Co.", logo: null },
-  { name: "Chaayos", logo: null },
-  { name: "Dyu Art Café", logo: null },
+  { name: "Café Coffee Day", logo: ccdLogo },
+  { name: "Starbucks", logo: starbucksLogo },
+  { name: "Cafe Brewgarten", logo: brewgartenLogo },
+  { name: "Sip of Hope", logo: sipOfHopeLogo },
+  { name: "Korebi Coffee Roasters", logo: korebiLogo },
+  { name: "Blue Tokai Coffee", logo: blueTokaiLogo },
+  { name: "FYRO", logo: fyroLogo },
 ];
 
 export default function PlacementSection() {
@@ -48,16 +54,14 @@ export default function PlacementSection() {
               whileInView={{ opacity: 1, scale: 1 }}
               viewport={{ once: true }}
               transition={{ duration: 0.4, delay: index * 0.05 }}
-              className="flex flex-col items-center justify-center p-6 sm:p-8 rounded-lg bg-background border border-border hover-elevate"
+              className="flex items-center justify-center p-4 sm:p-6 rounded-lg bg-background border border-border hover-elevate aspect-square"
               data-testid={`partner-logo-${index}`}
             >
-              {partner.logo ? (
-                <img src={partner.logo} alt={partner.name} className="w-16 h-16 object-contain mb-3 rounded-md" />
-              ) : (
-                <div className="w-12 h-12 rounded-md bg-muted flex items-center justify-center mb-3">
-                  <Building2 className="h-6 w-6 text-muted-foreground" />
-                </div>
-              )}
+              <img
+                src={partner.logo}
+                alt={partner.name}
+                className="w-full h-full object-contain p-2"
+              />
             </motion.div>
           ))}
         </div>
