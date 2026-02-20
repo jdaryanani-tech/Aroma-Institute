@@ -92,7 +92,7 @@ export default function HeroSection() {
             {[
               { value: "50+", label: "Students Trained" },
               { value: "100%", label: "Placement Assist" },
-              { value: "50+", label: "Industry Partners" },
+              { value: "20+", label: "Industry Partners" },
               { value: "4", label: "Specialized Programs" },
             ].map((stat) => (
               <div key={stat.label} className="text-center sm:text-left">
