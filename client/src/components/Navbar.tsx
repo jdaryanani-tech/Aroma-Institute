@@ -40,7 +40,7 @@ export default function Navbar() {
           : "bg-transparent"
       }`}
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 bg-[#000000de]">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 bg-[#000000de] pt-[10px] pb-[10px]">
         <div className="flex items-center justify-between gap-4 h-16 sm:h-20">
           <button
             onClick={() => scrollTo("#hero")}
