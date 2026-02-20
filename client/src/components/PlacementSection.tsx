@@ -58,7 +58,6 @@ export default function PlacementSection() {
                   <Building2 className="h-6 w-6 text-muted-foreground" />
                 </div>
               )}
-              <span className="text-sm font-medium text-foreground text-center">{partner.name}</span>
             </motion.div>
           ))}
         </div>
