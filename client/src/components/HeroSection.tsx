@@ -90,7 +90,7 @@ export default function HeroSection() {
             className="mt-16 grid grid-cols-2 sm:grid-cols-4 gap-6 sm:gap-8"
           >
             {[
-              { value: "500+", label: "Students Trained" },
+              { value: "50+", label: "Students Trained" },
               { value: "100%", label: "Placement Assist" },
               { value: "50+", label: "Industry Partners" },
               { value: "4", label: "Specialized Programs" },
