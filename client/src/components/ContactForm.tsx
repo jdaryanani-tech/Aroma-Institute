@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Send, MapPin, Phone, Mail } from "lucide-react";
+import contactBg from "@assets/pexels-masudriguez-17987088_1771622740675.jpg";
 
 const programs = [
   "Professional Barista Certification",
@@ -74,10 +75,15 @@ export default function ContactForm() {
   return (
     <section
       id="contact"
-      className="py-20 sm:py-28 bg-card"
+      className="py-20 sm:py-28 relative overflow-hidden"
       data-testid="section-contact"
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: `url(${contactBg})` }}
+      />
+      <div className="absolute inset-0 bg-card/40" />
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
