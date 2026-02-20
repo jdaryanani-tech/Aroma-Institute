@@ -1,15 +1,16 @@
 import { motion } from "framer-motion";
 import { Building2 } from "lucide-react";
+import kaffaLogo from "@assets/images_1771621355563.jpg";
 
-const partnerNames = [
-  "Café Coffee Day",
-  "Third Wave Coffee",
-  "Blue Tokai",
-  "Starbucks India",
-  "The Coffee House",
-  "Barista Coffee Co.",
-  "Chaayos",
-  "Dyu Art Café",
+const partners = [
+  { name: "Kaffa Coffee Roasters", logo: kaffaLogo },
+  { name: "Third Wave Coffee", logo: null },
+  { name: "Blue Tokai", logo: null },
+  { name: "Starbucks India", logo: null },
+  { name: "The Coffee House", logo: null },
+  { name: "Barista Coffee Co.", logo: null },
+  { name: "Chaayos", logo: null },
+  { name: "Dyu Art Café", logo: null },
 ];
 
 export default function PlacementSection() {
@@ -40,9 +41,9 @@ export default function PlacementSection() {
         </motion.div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 sm:gap-6">
-          {partnerNames.map((name, index) => (
+          {partners.map((partner, index) => (
             <motion.div
-              key={name}
+              key={partner.name}
               initial={{ opacity: 0, scale: 0.95 }}
               whileInView={{ opacity: 1, scale: 1 }}
               viewport={{ once: true }}
@@ -50,10 +51,14 @@ export default function PlacementSection() {
               className="flex flex-col items-center justify-center p-6 sm:p-8 rounded-lg bg-background border border-border hover-elevate"
               data-testid={`partner-logo-${index}`}
             >
-              <div className="w-12 h-12 rounded-md bg-muted flex items-center justify-center mb-3">
-                <Building2 className="h-6 w-6 text-muted-foreground" />
-              </div>
-              <span className="text-sm font-medium text-foreground text-center">{name}</span>
+              {partner.logo ? (
+                <img src={partner.logo} alt={partner.name} className="w-16 h-16 object-contain mb-3 rounded-md" />
+              ) : (
+                <div className="w-12 h-12 rounded-md bg-muted flex items-center justify-center mb-3">
+                  <Building2 className="h-6 w-6 text-muted-foreground" />
+                </div>
+              )}
+              <span className="text-sm font-medium text-foreground text-center">{partner.name}</span>
             </motion.div>
           ))}
         </div>
