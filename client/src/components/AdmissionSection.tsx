@@ -41,7 +41,7 @@ export default function AdmissionSection() {
         className="absolute inset-0 bg-cover bg-center bg-no-repeat"
         style={{ backgroundImage: `url(${admissionBg})` }}
       />
-      <div className="absolute inset-0 bg-background/40" />
+      <div className="absolute inset-0 bg-background/60" />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
