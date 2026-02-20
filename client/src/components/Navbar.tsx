@@ -4,6 +4,8 @@ import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Menu, X } from "lucide-react";
 import logoSrc from "@assets/ChatGPT_Image_Feb_16,_2026,_02_18_03_AM_1771618649243.png";
 
+import ChatGPT_Image_Feb_21__2026__01_53_15_AM from "@assets/ChatGPT Image Feb 21, 2026, 01_53_15 AM.png";
+
 const navLinks = [
   { label: "About", href: "#about" },
   { label: "Programs", href: "#programs" },
@@ -46,7 +48,7 @@ export default function Navbar() {
             data-testid="link-home"
           >
             <img
-              src={logoSrc}
+              src={ChatGPT_Image_Feb_21__2026__01_53_15_AM}
               alt="Urja School Logo"
               className="h-10 sm:h-12 w-auto object-contain"
             />
