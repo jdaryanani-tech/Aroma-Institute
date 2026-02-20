@@ -7,7 +7,7 @@ import { Clock, ArrowRight } from "lucide-react";
 const programs = [
   {
     title: "Professional Barista Certification",
-    duration: "1 Month",
+    duration: "3 Months",
     description:
       "Master coffee foundations, espresso techniques, service skills, and café professionalism.",
     image: "/images/barista.png",
