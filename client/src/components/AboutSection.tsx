@@ -1,3 +1,4 @@
+import { useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
 import { GraduationCap, Briefcase, Globe, Coffee, Rocket } from "lucide-react";
@@ -11,23 +12,34 @@ const highlights = [
 ];
 
 export default function AboutSection() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.play().catch(() => {});
+    }
+  }, []);
+
   return (
     <section
       id="about"
-      className="py-20 sm:py-28 relative"
+      className="py-20 sm:py-28 relative overflow-hidden"
       data-testid="section-about"
     >
-      <div className="absolute inset-0 overflow-hidden">
-        <video
-          autoPlay
-          loop
-          muted
-          playsInline
-          className="w-full h-full object-cover"
-          src="/images/about-bg.mp4"
-        />
-      </div>
-      <div className="absolute inset-0 bg-background/50" />
+      <video
+        ref={videoRef}
+        autoPlay
+        loop
+        muted
+        playsInline
+        preload="auto"
+        className="absolute inset-0 w-full h-full object-cover"
+        data-testid="about-bg-video"
+      >
+        <source src="/images/about-bg.mp4" type="video/mp4" />
+      </video>
+      <div className="absolute inset-0 bg-background/60" />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
           <motion.div
