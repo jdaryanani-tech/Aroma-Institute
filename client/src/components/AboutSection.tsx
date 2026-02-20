@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
 import { GraduationCap, Briefcase, Globe, Coffee, Rocket } from "lucide-react";
+import aboutBg from "@assets/pexels-orlovamaria-4906424_1771619397048.jpg";
 
 const highlights = [
   { icon: Briefcase, label: "Learn While You Earn Model" },
@@ -14,10 +15,15 @@ export default function AboutSection() {
   return (
     <section
       id="about"
-      className="py-20 sm:py-28 bg-background"
+      className="py-20 sm:py-28 relative"
       data-testid="section-about"
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: `url(${aboutBg})` }}
+      />
+      <div className="absolute inset-0 bg-background/90" />
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
           <motion.div
             initial={{ opacity: 0, x: -30 }}
