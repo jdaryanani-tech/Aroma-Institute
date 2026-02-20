@@ -58,7 +58,7 @@ export default function AboutSection() {
               Urja School of Cafe & Hospitality Management is a practical hospitality academy
               focused on developing job-ready professionals and launch-ready café entrepreneurs.
             </p>
-            <p className="mt-4 text-muted-foreground text-base sm:text-lg leading-relaxed">
+            <p className="mt-4 text-base sm:text-lg leading-relaxed text-[#000000]">
               We provide structured classroom training combined with real-world internships inside
               live cafés. Our programs are designed for ambitious students and future founders who
               want real industry exposure — not just theory.
