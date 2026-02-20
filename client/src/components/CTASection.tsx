@@ -19,7 +19,6 @@ export default function CTASection() {
         style={{ backgroundImage: `url(${ctaBg})` }}
       />
       <div className="absolute inset-0 bg-primary/40" />
-
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -31,7 +30,7 @@ export default function CTASection() {
           <h2 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-bold text-primary-foreground leading-tight">
             Ready to Start Your Career or Launch Your Café?
           </h2>
-          <p className="mt-6 text-primary-foreground/80 text-base sm:text-lg max-w-2xl mx-auto leading-relaxed">
+          <p className="mt-6 text-base sm:text-lg max-w-2xl mx-auto leading-relaxed bg-[#fff0f087] text-[#000000]">
             Take the first step toward a rewarding career in the café and hospitality industry.
             Apply now or speak with our counselors to find the right program for you.
           </p>
