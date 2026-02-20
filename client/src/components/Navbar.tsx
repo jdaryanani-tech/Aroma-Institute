@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Menu, X } from "lucide-react";
+import logoSrc from "@assets/ChatGPT_Image_Feb_16,_2026,_02_18_03_AM_1771618649243.png";
 
 const navLinks = [
   { label: "About", href: "#about" },
@@ -39,15 +40,16 @@ export default function Navbar() {
     >
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between gap-4 h-16 sm:h-20 relative">
-          <div className="shrink-0" />
           <button
             onClick={() => scrollTo("#hero")}
-            className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2"
+            className="flex items-center gap-2 shrink-0"
             data-testid="link-home"
           >
-            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-md bg-primary flex items-center justify-center">
-              <span className="text-primary-foreground font-serif font-bold text-lg sm:text-xl">U</span>
-            </div>
+            <img
+              src={logoSrc}
+              alt="Urja School Logo"
+              className="h-10 sm:h-12 w-auto object-contain"
+            />
             <div className="hidden sm:block">
               <span className={`font-serif font-bold text-lg tracking-tight ${scrolled ? "text-foreground" : "text-white"}`}>URJA</span>
               <span className={`block text-[10px] leading-tight font-medium tracking-wider uppercase ${scrolled ? "text-muted-foreground" : "text-white/70"}`}>School of Café & Hospitality Management</span>
