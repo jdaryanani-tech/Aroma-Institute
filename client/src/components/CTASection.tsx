@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { ArrowRight, Phone } from "lucide-react";
-import ctaBg from "@assets/pexels-flickr-157060_1771624384187.jpg";
+import ctaBg from "@assets/pexels-quang-nguyen-vinh-222549-2159065_1771624542454.jpg";
 
 export default function CTASection() {
   const scrollTo = (href: string) => {
