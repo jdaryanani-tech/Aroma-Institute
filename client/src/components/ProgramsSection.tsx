@@ -15,7 +15,7 @@ const programs = [
   },
   {
     title: "Advanced Brewing & Café Operations",
-    duration: "3 Months",
+    duration: "6 Months",
     description:
       "Specialty brewing, operations training, leadership exposure, and paid internship experience.",
     image: "/images/brewing.png",
