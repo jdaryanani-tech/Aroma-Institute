@@ -267,7 +267,7 @@ export default function ContactForm() {
                   <div>
                     <p className="font-medium text-foreground text-sm">Phone</p>
                     <p className="text-muted-foreground text-sm mt-1" data-testid="text-phone">
-                      +91 96878 XXXXX
+                      +91 9687878669
                     </p>
                   </div>
                 </div>
