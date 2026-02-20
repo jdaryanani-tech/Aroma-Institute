@@ -106,7 +106,7 @@ export default function Footer() {
             </h4>
             <div className="space-y-2.5 text-background/60 text-sm">
               <p>Gurukul Road, Memnagar, Ahmedabad, Gujarat, India</p>
-              <p>+91 98765 43210</p>
+              <p>+91 9687878669</p>
               <p>admissions@urjaschool.in</p>
             </div>
           </div>
