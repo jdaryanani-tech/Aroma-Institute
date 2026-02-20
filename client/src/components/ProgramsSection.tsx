@@ -23,7 +23,7 @@ const programs = [
   },
   {
     title: "Professional Mixology & Mocktail Specialist",
-    duration: "2–3 Months",
+    duration: "9 Months",
     description:
       "Craft mocktails, signature beverages, flavor science, and beverage menu engineering.",
     image: "/images/mocktails.png",
