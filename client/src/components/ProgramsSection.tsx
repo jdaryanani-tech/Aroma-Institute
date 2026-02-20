@@ -3,6 +3,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Clock, ArrowRight } from "lucide-react";
+import programsBg from "@assets/pexels-sydnee-more-30355262-6936981_1771624143483.jpg";
 
 const programs = [
   {
@@ -48,10 +49,15 @@ export default function ProgramsSection() {
   return (
     <section
       id="programs"
-      className="py-20 sm:py-28 bg-card"
+      className="py-20 sm:py-28 relative overflow-hidden"
       data-testid="section-programs"
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: `url(${programsBg})` }}
+      />
+      <div className="absolute inset-0 bg-card/40" />
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
