@@ -20,7 +20,6 @@ export default function HeroSection() {
       />
       <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/50 to-black/80" />
       <div className="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent" />
-
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-32 sm:py-40">
         <div className="max-w-3xl">
           <motion.div
@@ -30,9 +29,7 @@ export default function HeroSection() {
           >
             <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-white/20 bg-white/10 backdrop-blur-sm mb-8">
               <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-              <span className="text-white/90 text-xs sm:text-sm font-medium tracking-wide">
-                Admissions Open 2025-26
-              </span>
+              <span className="text-white/90 text-xs sm:text-sm font-medium tracking-wide">Admissions Open 2026-27</span>
             </div>
           </motion.div>
 
@@ -108,7 +105,6 @@ export default function HeroSection() {
           </motion.div>
         </div>
       </div>
-
       <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-10">
         <motion.div
           animate={{ y: [0, 8, 0] }}
