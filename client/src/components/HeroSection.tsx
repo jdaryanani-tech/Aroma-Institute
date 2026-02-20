@@ -1,8 +1,18 @@
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
 import { ArrowRight, Play } from "lucide-react";
+import { useRef, useEffect } from "react";
+import heroVideo from "@/assets/videos/hero-bg.mp4";
 
 export default function HeroSection() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.play().catch(() => {});
+    }
+  }, []);
+
   const scrollTo = (href: string) => {
     const el = document.querySelector(href);
     if (el) el.scrollIntoView({ behavior: "smooth" });
@@ -14,10 +24,16 @@ export default function HeroSection() {
       className="relative min-h-screen flex items-center justify-center overflow-hidden"
       data-testid="section-hero"
     >
-      <div
-        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
-        style={{ backgroundImage: "url('/images/hero-bg.png')" }}
-      />
+      <video
+        ref={videoRef}
+        autoPlay
+        muted
+        loop
+        playsInline
+        className="absolute inset-0 w-full h-full object-cover"
+      >
+        <source src={heroVideo} type="video/mp4" />
+      </video>
       <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/50 to-black/80" />
       <div className="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent" />
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-32 sm:py-40">
