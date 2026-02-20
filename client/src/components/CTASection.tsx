@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { ArrowRight, Phone } from "lucide-react";
+import ctaBg from "@assets/pexels-flickr-157060_1771624384187.jpg";
 
 export default function CTASection() {
   const scrollTo = (href: string) => {
@@ -13,13 +14,13 @@ export default function CTASection() {
       className="py-20 sm:py-28 relative overflow-hidden"
       data-testid="section-cta"
     >
-      <div className="absolute inset-0 bg-primary" />
-      <div className="absolute inset-0 opacity-10">
-        <div className="absolute top-0 right-0 w-96 h-96 rounded-full bg-white blur-3xl" />
-        <div className="absolute bottom-0 left-0 w-64 h-64 rounded-full bg-white blur-3xl" />
-      </div>
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: `url(${ctaBg})` }}
+      />
+      <div className="absolute inset-0 bg-primary/40" />
 
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
