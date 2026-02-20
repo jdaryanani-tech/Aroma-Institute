@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
 import { FileText, MessageSquare, CheckCircle, BookOpen } from "lucide-react";
+import admissionBg from "@assets/pexels-julieaagaard-2467287_1771624608263.jpg";
 
 const steps = [
   {
@@ -33,10 +34,15 @@ export default function AdmissionSection() {
   return (
     <section
       id="admissions"
-      className="py-20 sm:py-28 bg-background"
+      className="py-20 sm:py-28 relative overflow-hidden"
       data-testid="section-admissions"
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: `url(${admissionBg})` }}
+      />
+      <div className="absolute inset-0 bg-background/40" />
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
