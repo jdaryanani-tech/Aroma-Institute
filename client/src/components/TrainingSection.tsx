@@ -1,3 +1,4 @@
+import { useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
 import { BadgeIndianRupee, Users, CalendarClock, Award, Handshake } from "lucide-react";
@@ -31,18 +32,37 @@ const features = [
 ];
 
 export default function TrainingSection() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.play().catch(() => {});
+    }
+  }, []);
+
   return (
     <section
       id="training"
       className="py-20 sm:py-28 bg-background relative overflow-hidden"
       data-testid="section-training"
     >
-      <div className="absolute inset-0 opacity-5">
-        <div className="absolute top-0 right-0 w-96 h-96 rounded-full bg-primary blur-3xl" />
-        <div className="absolute bottom-0 left-0 w-96 h-96 rounded-full bg-primary blur-3xl" />
+      <div className="absolute inset-0">
+        <video
+          ref={videoRef}
+          autoPlay
+          loop
+          muted
+          playsInline
+          preload="auto"
+          className="w-full h-full object-cover"
+        >
+          <source src="/images/training-bg.mp4" type="video/mp4" />
+        </video>
       </div>
+      <div className="absolute inset-0 bg-background/40" />
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
