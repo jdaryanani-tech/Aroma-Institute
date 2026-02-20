@@ -40,41 +40,39 @@ export default function Navbar() {
           : "bg-transparent"
       }`}
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 bg-[#000000de] pt-[10px] pb-[10px]">
-        <div className="flex items-center justify-between gap-4 h-16 sm:h-20">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 bg-[#000000de]">
+        <div className="flex items-center justify-between h-auto py-3">
           <button
             onClick={() => scrollTo("#hero")}
-            className="flex items-center gap-2 shrink-0"
+            className="flex items-center gap-3 shrink-0"
             data-testid="link-home"
           >
             <img
               src={ChatGPT_Image_Feb_21__2026__01_53_15_AM}
               alt="Urja School Logo"
-              className="h-10 sm:h-12 w-auto object-contain"
+              className="h-12 sm:h-14 w-auto object-contain"
             />
+            <div className="hidden sm:block text-left">
+              <span className="font-serif tracking-tight text-2xl sm:text-3xl font-black text-white leading-none block">URJA</span>
+              <span className="block tracking-wider uppercase text-white/70 text-[10px] sm:text-xs font-light leading-tight mt-0.5">School of Café & Hospitality Management</span>
+            </div>
           </button>
 
-          <div className="hidden sm:flex flex-col items-center text-center flex-1">
-            <button onClick={() => scrollTo("#hero")}>
-              <span className="font-serif tracking-tight text-[40px] font-black text-[#ffffff] mt-[10px] mb-[10px] pt-[10px] pb-[10px]">URJA</span>
-              <span className="block tracking-wider uppercase text-white/70 text-[18px] font-extralight">School of Café & Hospitality Management</span>
-            </button>
-            <div className="hidden lg:flex items-center gap-1 mt-1">
-              {navLinks.map((link) => (
-                <button
-                  key={link.href}
-                  onClick={() => scrollTo(link.href)}
-                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                    scrolled
-                      ? "text-muted-foreground hover:text-foreground"
-                      : "text-white/80 hover:text-white"
-                  }`}
-                  data-testid={`link-${link.label.toLowerCase()}`}
-                >
-                  {link.label}
-                </button>
-              ))}
-            </div>
+          <div className="hidden lg:flex items-center gap-1">
+            {navLinks.map((link) => (
+              <button
+                key={link.href}
+                onClick={() => scrollTo(link.href)}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                  scrolled
+                    ? "text-muted-foreground hover:text-foreground"
+                    : "text-white/80 hover:text-white"
+                }`}
+                data-testid={`link-${link.label.toLowerCase()}`}
+              >
+                {link.label}
+              </button>
+            ))}
           </div>
 
           <div className="flex items-center gap-3">
