@@ -50,11 +50,14 @@ export default function Navbar() {
               alt="Urja School Logo"
               className="h-10 sm:h-12 w-auto object-contain"
             />
-            <div className="hidden sm:block">
+          </button>
+
+          <div className="hidden lg:block absolute left-1/2 -translate-x-1/2 text-center">
+            <button onClick={() => scrollTo("#hero")}>
               <span className={`font-serif font-bold text-lg tracking-tight ${scrolled ? "text-foreground" : "text-white"}`}>URJA</span>
               <span className={`block text-[10px] leading-tight font-medium tracking-wider uppercase ${scrolled ? "text-muted-foreground" : "text-white/70"}`}>School of Café & Hospitality Management</span>
-            </div>
-          </button>
+            </button>
+          </div>
 
           <div className="hidden lg:flex items-center gap-1">
             {navLinks.map((link) => (
