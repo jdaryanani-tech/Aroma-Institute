@@ -138,7 +138,7 @@ export default function ContactForm() {
                         <FormLabel>Phone Number</FormLabel>
                         <FormControl>
                           <Input
-                            placeholder="+91 98765 43210"
+                            placeholder="Your phone number"
                             {...field}
                             data-testid="input-phone"
                           />
