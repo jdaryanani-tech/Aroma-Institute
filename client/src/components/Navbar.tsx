@@ -56,7 +56,7 @@ export default function Navbar() {
 
           <div className="hidden sm:flex flex-col items-center text-center flex-1">
             <button onClick={() => scrollTo("#hero")}>
-              <span className="font-serif font-bold tracking-tight text-white text-[40px]">URJA</span>
+              <span className="font-serif font-bold tracking-tight text-[40px] text-[#7f3939]">URJA</span>
               <span className="block tracking-wider uppercase text-white/70 text-[18px] font-extralight">School of Café & Hospitality Management</span>
             </button>
             <div className="hidden lg:flex items-center gap-1 mt-1">
