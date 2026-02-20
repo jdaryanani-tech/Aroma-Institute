@@ -1,4 +1,5 @@
 import { SiInstagram, SiFacebook, SiLinkedin, SiYoutube } from "react-icons/si";
+import footerLogo from "@assets/ChatGPT_Image_Feb_21,_2026,_01_53_15_AM_1771625262316.png";
 
 const socialLinks = [
   { icon: SiInstagram, label: "Instagram", href: "#" },
@@ -34,9 +35,7 @@ export default function Footer() {
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-10">
           <div className="sm:col-span-2 lg:col-span-1">
             <div className="flex items-center gap-2 mb-4">
-              <div className="w-10 h-10 rounded-md bg-primary flex items-center justify-center">
-                <span className="text-primary-foreground font-serif font-bold text-xl">U</span>
-              </div>
+              <img src={footerLogo} alt="Urja School Logo" className="w-10 h-10 rounded-md object-contain" />
               <div>
                 <span className="font-serif font-bold text-lg text-background">Urja</span>
                 <span className="block text-[10px] leading-tight font-medium tracking-wider uppercase text-background/60">
