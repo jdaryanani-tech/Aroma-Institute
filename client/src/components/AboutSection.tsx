@@ -1,7 +1,6 @@
 import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
 import { GraduationCap, Briefcase, Globe, Coffee, Rocket } from "lucide-react";
-import aboutBg from "@assets/pexels-orlovamaria-4906424_1771619397048.jpg";
 
 const highlights = [
   { icon: Briefcase, label: "Learn While You Earn Model" },
@@ -18,11 +17,17 @@ export default function AboutSection() {
       className="py-20 sm:py-28 relative"
       data-testid="section-about"
     >
-      <div
-        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
-        style={{ backgroundImage: `url(${aboutBg})` }}
-      />
-      <div className="absolute inset-0 bg-background/60" />
+      <div className="absolute inset-0 overflow-hidden">
+        <video
+          autoPlay
+          loop
+          muted
+          playsInline
+          className="w-full h-full object-cover"
+          src="/images/about-bg.mp4"
+        />
+      </div>
+      <div className="absolute inset-0 bg-background/50" />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
           <motion.div
