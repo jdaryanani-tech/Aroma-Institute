@@ -1,3 +1,4 @@
+import { useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import kaffaLogo from "@assets/images-removebg-preview_(1)_1771621764244.png";
 import ccdLogo from "@assets/Café_Coffee_Day.svg-removebg-preview_1771621764243.png";
@@ -20,13 +21,36 @@ const partners = [
 ];
 
 export default function PlacementSection() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.play().catch(() => {});
+    }
+  }, []);
+
   return (
     <section
       id="placements"
-      className="py-20 sm:py-28 bg-card"
+      className="py-20 sm:py-28 relative overflow-hidden"
       data-testid="section-placements"
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="absolute inset-0">
+        <video
+          ref={videoRef}
+          autoPlay
+          loop
+          muted
+          playsInline
+          preload="auto"
+          className="w-full h-full object-cover"
+        >
+          <source src="/images/placement-bg.mp4" type="video/mp4" />
+        </video>
+      </div>
+      <div className="absolute inset-0 bg-card/40" />
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
