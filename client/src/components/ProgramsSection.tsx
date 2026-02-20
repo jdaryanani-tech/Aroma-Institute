@@ -31,7 +31,7 @@ const programs = [
   },
   {
     title: "Café Entrepreneur Incubation Program",
-    duration: "12 Weeks",
+    duration: "12 Months",
     description:
       "From ideation to execution — build your own café with complete financial, operational, and launch planning.",
     image: "/images/entrepreneur.png",
