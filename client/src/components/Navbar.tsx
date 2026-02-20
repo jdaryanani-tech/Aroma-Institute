@@ -48,9 +48,7 @@ export default function Navbar() {
               <span className="text-primary-foreground font-serif font-bold text-lg sm:text-xl">U</span>
             </div>
             <div className="hidden sm:block">
-              <span className={`font-serif font-bold text-lg tracking-tight ${scrolled ? "text-foreground" : "text-white"}`}>
-                Urja
-              </span>
+              <span className={`font-serif font-bold text-lg tracking-tight ${scrolled ? "text-foreground" : "text-white"}`}>URJA</span>
               <span className={`block text-[10px] leading-tight font-medium tracking-wider uppercase ${scrolled ? "text-muted-foreground" : "text-white/70"}`}>School of Café & Hospitality Management</span>
             </div>
           </button>
