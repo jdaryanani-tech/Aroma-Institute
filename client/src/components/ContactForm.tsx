@@ -255,7 +255,7 @@ export default function ContactForm() {
                   <div>
                     <p className="font-medium text-foreground text-sm">Address</p>
                     <p className="text-muted-foreground text-sm mt-1" data-testid="text-address">
-                      Ahmedabad, Gujarat, India
+                      Gurukul Road, Memnagar, Ahmedabad, Gujarat, India
                     </p>
                   </div>
                 </div>
@@ -267,7 +267,7 @@ export default function ContactForm() {
                   <div>
                     <p className="font-medium text-foreground text-sm">Phone</p>
                     <p className="text-muted-foreground text-sm mt-1" data-testid="text-phone">
-                      +91 98765 43210
+                      +91 9687878669
                     </p>
                   </div>
                 </div>
