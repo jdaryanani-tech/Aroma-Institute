@@ -22,7 +22,7 @@ export default function AboutSection() {
         className="absolute inset-0 bg-cover bg-center bg-no-repeat"
         style={{ backgroundImage: `url(${aboutBg})` }}
       />
-      <div className="absolute inset-0 bg-background/90" />
+      <div className="absolute inset-0 bg-background/60" />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
           <motion.div
