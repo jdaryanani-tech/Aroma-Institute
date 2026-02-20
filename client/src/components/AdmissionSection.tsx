@@ -1,29 +1,33 @@
 import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
-import { FileText, MessageSquare, CheckCircle, BookOpen } from "lucide-react";
+import { CheckCircle } from "lucide-react";
 import admissionBg from "@assets/pexels-julieaagaard-2467287_1771624608263.jpg";
+import step1Img from "@/assets/images/admission-step1-application.png";
+import step2Img from "@/assets/images/admission-step2-interview.png";
+import step3Img from "@/assets/images/admission-step3-confirmation.png";
+import step4Img from "@/assets/images/admission-step4-orientation.png";
 
 const steps = [
   {
-    icon: FileText,
+    image: step1Img,
     step: "Step 1",
     title: "Application",
     description: "Fill out the online application form with your details and program preference.",
   },
   {
-    icon: MessageSquare,
+    image: step2Img,
     step: "Step 2",
     title: "Screening Interview",
     description: "A brief screening call to understand your goals and assess program fit.",
   },
   {
-    icon: CheckCircle,
+    image: step3Img,
     step: "Step 3",
     title: "Admission Confirmation",
     description: "Receive your admission offer letter and complete the enrollment process.",
   },
   {
-    icon: BookOpen,
+    image: step4Img,
     step: "Step 4",
     title: "Orientation & Training Begins",
     description: "Join the orientation session and begin your practical training journey.",
@@ -77,8 +81,8 @@ export default function AdmissionSection() {
               )}
 
               <Card className="text-center p-6">
-                <div className="w-14 h-14 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-4">
-                  <step.icon className="h-6 w-6 text-primary" />
+                <div className="w-20 h-20 rounded-full overflow-hidden mx-auto mb-4">
+                  <img src={step.image} alt={step.title} className="w-full h-full object-cover" />
                 </div>
                 <span className="text-xs font-bold text-primary tracking-widest uppercase">
                   {step.step}
