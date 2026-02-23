@@ -1,8 +1,8 @@
-# Urja School of Cafe & Hospitality Management - Website
+# Aroma Institute of Cafe & Hospitality Management - Website
 
 ## Overview
 
-This is a marketing and lead-generation website for **Urja School of Cafe & Hospitality Management**, a hospitality academy based in Gujarat, India. The site showcases their training programs (barista certification, brewing, mixology, café entrepreneurship) and captures prospective student inquiries through a contact form.
+This is a marketing and lead-generation website for **Aroma Institute of Cafe & Hospitality Management**, a hospitality academy based in Gujarat, India. The site showcases their training programs (barista certification, brewing, mixology, café entrepreneurship) and captures prospective student inquiries through a contact form.
 
 The application is a single-page website with a React frontend and an Express backend. It uses a PostgreSQL database to store inquiry form submissions. The site is designed with a premium, coffee-inspired dark/warm aesthetic using brown, beige, and gold accent colors.
 

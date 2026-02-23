@@ -2,9 +2,7 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Menu, X } from "lucide-react";
-import logoSrc from "@assets/ChatGPT_Image_Feb_16,_2026,_02_18_03_AM_1771618649243.png";
-
-import ChatGPT_Image_Feb_21__2026__01_53_15_AM from "@assets/ChatGPT Image Feb 21, 2026, 01_53_15 AM.png";
+import aromaLogo from "@assets/ChatGPT_Image_Feb_24__2026__01_47_11_AM-removebg-preview_1771878331386.png";
 
 const navLinks = [
   { label: "About", href: "#about" },
@@ -48,13 +46,13 @@ export default function Navbar() {
             data-testid="link-home"
           >
             <img
-              src={ChatGPT_Image_Feb_21__2026__01_53_15_AM}
-              alt="Urja School Logo"
+              src={aromaLogo}
+              alt="Aroma Institute Logo"
               className="h-12 sm:h-14 w-auto object-contain"
             />
             <div className="hidden sm:block text-left">
-              <span className="font-serif tracking-tight text-2xl sm:text-3xl font-black text-white leading-none block">URJA</span>
-              <span className="block tracking-wider uppercase text-white/70 text-[10px] sm:text-xs font-light leading-tight mt-0.5">School of Café & Hospitality Management</span>
+              <span className="font-serif tracking-tight text-2xl sm:text-3xl font-black text-white leading-none block">AROMA</span>
+              <span className="block tracking-wider uppercase text-white/70 text-[10px] sm:text-xs font-light leading-tight mt-0.5">Institute of Cafe & Hospitality Management</span>
             </div>
           </button>
 

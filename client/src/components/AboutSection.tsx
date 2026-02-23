@@ -52,10 +52,10 @@ export default function AboutSection() {
               About Us
             </span>
             <h2 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-bold text-foreground mt-3 leading-tight">
-              About <span className="text-primary italic">Urja</span>
+              About <span className="text-primary italic">Aroma</span>
             </h2>
             <p className="mt-6 text-base sm:text-lg leading-relaxed text-[#000000]">
-              Urja School of Cafe & Hospitality Management is a practical hospitality academy
+              Aroma Institute of Cafe & Hospitality Management is a practical hospitality academy
               focused on developing job-ready professionals and launch-ready café entrepreneurs.
             </p>
             <p className="mt-4 text-base sm:text-lg leading-relaxed text-[#000000]">

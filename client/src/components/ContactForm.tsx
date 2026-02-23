@@ -279,7 +279,7 @@ export default function ContactForm() {
                   <div>
                     <p className="font-medium text-foreground text-sm">Email</p>
                     <p className="text-muted-foreground text-sm mt-1" data-testid="text-email">
-                      admissions@urjaschool.in
+                      admissions@aromainstitute.in
                     </p>
                   </div>
                 </div>

@@ -1,5 +1,5 @@
 import { SiInstagram, SiFacebook, SiLinkedin, SiYoutube } from "react-icons/si";
-import footerLogo from "@assets/ChatGPT_Image_Feb_21,_2026,_01_53_15_AM_1771625262316.png";
+import footerLogo from "@assets/ChatGPT_Image_Feb_24__2026__01_50_58_AM-removebg-preview_1771878331387.png";
 
 const socialLinks = [
   { icon: SiInstagram, label: "Instagram", href: "#" },
@@ -35,11 +35,11 @@ export default function Footer() {
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-10">
           <div className="sm:col-span-2 lg:col-span-1">
             <div className="flex items-center gap-2 mb-4">
-              <img src={footerLogo} alt="Urja School Logo" className="w-10 h-10 rounded-md object-contain" />
+              <img src={footerLogo} alt="Aroma Institute Logo" className="w-10 h-10 rounded-md object-contain" />
               <div>
-                <span className="font-serif font-bold text-lg text-background">Urja</span>
+                <span className="font-serif font-bold text-lg text-background">Aroma</span>
                 <span className="block text-[10px] leading-tight font-medium tracking-wider uppercase text-background/60">
-                  School of Café & Hospitality
+                  Institute of Cafe & Hospitality
                 </span>
               </div>
             </div>
@@ -106,14 +106,14 @@ export default function Footer() {
             <div className="space-y-2.5 text-background/60 text-sm">
               <p>Gurukul Road, Memnagar, Ahmedabad, Gujarat, India</p>
               <p>+91 9687878669</p>
-              <p>admissions@urjaschool.in</p>
+              <p>admissions@aromainstitute.in</p>
             </div>
           </div>
         </div>
 
         <div className="mt-12 pt-8 border-t border-background/10 flex flex-col sm:flex-row items-center justify-between gap-4">
           <p className="text-background/40 text-xs" data-testid="text-copyright">
-            &copy; {new Date().getFullYear()} Urja School of Cafe & Hospitality Management. All rights reserved.
+            &copy; {new Date().getFullYear()} Aroma Institute of Cafe & Hospitality Management. All rights reserved.
           </p>
           <div className="flex items-center gap-4">
             <button className="text-background/40 text-xs hover:text-background/60 transition-colors">
