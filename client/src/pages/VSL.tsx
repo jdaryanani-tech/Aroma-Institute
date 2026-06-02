@@ -341,9 +341,9 @@ export default function VSL() {
                   render={({ field }) => (
                     <FormItem>
                       <FormControl>
-                        <Input
+                        <input
                           placeholder="Your Full Name *"
-                          className="bg-white/8 border-white/15 text-white placeholder:text-white/35 focus:border-amber-400/60 h-12"
+                          className="w-full h-12 px-4 rounded-md border border-white/20 bg-white/10 text-white placeholder:text-white/40 focus:outline-none focus:border-amber-400/70 focus:ring-1 focus:ring-amber-400/40 transition-colors text-sm"
                           {...field}
                           data-testid="vsl-input-name"
                         />
@@ -359,9 +359,9 @@ export default function VSL() {
                   render={({ field }) => (
                     <FormItem>
                       <FormControl>
-                        <Input
+                        <input
                           placeholder="Your Phone Number *"
-                          className="bg-white/8 border-white/15 text-white placeholder:text-white/35 focus:border-amber-400/60 h-12"
+                          className="w-full h-12 px-4 rounded-md border border-white/20 bg-white/10 text-white placeholder:text-white/40 focus:outline-none focus:border-amber-400/70 focus:ring-1 focus:ring-amber-400/40 transition-colors text-sm"
                           {...field}
                           data-testid="vsl-input-phone"
                         />
@@ -377,10 +377,10 @@ export default function VSL() {
                   render={({ field }) => (
                     <FormItem>
                       <FormControl>
-                        <Input
+                        <input
                           type="email"
                           placeholder="Your Email Address *"
-                          className="bg-white/8 border-white/15 text-white placeholder:text-white/35 focus:border-amber-400/60 h-12"
+                          className="w-full h-12 px-4 rounded-md border border-white/20 bg-white/10 text-white placeholder:text-white/40 focus:outline-none focus:border-amber-400/70 focus:ring-1 focus:ring-amber-400/40 transition-colors text-sm"
                           {...field}
                           data-testid="vsl-input-email"
                         />
