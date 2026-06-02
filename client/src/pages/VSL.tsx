@@ -97,7 +97,7 @@ export default function VSL() {
     onError: () => {
       toast({
         title: "Something went wrong",
-        description: "Please call us directly at +91 9687878669",
+        description: "Please call us directly at +91 9274868669",
         variant: "destructive",
       });
     },
@@ -125,12 +125,12 @@ export default function VSL() {
             </div>
           </div>
           <a
-            href="tel:+919687878669"
+            href="tel:+919274868669"
             className="flex items-center gap-2 text-amber-400 font-semibold text-sm hover:text-amber-300 transition-colors"
             data-testid="link-phone-topbar"
           >
             <Phone className="h-4 w-4" />
-            <span>+91 96878 78669</span>
+            <span>+91 92748 68669</span>
           </a>
         </div>
       </div>
@@ -441,7 +441,7 @@ export default function VSL() {
           <div className="text-white/35 text-xs space-y-1">
             <p>Gurukul Road, Memnagar, Ahmedabad, Gujarat</p>
             <p>
-              <a href="tel:+919687878669" className="hover:text-amber-400 transition-colors">+91 9687878669</a>
+              <a href="tel:+919274868669" className="hover:text-amber-400 transition-colors">+91 9274868669</a>
               {" · "}
               <a href="mailto:admissions@aromainstitute.in" className="hover:text-amber-400 transition-colors">admissions@aromainstitute.in</a>
             </p>
