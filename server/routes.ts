@@ -5,6 +5,8 @@ import { insertInquirySchema } from "@shared/schema";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "aroma@2024";
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -21,6 +23,19 @@ export async function registerRoutes(
       } else {
         res.status(500).json({ message: "Failed to submit inquiry" });
       }
+    }
+  });
+
+  app.get("/api/admin/inquiries", async (req, res) => {
+    const token = req.headers["x-admin-password"] as string;
+    if (token !== ADMIN_PASSWORD) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    try {
+      const data = await storage.getInquiries();
+      res.json(data);
+    } catch {
+      res.status(500).json({ message: "Failed to fetch inquiries" });
     }
   });
 
