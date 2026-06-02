@@ -147,8 +147,9 @@ export default function VSL() {
               Professional Barista Certification — Ahmedabad
             </span>
             <h1 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-bold leading-tight mb-5">
-              Turn Your Passion for Coffee into a{" "}
-              <span className="text-amber-400 italic">Career That Pays</span>
+              Build A Career In The Café Industry{" "}
+              <span className="text-amber-400 italic">Without Wasting 3–4 Years</span>{" "}
+              Waiting For Your Life To Start
             </h1>
             <p className="text-white/70 text-base sm:text-lg leading-relaxed max-w-2xl mx-auto mb-8">
               Watch how Aroma Institute's 4-week Barista Certification program gives you professional-grade skills, industry connections, and the confidence to work at top cafés — or start your own.
