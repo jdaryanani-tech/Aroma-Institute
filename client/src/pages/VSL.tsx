@@ -30,7 +30,7 @@ import aromaLogo from "@assets/ChatGPT_Image_Feb_24__2026__01_47_11_AM-removebg-
 
 const benefits = [
   "Hands-on training on professional espresso machines — not just theory",
-  "Learn latte art, brewing methods & café workflow in just 4–6 weeks",
+  "Learn latte art, brewing methods & café workflow in just 12 weeks",
   "Certification recognised by top cafés & hotel chains across India",
   "Get placed or launch your own café with our industry network",
   "Small batch classes — maximum 10 students — for personal attention",
@@ -152,7 +152,7 @@ export default function VSL() {
               Waiting For Your Life To Start
             </h1>
             <p className="text-white/70 text-base sm:text-lg leading-relaxed max-w-2xl mx-auto mb-8">
-              Watch how Aroma Institute's 4-week Barista Certification program gives you professional-grade skills, industry connections, and the confidence to work at top cafés — or start your own.
+              Watch how Aroma Institute's 12-week Barista Certification program gives you professional-grade skills, industry connections, and the confidence to work at top cafés — or start your own.
             </p>
           </motion.div>
 
@@ -165,7 +165,7 @@ export default function VSL() {
           >
             {[
               { icon: Users, value: "50+", label: "Students Trained" },
-              { icon: Clock, value: "4–6 Weeks", label: "Intensive Program" },
+              { icon: Clock, value: "12 Weeks", label: "Intensive Program" },
               { icon: Award, value: "100%", label: "Practical Training" },
             ].map(({ icon: Icon, value, label }) => (
               <div key={label} className="flex items-center gap-2.5 bg-white/5 border border-white/10 rounded-xl px-5 py-3">
