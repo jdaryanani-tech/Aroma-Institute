@@ -1,13 +1,11 @@
-import { useRef } from "react";
-import { motion } from "framer-motion";
+import { useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "@tanstack/react-query";
 import { insertInquirySchema, type InsertInquiry } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Form,
   FormControl,
@@ -25,6 +23,9 @@ import {
   Award,
   Users,
   ChevronRight,
+  X,
+  Lock,
+  PlayCircle,
 } from "lucide-react";
 import aromaLogo from "@assets/ChatGPT_Image_Feb_24__2026__01_47_11_AM-removebg-preview_1771878331386.png";
 
@@ -60,10 +61,41 @@ const testimonials = [
 export default function VSL() {
   const formRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+  const [showGate, setShowGate] = useState(false);
+  const [videoUnlocked, setVideoUnlocked] = useState(false);
 
   const scrollToForm = () => {
     formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
+
+  const gateForm = useForm<InsertInquiry>({
+    resolver: zodResolver(insertInquirySchema),
+    defaultValues: {
+      name: "",
+      email: "watch@aromainstitute.in",
+      phone: "",
+      programInterest: "Professional Barista Certification",
+      message: "Requested via video gate",
+    },
+  });
+
+  const gateMutation = useMutation({
+    mutationFn: async (data: InsertInquiry) => {
+      const res = await apiRequest("POST", "/api/inquiries", data);
+      return res.json();
+    },
+    onSuccess: () => {
+      setShowGate(false);
+      setVideoUnlocked(true);
+    },
+    onError: () => {
+      toast({
+        title: "Something went wrong",
+        description: "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
 
   const form = useForm<InsertInquiry>({
     resolver: zodResolver(insertInquirySchema),
@@ -109,6 +141,104 @@ export default function VSL() {
 
   return (
     <div className="min-h-screen bg-[#0e0a07] text-white" data-testid="page-vsl">
+
+      {/* Video Gate Modal */}
+      <AnimatePresence>
+        {showGate && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center px-4"
+            data-testid="modal-video-gate"
+          >
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setShowGate(false)} />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 16 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 16 }}
+              transition={{ duration: 0.25 }}
+              className="relative w-full max-w-md bg-[#1a1109] border border-white/15 rounded-2xl p-6 sm:p-8 shadow-2xl"
+            >
+              <button
+                onClick={() => setShowGate(false)}
+                className="absolute top-4 right-4 text-white/30 hover:text-white/70 transition-colors"
+                data-testid="modal-close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+
+              <div className="text-center mb-6">
+                <div className="w-12 h-12 rounded-full bg-amber-400 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-amber-400/30">
+                  <Play className="h-5 w-5 text-[#0e0a07] ml-0.5" fill="currentColor" />
+                </div>
+                <h3 className="font-serif text-xl font-bold text-white mb-1">Watch the Free Training</h3>
+                <p className="text-white/50 text-sm">Enter your details below to unlock the video instantly.</p>
+              </div>
+
+              <Form {...gateForm}>
+                <form
+                  onSubmit={gateForm.handleSubmit((data) => gateMutation.mutate(data))}
+                  className="space-y-3"
+                >
+                  <FormField
+                    control={gateForm.control}
+                    name="name"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormControl>
+                          <input
+                            placeholder="Your Full Name *"
+                            className="w-full h-11 px-4 rounded-lg border border-white/20 bg-white/8 text-white placeholder:text-white/35 focus:outline-none focus:border-amber-400/60 text-sm transition-colors"
+                            {...field}
+                            data-testid="gate-input-name"
+                          />
+                        </FormControl>
+                        <FormMessage className="text-red-400 text-xs" />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={gateForm.control}
+                    name="phone"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormControl>
+                          <input
+                            placeholder="Your Phone Number *"
+                            className="w-full h-11 px-4 rounded-lg border border-white/20 bg-white/8 text-white placeholder:text-white/35 focus:outline-none focus:border-amber-400/60 text-sm transition-colors"
+                            {...field}
+                            data-testid="gate-input-phone"
+                          />
+                        </FormControl>
+                        <FormMessage className="text-red-400 text-xs" />
+                      </FormItem>
+                    )}
+                  />
+                  <input type="hidden" {...gateForm.register("email")} />
+                  <input type="hidden" {...gateForm.register("programInterest")} />
+                  <input type="hidden" {...gateForm.register("message")} />
+
+                  <button
+                    type="submit"
+                    disabled={gateMutation.isPending}
+                    className="w-full h-12 flex items-center justify-center gap-2 bg-amber-400 hover:bg-amber-300 disabled:opacity-60 text-[#0e0a07] font-bold rounded-xl transition-colors mt-2"
+                    data-testid="gate-button-submit"
+                  >
+                    {gateMutation.isPending ? "Unlocking..." : (
+                      <>
+                        <Play className="h-4 w-4 ml-0.5" fill="currentColor" />
+                        Unlock & Watch Free
+                      </>
+                    )}
+                  </button>
+                  <p className="text-white/30 text-xs text-center pt-1">🔒 No spam. We'll only contact you about the program.</p>
+                </form>
+              </Form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Sticky Top Bar */}
       <div className="fixed top-0 left-0 right-0 z-50 bg-[#0e0a07]/95 backdrop-blur border-b border-white/10">
@@ -187,17 +317,37 @@ export default function VSL() {
           className="max-w-3xl mx-auto"
           data-testid="video-placeholder"
         >
-          <div className="relative rounded-2xl overflow-hidden border border-white/10 shadow-2xl bg-[#1a1109] aspect-video flex items-center justify-center group cursor-pointer">
-            <div className="absolute inset-0 bg-gradient-to-br from-amber-900/20 via-transparent to-transparent" />
-            <div className="text-center z-10 px-6">
-              <div className="w-20 h-20 rounded-full bg-amber-400 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-amber-400/30 group-hover:scale-110 transition-transform duration-300">
-                <Play className="h-8 w-8 text-[#0e0a07] ml-1" fill="currentColor" />
+          {videoUnlocked ? (
+            <div className="relative rounded-2xl overflow-hidden border border-amber-400/30 shadow-2xl bg-[#1a1109] aspect-video flex items-center justify-center">
+              <div className="absolute inset-0 bg-gradient-to-br from-amber-900/20 via-transparent to-transparent" />
+              <div className="text-center z-10 px-6">
+                <PlayCircle className="h-14 w-14 text-amber-400 mx-auto mb-4 opacity-80" />
+                <p className="text-white/80 text-base font-semibold">You're all set!</p>
+                <p className="text-white/45 text-sm mt-1">The video will appear here once it's ready. We'll notify you.</p>
               </div>
-              <p className="text-white/60 text-sm font-medium">Program Overview Video</p>
-              <p className="text-white/40 text-xs mt-1">Coming Soon — Our story, your future</p>
+              <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-400/0 via-amber-400/80 to-amber-400/0" />
             </div>
-            <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-400/0 via-amber-400/60 to-amber-400/0" />
-          </div>
+          ) : (
+            <button
+              onClick={() => setShowGate(true)}
+              className="w-full text-left"
+              data-testid="button-play-gate"
+            >
+              <div className="relative rounded-2xl overflow-hidden border border-white/10 shadow-2xl bg-[#1a1109] aspect-video flex items-center justify-center group">
+                <div className="absolute inset-0 bg-gradient-to-br from-amber-900/20 via-transparent to-transparent" />
+                <div className="text-center z-10 px-6">
+                  <div className="w-20 h-20 rounded-full bg-amber-400 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-amber-400/30 group-hover:scale-110 transition-transform duration-300">
+                    <Play className="h-8 w-8 text-[#0e0a07] ml-1" fill="currentColor" />
+                  </div>
+                  <p className="text-white/70 text-sm font-semibold">Watch the Free Training</p>
+                  <p className="text-white/40 text-xs mt-1 flex items-center justify-center gap-1">
+                    <Lock className="h-3 w-3" /> Enter your details to unlock
+                  </p>
+                </div>
+                <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-400/0 via-amber-400/60 to-amber-400/0" />
+              </div>
+            </button>
+          )}
         </motion.div>
 
         {/* CTA after video */}
