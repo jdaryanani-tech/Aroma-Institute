@@ -189,7 +189,8 @@ export default function VSL() {
                         <FormControl>
                           <input
                             placeholder="Your Full Name *"
-                            className="w-full h-11 px-4 rounded-lg border border-white/20 bg-white/8 text-white placeholder:text-white/35 focus:outline-none focus:border-amber-400/60 text-sm transition-colors"
+                            className="w-full h-11 px-4 rounded-lg border border-white/20 text-white placeholder:text-white/40 focus:outline-none focus:border-amber-400/60 text-sm transition-colors"
+                            style={{ background: "rgba(255,255,255,0.08)" }}
                             {...field}
                             data-testid="gate-input-name"
                           />
@@ -206,7 +207,8 @@ export default function VSL() {
                         <FormControl>
                           <input
                             placeholder="Your Phone Number *"
-                            className="w-full h-11 px-4 rounded-lg border border-white/20 bg-white/8 text-white placeholder:text-white/35 focus:outline-none focus:border-amber-400/60 text-sm transition-colors"
+                            className="w-full h-11 px-4 rounded-lg border border-white/20 text-white placeholder:text-white/40 focus:outline-none focus:border-amber-400/60 text-sm transition-colors"
+                            style={{ background: "rgba(255,255,255,0.08)" }}
                             {...field}
                             data-testid="gate-input-phone"
                           />

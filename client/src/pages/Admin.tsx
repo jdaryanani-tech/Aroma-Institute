@@ -33,9 +33,11 @@ function exportCSV(data: Inquiry[]) {
   URL.revokeObjectURL(url);
 }
 
+const SESSION_KEY = "aroma_admin_session";
+
 export default function Admin() {
   const [password, setPassword] = useState("");
-  const [submitted, setSubmitted] = useState("");
+  const [submitted, setSubmitted] = useState(() => sessionStorage.getItem(SESSION_KEY) ?? "");
   const [inputError, setInputError] = useState("");
 
   const { data, isLoading, isError } = useQuery<Inquiry[]>({
@@ -52,10 +54,12 @@ export default function Admin() {
       return;
     }
     setInputError("");
+    sessionStorage.setItem(SESSION_KEY, password);
     setSubmitted(password);
   };
 
   const handleLogout = () => {
+    sessionStorage.removeItem(SESSION_KEY);
     setSubmitted("");
     setPassword("");
   };
