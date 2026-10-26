@@ -7,6 +7,7 @@ import {
   KeyRound, Layers3, LoaderCircle, LockKeyhole, LogOut, Plus, Send, ShieldAlert,
   UserRound, UserRoundCheck, UserRoundX, Users, X,
 } from "lucide-react";
+import { getLmsPostLoginPath } from "@shared/lms-auth-routing";
 import {
   useAdminAuditLogs, useAdminCertificates, useAdminCourseReports, useAdminCourses, useAdminEnrollments, useAdminInvitations, useAdminOverview, useAdminTrainerAssignments, useAdminUsers, useAssignLmsTrainer, useCourseOutline, useCreateAdminEnrollment, useCreateLmsCourse,
   useCreateManagedLiveSession,
@@ -122,14 +123,13 @@ export function LearnLoginPage() {
 
   useEffect(() => {
     if (!session.data) return;
-    const destination = session.data.roles.includes("admin") ? "/lms-admin" : session.data.roles.includes("trainer") && !session.data.roles.includes("student") ? "/trainer" : "/learn/dashboard";
-    setLocation(destination);
+    setLocation(getLmsPostLoginPath(session.data.roles));
   }, [session.data, setLocation]);
   const signIn = (event: FormEvent) => {
     event.preventDefault();
     setFormError("");
     login.mutate({ phone: phone.trim(), password }, {
-      onSuccess: (user) => setLocation(user.roles.includes("admin") ? "/lms-admin" : user.roles.includes("trainer") && !user.roles.includes("student") ? "/trainer" : "/learn/dashboard"),
+      onSuccess: (user) => setLocation(getLmsPostLoginPath(user.roles)),
       onError: (error) => setFormError(niceError(error, "Phone number or password is incorrect.")),
     });
   };
