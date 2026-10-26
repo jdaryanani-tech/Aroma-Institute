@@ -82,7 +82,8 @@ The Home page (`client/src/pages/Home.tsx`) is composed of these sections in ord
 ## LMS implementation status
 
 - LMS routes use the existing Express server and PostgreSQL database. LMS sessions are stored in the `sessions` table with HttpOnly, SameSite cookies and role checks on protected API routes.
-- The `/learn` login screen is present, but OTP request and verification are intentionally disabled. The project contains no n8n OTP contract, endpoint, or verification mechanism yet; the API returns `503` and does not send a code or create a session.
+- The `/learn` login is wired to the draft contract in `docs/n8n-otp-contract.md`. OTP remains disabled and the API returns `503` until the institute implements the n8n send/verify webhook and configures `N8N_OTP_WEBHOOK_URL` plus `N8N_OTP_WEBHOOK_TOKEN`; no code is sent and no session is created while either setting is missing or invalid.
+- The institute's current n8n automation handles counselling inquiries and appointment bookings. Add the OTP branch to that automation, following the documented request/verification contract.
 - The initial UI includes student dashboard/course learning and assessment attempts, certificate status/review requests, a trainer course outline and assessment editor, and admin course/invitation/certificate-review workflows. More account, roster, reporting, live-session, notification, and settings screens remain.
 - Course modules, chapters, lessons, and assessments are stored in PostgreSQL. Resource metadata is modeled, but persistent resource upload/download storage is not connected.
 - Approved certificates can be rendered as a branded PDF and are protected by the student/admin authorization check.

@@ -16,6 +16,13 @@ export interface OtpStatus {
   message: string;
 }
 
+export interface OtpRequestResult {
+  challengeId: string;
+  expiresAt: string;
+  resendAfterSeconds: number;
+  message: string;
+}
+
 export interface StudentCourseSummary {
   enrollmentId: number;
   courseId: number;
@@ -161,14 +168,14 @@ export function useLmsSession() {
 export function useRequestLmsOtp() {
   return useMutation({
     mutationFn: (phone: string) =>
-      requestJson<{ message: string }>("POST", "/api/lms/auth/otp/request", { phone }),
+      requestJson<OtpRequestResult>("POST", "/api/lms/auth/otp/request", { phone }),
   });
 }
 
 export function useVerifyLmsOtp() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { phone: string; code: string }) =>
+    mutationFn: (input: { phone: string; challengeId: string; code: string }) =>
       requestJson<LmsUser>("POST", "/api/lms/auth/otp/verify", input),
     onSuccess: (user) => queryClient.setQueryData(["/api/lms/auth/me"], user),
   });

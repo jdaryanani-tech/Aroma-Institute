@@ -79,8 +79,22 @@ export function LearnLoginPage() {
   const [mode, setMode] = useState<"phone" | "verify">("phone");
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
+  const [challengeId, setChallengeId] = useState("");
+  const [resendAvailableAt, setResendAvailableAt] = useState<number | null>(null);
+  const [secondsUntilResend, setSecondsUntilResend] = useState(0);
   const [formError, setFormError] = useState("");
   const otpAvailable = Boolean(otpStatus.data?.available);
+
+  useEffect(() => {
+    if (!resendAvailableAt) {
+      setSecondsUntilResend(0);
+      return;
+    }
+    const update = () => setSecondsUntilResend(Math.max(0, Math.ceil((resendAvailableAt - Date.now()) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendAvailableAt]);
 
   useEffect(() => {
     if (!session.data) return;
@@ -90,11 +104,24 @@ export function LearnLoginPage() {
   const sendOtp = (event: FormEvent) => {
     event.preventDefault(); setFormError("");
     if (!otpAvailable) return;
-    requestOtp.mutate(phone.trim(), { onSuccess: () => setMode("verify"), onError: (error) => setFormError(niceError(error, "We couldn't request a code. Please try again.")) });
+    requestOtp.mutate(phone.trim(), { onSuccess: (result) => {
+      setChallengeId(result.challengeId);
+      setResendAvailableAt(Date.now() + result.resendAfterSeconds * 1000);
+      setMode("verify");
+      setCode("");
+    }, onError: (error) => setFormError(niceError(error, "We couldn't request a code. Please try again.")) });
+  };
+  const resendOtp = () => {
+    setFormError("");
+    requestOtp.mutate(phone.trim(), { onSuccess: (result) => {
+      setChallengeId(result.challengeId);
+      setResendAvailableAt(Date.now() + result.resendAfterSeconds * 1000);
+      setCode("");
+    }, onError: (error) => setFormError(niceError(error, "We couldn't request a new code yet.")) });
   };
   const verify = (event: FormEvent) => {
     event.preventDefault(); setFormError("");
-    verifyOtp.mutate({ phone: phone.trim(), code: code.trim() }, {
+    verifyOtp.mutate({ phone: phone.trim(), challengeId, code: code.trim() }, {
       onSuccess: (user) => setLocation(user.roles.includes("admin") ? "/lms-admin" : user.roles.includes("trainer") && !user.roles.includes("student") ? "/trainer" : "/learn/dashboard"),
       onError: (error) => setFormError(niceError(error, "That code could not be verified. Check it and try again.")),
     });
@@ -121,9 +148,10 @@ export function LearnLoginPage() {
         </button>
         {requestOtp.isError && <p className="lms-help" role="alert">{niceError(requestOtp.error, "Request failed.")}</p>}
       </form> : <form onSubmit={verify}>
-        <div className="lms-field"><label htmlFor="lms-otp">One-time code</label><input id="lms-otp" className="lms-input lms-mono" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code} onChange={e => setCode(e.target.value)} required /></div>
-        <button className="lms-button" type="submit" disabled={!code.trim() || verifyOtp.isPending} style={{ width: "100%" }}>{verifyOtp.isPending ? "Verifying…" : "Verify and continue"}</button>
-        <button className="lms-switch" type="button" onClick={() => { setMode("phone"); setCode(""); setFormError(""); }}>Use a different phone number</button>
+        <div className="lms-field"><label htmlFor="lms-otp">Six-digit WhatsApp code</label><input id="lms-otp" className="lms-input lms-mono" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} pattern="[0-9]{6}" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} required /></div>
+        <button className="lms-button" type="submit" disabled={!challengeId || code.length !== 6 || verifyOtp.isPending} style={{ width: "100%" }}>{verifyOtp.isPending ? "Verifying…" : "Verify and continue"}</button>
+        <button className="lms-switch" type="button" disabled={requestOtp.isPending || secondsUntilResend > 0} onClick={resendOtp}>{requestOtp.isPending ? "Requesting another code…" : secondsUntilResend > 0 ? `Resend code in ${secondsUntilResend}s` : "Resend code"}</button>
+        <button className="lms-switch" type="button" onClick={() => { setMode("phone"); setCode(""); setChallengeId(""); setFormError(""); }}>Use a different phone number</button>
       </form>}
       <div className="lms-footer-note">
         Invitation codes are redeemed after you verify your phone number.
