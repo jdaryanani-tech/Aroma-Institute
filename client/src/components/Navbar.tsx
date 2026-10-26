@@ -74,6 +74,15 @@ export default function Navbar() {
           </div>
 
           <div className="flex items-center gap-3">
+            <a
+              href="/learn"
+              className={`hidden md:inline-flex items-center rounded-md px-3 py-2 text-sm font-semibold transition-colors ${
+                scrolled ? "text-foreground hover:text-primary" : "text-white/80 hover:text-white"
+              }`}
+              data-testid="link-learning-portal"
+            >
+              LEAP Portal
+            </a>
             <Button
               size="sm"
               onClick={() => scrollTo("#contact")}
@@ -106,6 +115,13 @@ export default function Navbar() {
                     </button>
                   ))}
                   <div className="mt-4 px-4">
+                    <a
+                      href="/learn"
+                      className="mb-3 flex h-10 w-full items-center justify-center rounded-md border border-border text-sm font-semibold text-foreground"
+                      data-testid="link-learning-portal-mobile"
+                    >
+                      LEAP Learning Portal
+                    </a>
                     <Button
                       className="w-full"
                       onClick={() => scrollTo("#contact")}

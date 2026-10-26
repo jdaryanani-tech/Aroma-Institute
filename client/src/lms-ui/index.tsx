@@ -1,0 +1,485 @@
+import "./lms.css";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Link, useLocation, useParams } from "wouter";
+import {
+  ArrowDownRight, ArrowLeft, ArrowRight, BookOpen, CalendarDays, Check, CheckCircle2,
+  CircleAlert, ClipboardCheck, Clock3, Coffee, GraduationCap, KeyRound, Layers3, LoaderCircle,
+  LockKeyhole, LogOut, Plus, ShieldAlert, X,
+} from "lucide-react";
+import {
+  useAdminCertificates, useAdminCourses, useAdminInvitations, useAdminOverview, useCourseOutline, useCreateLmsCourse,
+  useCreateLmsInvitation, useLmsLogout, useLmsOtpStatus, useLmsSession, useMarkLessonComplete,
+  useRedeemLmsInvitation, useRequestLmsOtp, useRevokeLmsInvitation, useSetLmsCourseStatus,
+  useRequestCertificateReview, useStudentAssessment, useStudentCertificates, useStudentDashboard,
+  useReviewLmsCertificate, useSubmitLmsAssessment, useTrainerCourses, useVerifyLmsOtp,
+} from "@/hooks/use-lms";
+import type { CourseOutline, LmsCourse, LmsInvitation, LmsUser } from "@/hooks/use-lms";
+
+type IconComponent = typeof Coffee;
+function Icon({ icon: Symbol, size = 18 }: { icon: IconComponent; size?: number }) {
+  return <Symbol size={size} strokeWidth={1.8} aria-hidden="true" />;
+}
+function BrandHeader({ user, onLogout }: { user?: LmsUser | null; onLogout?: () => void }) {
+  return <header className="lms-header"><div className="lms-shell lms-header-inner">
+    <Link href="/learn" className="lms-brand" aria-label="Aroma LEAP learning home">
+      <span className="lms-mark">A</span><span><span className="lms-brand-name">Aroma LEAP</span><span className="lms-brand-sub">Learning space</span></span>
+    </Link>
+    <div className="lms-header-right">
+      {user?.displayName && <span className="lms-user-chip">{user.displayName}</span>}
+      {onLogout && <button className="lms-button lms-button-secondary lms-button-sm" onClick={onLogout}><Icon icon={LogOut} size={15} /> Sign out</button>}
+    </div>
+  </div></header>;
+}
+function PageFrame({ children, user, onLogout }: { children: ReactNode; user?: LmsUser | null; onLogout?: () => void }) {
+  return <div className="lms"><BrandHeader user={user} onLogout={onLogout} /><main className="lms-shell lms-main lms-fade-in">{children}</main></div>;
+}
+function ErrorState({ message, retry }: { message: string; retry: () => void }) {
+  return <div className="lms-alert lms-alert-error" role="alert"><Icon icon={CircleAlert} /><span>{message}<br /><button className="lms-switch" onClick={retry}>Try again</button></span></div>;
+}
+function LoadingRows({ count = 3 }: { count?: number }) {
+  return <div className="lms-space" aria-label="Loading content" aria-busy="true">{Array.from({ length: count }, (_, i) => <div key={i} className="lms-skeleton" style={{ height: i === 0 ? 88 : 58 }} />)}</div>;
+}
+function EmptyState({ icon = BookOpen, title, detail, action }: { icon?: IconComponent; title: string; detail: string; action?: ReactNode }) {
+  return <div className="lms-empty"><div className="lms-empty-mark"><Icon icon={icon} size={20} /></div><h3>{title}</h3><p className="lms-muted">{detail}</p>{action}</div>;
+}
+function useLogoutAction() {
+  const logout = useLmsLogout();
+  const [, setLocation] = useLocation();
+  return () => logout.mutate(undefined, { onSuccess: () => setLocation("/learn") });
+}
+function formatDate(value: string, withTime = false) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, withTime ? { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric", year: "numeric" }).format(date);
+}
+function niceError(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+function SessionGuard({ children, allow }: { children: (user: LmsUser) => ReactNode; allow: string }) {
+  const session = useLmsSession();
+  const [, setLocation] = useLocation();
+  useEffect(() => {
+    if (!session.isLoading && !session.isError && !session.data) setLocation("/learn");
+  }, [session.isLoading, session.isError, session.data, setLocation]);
+  if (session.isLoading) return <div className="lms"><BrandHeader /><main className="lms-shell lms-main"><LoadingRows /></main></div>;
+  if (session.isError) return <div className="lms"><BrandHeader /><main className="lms-shell lms-main"><ErrorState message={niceError(session.error, "We could not check your sign-in status.")} retry={() => void session.refetch()} /></main></div>;
+  if (!session.data) {
+    return <div className="lms"><BrandHeader /><main className="lms-shell lms-main"><p>Taking you to sign in…</p></main></div>;
+  }
+  if (!session.data.roles.includes(allow as LmsUser["roles"][number])) return <PageFrame user={session.data}><EmptyState icon={ShieldAlert} title="This space is not assigned to your account" detail="Ask your Aroma Institute coordinator if you need access to this area." /></PageFrame>;
+  return <>{children(session.data)}</>;
+}
+
+export function LearnLoginPage() {
+  const otpStatus = useLmsOtpStatus();
+  const session = useLmsSession();
+  const requestOtp = useRequestLmsOtp();
+  const verifyOtp = useVerifyLmsOtp();
+  const [, setLocation] = useLocation();
+  const [mode, setMode] = useState<"phone" | "verify">("phone");
+  const [phone, setPhone] = useState("");
+  const [code, setCode] = useState("");
+  const [formError, setFormError] = useState("");
+  const otpAvailable = Boolean(otpStatus.data?.available);
+
+  useEffect(() => {
+    if (!session.data) return;
+    const destination = session.data.roles.includes("admin") ? "/lms-admin" : session.data.roles.includes("trainer") && !session.data.roles.includes("student") ? "/trainer" : "/learn/dashboard";
+    setLocation(destination);
+  }, [session.data, setLocation]);
+  const sendOtp = (event: FormEvent) => {
+    event.preventDefault(); setFormError("");
+    if (!otpAvailable) return;
+    requestOtp.mutate(phone.trim(), { onSuccess: () => setMode("verify"), onError: (error) => setFormError(niceError(error, "We couldn't request a code. Please try again.")) });
+  };
+  const verify = (event: FormEvent) => {
+    event.preventDefault(); setFormError("");
+    verifyOtp.mutate({ phone: phone.trim(), code: code.trim() }, {
+      onSuccess: (user) => setLocation(user.roles.includes("admin") ? "/lms-admin" : user.roles.includes("trainer") && !user.roles.includes("student") ? "/trainer" : "/learn/dashboard"),
+      onError: (error) => setFormError(niceError(error, "That code could not be verified. Check it and try again.")),
+    });
+  };
+  return <div className="lms lms-auth-wrap">
+    <aside className="lms-auth-aside">
+      <Link href="/learn" className="lms-brand" style={{ color: "inherit" }}><span className="lms-mark" style={{ background: "#c49b57", color: "#37261a" }}>A</span><span><span className="lms-brand-name">Aroma LEAP</span><span className="lms-brand-sub" style={{ color: "rgba(255,247,233,.58)" }}>Learning space</span></span></Link>
+      <div><div className="lms-eyebrow">Practice becomes profession</div><h1>Learn the craft.<br />Serve with care.</h1><p>Your training ground for the details that make hospitality memorable — from the first dial-in to the final guest goodbye.</p></div>
+      <div className="lms-auth-caption">Aroma Institute · Café & Hospitality Management</div>
+    </aside>
+    <main className="lms-auth-main"><div className="lms-auth-form">
+      <div className="lms-eyebrow">Student access</div>
+      <h2>{mode === "phone" ? "Welcome to your learning space" : "Enter your one-time code"}</h2>
+      <p>{mode === "phone" ? "Use the phone number linked to your Aroma LEAP enrollment." : `We sent a code to ${phone}.`}</p>
+      {session.isError && <ErrorState message={niceError(session.error, "Unable to check sign-in status.")} retry={() => void session.refetch()} />}
+      {otpStatus.isLoading ? <div className="lms-alert lms-alert-warning" role="status"><Icon icon={LoaderCircle} /> Checking sign-in availability…</div> :
+        otpStatus.isError ? <ErrorState message={niceError(otpStatus.error, "Sign-in availability could not be checked.")} retry={() => void otpStatus.refetch()} /> :
+        !otpAvailable ? <div className="lms-alert lms-alert-warning" role="status"><Icon icon={LockKeyhole} /><span><strong>Phone sign-in is not configured yet.</strong><br />{otpStatus.data?.message || "The one-time code service is currently unavailable. Sending is disabled; please contact your institute coordinator."}</span></div> : null}
+      {formError && <div className={`lms-alert ${formError.startsWith("Invitation accepted") ? "lms-alert-success" : "lms-alert-error"}`} role="status">{formError}</div>}
+      {mode === "phone" ? <form onSubmit={sendOtp}>
+        <div className="lms-field"><label htmlFor="lms-phone">Phone number</label><input id="lms-phone" className="lms-input" type="tel" autoComplete="tel" placeholder="+91 98765 43210" value={phone} onChange={e => setPhone(e.target.value)} required /></div>
+        <button className="lms-button" type="submit" disabled={!otpAvailable || !phone.trim() || requestOtp.isPending} style={{ width: "100%" }}>
+          {requestOtp.isPending ? <><Icon icon={LoaderCircle} /> Requesting code…</> : <>Send one-time code <Icon icon={ArrowRight} size={16} /></>}
+        </button>
+        {requestOtp.isError && <p className="lms-help" role="alert">{niceError(requestOtp.error, "Request failed.")}</p>}
+      </form> : <form onSubmit={verify}>
+        <div className="lms-field"><label htmlFor="lms-otp">One-time code</label><input id="lms-otp" className="lms-input lms-mono" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code} onChange={e => setCode(e.target.value)} required /></div>
+        <button className="lms-button" type="submit" disabled={!code.trim() || verifyOtp.isPending} style={{ width: "100%" }}>{verifyOtp.isPending ? "Verifying…" : "Verify and continue"}</button>
+        <button className="lms-switch" type="button" onClick={() => { setMode("phone"); setCode(""); setFormError(""); }}>Use a different phone number</button>
+      </form>}
+      <div className="lms-footer-note">
+        Invitation codes are redeemed after you verify your phone number.
+      </div>
+    </div></main>
+  </div>;
+}
+
+export function StudentDashboardPage() {
+  return <SessionGuard allow="student">{user => <StudentDashboardContent user={user} />}</SessionGuard>;
+}
+function StudentDashboardContent({ user }: { user: LmsUser }) {
+  const dashboard = useStudentDashboard(true);
+  const certificates = useStudentCertificates(true);
+  const requestCertificateReview = useRequestCertificateReview();
+  const redeem = useRedeemLmsInvitation();
+  const logout = useLogoutAction();
+  const [invitationCode, setInvitationCode] = useState("");
+  const [invitationMessage, setInvitationMessage] = useState("");
+  const [certificateMessage, setCertificateMessage] = useState("");
+  const redeemInvitation = (event: FormEvent) => {
+    event.preventDefault();
+    setInvitationMessage("");
+    redeem.mutate(invitationCode.trim(), {
+      onSuccess: (result) => {
+        setInvitationCode("");
+        setInvitationMessage(`Invitation accepted. You are enrolled in ${result.course.title}.`);
+      },
+      onError: (error) => setInvitationMessage(niceError(error, "This invitation could not be redeemed.")),
+    });
+  };
+  if (dashboard.isLoading) return <div className="lms"><BrandHeader user={user} onLogout={logout} /><main className="lms-shell lms-main"><LoadingRows /></main></div>;
+  if (dashboard.isError) return <PageFrame user={user} onLogout={logout}><ErrorState message={niceError(dashboard.error, "Your learning dashboard could not be loaded.")} retry={() => void dashboard.refetch()} /></PageFrame>;
+  const data = dashboard.data!;
+  const totalLessons = data.courses.reduce((sum, c) => sum + c.totalLessons, 0);
+  const completed = data.courses.reduce((sum, c) => sum + c.completedLessons, 0);
+  const sessions = [...data.upcomingSessions].sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
+  return <PageFrame user={user} onLogout={logout}>
+    <div className="lms-page-head"><div><div className="lms-eyebrow">Your practice, in progress</div><h1>Good to have you here{data.student.name ? `, ${data.student.name.split(" ")[0]}` : ""}.</h1><p className="lms-subtitle">Pick up where you left off, and make space for your next session.</p></div><div className="lms-tag">Aroma LEAP / Student</div></div>
+    <div className="lms-stat-grid">
+      <div className="lms-stat"><span>Enrolled courses</span><strong>{data.courses.length}</strong><span>In your learning plan</span></div>
+      <div className="lms-stat"><span>Lessons completed</span><strong>{completed}<small style={{ font: "14px 'DM Sans'", color: "var(--lms-muted)" }}> / {totalLessons}</small></strong><span>Across your courses</span></div>
+      <div className="lms-stat"><span>Live sessions</span><strong>{sessions.length}</strong><span>Coming up</span></div>
+      <div className="lms-stat"><span>Learning focus</span><strong style={{ fontSize: 21 }}>Hands-on</strong><span>Built for the floor</span></div>
+    </div>
+    <div className="lms-grid lms-grid-2">
+      <section>
+        <div className="lms-panel-head"><div><div className="lms-eyebrow">Your courses</div><h2>Keep your momentum</h2></div></div>
+        {data.courses.length ? <div className="lms-grid lms-grid-courses">{data.courses.map(course => <article key={course.enrollmentId} className="lms-panel lms-course-card">
+          <div className="lms-course-band" /><div className="lms-course-body">
+            <div className="lms-course-meta"><span className="lms-tag">Course</span><span className="lms-muted" style={{ fontSize: 11 }}>{course.completedLessons}/{course.totalLessons} lessons</span></div>
+            <h3>{course.title}</h3><p className="lms-muted" style={{ fontSize: 13, minHeight: 42 }}>{course.description}</p>
+            <div className="lms-progress" role="progressbar" aria-label={`${course.title} progress`} aria-valuenow={course.progressPercent} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.min(100, Math.max(0, course.progressPercent))}%` }} /></div>
+            <div className="lms-progress-row"><span>{course.progressPercent}% complete</span><span>{course.continueLesson ? "Next lesson ready" : "Course outline"}</span></div>
+            <Link className="lms-course-link" href={`/learn/courses/${course.courseId}`}>{course.continueLesson ? `Continue: ${course.continueLesson.title}` : "Open course"} <Icon icon={ArrowRight} size={14} /></Link>
+          </div>
+        </article>)}</div> : <div className="lms-panel"><EmptyState title="Your course list is waiting" detail="Enter the invitation code from your coordinator to enrol in a course." icon={GraduationCap} />
+          <form onSubmit={redeemInvitation} style={{ maxWidth: 480, margin: "0 auto" }}>
+            <div className="lms-field"><label htmlFor="student-invitation">Invitation code</label><input id="student-invitation" className="lms-input lms-mono" autoComplete="off" value={invitationCode} onChange={event => setInvitationCode(event.target.value)} required /></div>
+            {invitationMessage && <div className={`lms-alert ${redeem.isSuccess ? "lms-alert-success" : "lms-alert-error"}`} role="status" style={{ marginBottom: 14 }}>{invitationMessage}</div>}
+            <button className="lms-button" type="submit" disabled={!invitationCode.trim() || redeem.isPending}>{redeem.isPending ? "Checking invitation…" : "Redeem invitation"} <Icon icon={KeyRound} size={15} /></button>
+          </form>
+        </div>}
+      </section>
+      <aside className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">On the calendar</div><h2>Upcoming sessions</h2></div><Icon icon={CalendarDays} /></div>
+        {sessions.length ? sessions.map(session => {
+          const dt = new Date(session.startsAt);
+          return <article className="lms-session" key={session.id}><div className="lms-date-block"><b>{Number.isNaN(dt.getTime()) ? "—" : dt.getDate()}</b><span>{Number.isNaN(dt.getTime()) ? "TBC" : new Intl.DateTimeFormat(undefined, { month: "short" }).format(dt)}</span></div><div><div className="lms-session-title">{session.title}</div><div className="lms-session-detail">{session.topic} · {formatDate(session.startsAt, true)}</div><div className="lms-session-detail">{session.courseTitle}</div>{session.meetUrl && <a className="lms-course-link" href={session.meetUrl} target="_blank" rel="noreferrer" style={{ marginTop: 7 }}>Open session <Icon icon={ArrowDownRight} size={13} /></a>}</div></article>;
+        }) : <EmptyState icon={CalendarDays} title="No sessions scheduled" detail="Your trainer's upcoming live sessions will show here." />}
+      </aside>
+    </div>
+    <section className="lms-panel lms-certificate-panel">
+      <div className="lms-panel-head"><div><div className="lms-eyebrow">Course completion</div><h2>Certificates</h2></div><Icon icon={GraduationCap} /></div>
+      {certificates.isLoading ? <LoadingRows count={2} /> : certificates.isError ? <ErrorState message={niceError(certificates.error, "Certificate status could not be loaded.")} retry={() => void certificates.refetch()} /> : !certificates.data?.length ? <EmptyState icon={GraduationCap} title="No certificate records yet" detail="Certificate status will appear after you enrol in a course." /> :
+        <div className="lms-certificate-list">{certificates.data.map(certificate => <article className="lms-certificate-row" key={certificate.enrollmentId}>
+          <div><strong>{certificate.courseTitle}</strong><div className="lms-help">{certificate.status.replaceAll("_", " ")}</div>{certificate.reviewNote && <div className="lms-help">{certificate.reviewNote}</div>}{certificate.certificateNumber && <div className="lms-help lms-mono">{certificate.certificateNumber}</div>}</div>
+          <div className="lms-row">
+            {certificate.status === "eligible" && <button className="lms-button lms-button-secondary lms-button-sm" disabled={requestCertificateReview.isPending} onClick={() => { setCertificateMessage(""); requestCertificateReview.mutate(certificate.enrollmentId, { onSuccess: () => setCertificateMessage("Your certificate is now waiting for administrator review."), onError: error => setCertificateMessage(niceError(error, "The review request could not be submitted.")) }); }}>Request review</button>}
+            {certificate.status === "approved" && certificate.certificateId && <a className="lms-button lms-button-sm" href={`/api/lms/certificates/${certificate.certificateId}/pdf`}>Download PDF <Icon icon={ArrowDownRight} size={14} /></a>}
+          </div>
+        </article>)}</div>}
+      {certificateMessage && <div className={`lms-alert ${requestCertificateReview.isError ? "lms-alert-error" : "lms-alert-success"}`} role="status" style={{ marginTop: 14 }}>{certificateMessage}</div>}
+      {requestCertificateReview.isError && !certificateMessage && <div className="lms-alert lms-alert-error" role="alert" style={{ marginTop: 14 }}>{niceError(requestCertificateReview.error, "The review request could not be submitted.")}</div>}
+    </section>
+  </PageFrame>;
+}
+
+function getYoutubeEmbed(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return null;
+    let id = "";
+    if (parsed.hostname === "youtu.be" || parsed.hostname === "www.youtu.be") id = parsed.pathname.split("/").filter(Boolean)[0] || "";
+    else if (parsed.hostname === "youtube.com" || parsed.hostname === "www.youtube.com" || parsed.hostname === "m.youtube.com") {
+      if (parsed.pathname === "/watch") id = parsed.searchParams.get("v") || "";
+      else if (/^\/(embed|shorts)\/[A-Za-z0-9_-]+/.test(parsed.pathname)) id = parsed.pathname.split("/")[2] || "";
+    }
+    return /^[A-Za-z0-9_-]{11}$/.test(id) ? `https://www.youtube-nocookie.com/embed/${id}` : null;
+  } catch { return null; }
+}
+type Lesson = CourseOutline["modules"][number]["chapters"][number]["lessons"][number];
+function allLessons(outline: CourseOutline): Lesson[] {
+  return outline.modules.flatMap(module => module.chapters.flatMap(chapter => chapter.lessons));
+}
+export function CoursePage() {
+  return <SessionGuard allow="student">{user => <CoursePageContent user={user} />}</SessionGuard>;
+}
+
+function CoursePageContent({ user }: { user: LmsUser }) {
+  const params = useParams<{ courseId: string }>();
+  const id = Number(params.courseId);
+  const outlineQuery = useCourseOutline(Number.isSafeInteger(id) && id > 0 ? id : null);
+  const mark = useMarkLessonComplete();
+  const [assessmentChapterId, setAssessmentChapterId] = useState<number | null>(null);
+  const assessmentQuery = useStudentAssessment(assessmentChapterId);
+  const assessmentSubmit = useSubmitLmsAssessment();
+  const [answers, setAnswers] = useState<Record<string, number>>({});
+  const [latestAttempt, setLatestAttempt] = useState<{
+    scorePercent: number;
+    passed: boolean;
+    attemptNumber: number;
+    explanations: { questionId: number; explanation: string | null }[];
+  } | null>(null);
+  const logout = useLogoutAction();
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  if (!Number.isSafeInteger(id) || id <= 0) return <PageFrame><ErrorState message="This course address is not valid." retry={() => window.history.back()} /></PageFrame>;
+  if (outlineQuery.isLoading) return <div className="lms"><BrandHeader user={user} onLogout={logout} /><main className="lms-shell lms-main"><LoadingRows count={4} /></main></div>;
+  if (outlineQuery.isError) return <PageFrame user={user} onLogout={logout}><ErrorState message={niceError(outlineQuery.error, "The course outline could not be loaded.")} retry={() => void outlineQuery.refetch()} /></PageFrame>;
+  const outline = outlineQuery.data!;
+  const lessons = allLessons(outline);
+  const availableLessons = lessons.filter(item => !item.locked);
+  const selected = availableLessons.find(item => item.id === selectedId) || availableLessons.find(item => !item.completed) || availableLessons[0] || lessons[0] || null;
+  const video = selected ? getYoutubeEmbed(selected.youtubeUrl) : null;
+  const done = lessons.filter(item => item.completed).length;
+  const toggleComplete = (lesson: Lesson) => mark.mutate({ lessonId: lesson.id, completed: !lesson.completed });
+  const submitAssessment = (event: FormEvent) => {
+    event.preventDefault();
+    const assessment = assessmentQuery.data?.assessment;
+    if (!assessment) return;
+    assessmentSubmit.mutate({ assessmentId: assessment.id, answers }, {
+      onSuccess: result => setLatestAttempt(result),
+    });
+  };
+  const openAssessment = (chapterId: number) => {
+    setAssessmentChapterId(chapterId);
+    setAnswers({});
+    setLatestAttempt(null);
+  };
+  return <PageFrame user={user} onLogout={logout}>
+    <div className="lms-page-head"><div><Link href="/learn/dashboard" className="lms-course-link" style={{ marginBottom: 12 }}><Icon icon={ArrowLeft} size={14} /> Back to learning</Link><div className="lms-eyebrow">Course workspace</div><h1>{outline.course.title}</h1><p className="lms-subtitle">{outline.course.description}</p></div><span className="lms-tag">{done} / {lessons.length} lessons complete</span></div>
+    {outline.modules.length === 0 || lessons.length === 0 ? <EmptyState title="Course content is being prepared" detail="Your trainer will add the learning outline here." /> :
+      <div className="lms-course-layout">
+        <section className="lms-panel">
+          {selected ? <><div className="lms-panel-head"><div><div className="lms-eyebrow">Now learning</div><h2>{selected.title}</h2></div>{selected.durationMinutes && <span className="lms-tag"><Icon icon={Clock3} size={12} /> {selected.durationMinutes} min</span>}</div>
+            {video ? <div className="lms-video"><iframe title={`Video lesson: ${selected.title}`} src={video} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen /></div> :
+              <div className="lms-empty" style={{ marginBottom: 18 }}><div className="lms-empty-mark"><Icon icon={BookOpen} /></div><h3>Lesson materials</h3><p className="lms-muted">{selected.youtubeUrl ? "The lesson video link is not a valid secure YouTube URL." : "There is no video attached to this lesson. Use the lesson notes below and mark your practice when complete."}</p></div>}
+            {selected.description && <p style={{ marginTop: 18, color: "var(--lms-muted)" }}>{selected.description}</p>}
+            {selected.requiredForAssessment && <p className="lms-help">Required for assessment</p>}
+            <button className={`lms-button ${selected.completed ? "lms-button-secondary" : ""}`} onClick={() => toggleComplete(selected)} disabled={mark.isPending || selected.locked} aria-pressed={selected.completed}>
+              {selected.locked ? <><Icon icon={LockKeyhole} /> Locked</> : mark.isPending ? "Saving progress…" : selected.completed ? <><Icon icon={CheckCircle2} /> Completed — mark as incomplete</> : <><Icon icon={Check} /> Mark lesson complete</>}
+            </button>
+            {mark.isError && <p className="lms-help" role="alert">{niceError(mark.error, "Progress could not be saved.")}</p>}
+          </> : <EmptyState title="No lessons yet" detail="This course outline has no lessons to display." />}
+        </section>
+        <aside className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Course outline</div><h2>Lessons</h2></div><span className="lms-tag">{done}/{lessons.length}</span></div>
+          <div className="lms-lesson-list">{outline.modules.map(module => <div key={module.id} className="lms-module"><div className="lms-module-title"><span>{module.title}</span><span className="lms-muted">{module.chapters.reduce((n, c) => n + c.lessons.length, 0)}</span></div>{module.chapters.map(chapter => <div key={chapter.id} style={{ marginBottom: 9 }}><div className="lms-chapter-row"><div className="lms-overline">{chapter.title}{chapter.locked && <span className="lms-muted"> · Locked</span>}</div><button type="button" className="lms-text-button" disabled={chapter.locked} onClick={() => openAssessment(chapter.id)}><Icon icon={ClipboardCheck} size={13} /> Assessment</button></div>{chapter.lessons.map(lesson => <div key={lesson.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <button type="button" className="lms-lesson" aria-current={selected?.id === lesson.id ? "true" : undefined} onClick={() => setSelectedId(lesson.id)} disabled={lesson.locked}><span className={`lms-check ${lesson.completed ? "is-done" : ""}`}>{lesson.locked ? <Icon icon={LockKeyhole} size={11} /> : lesson.completed && <Icon icon={Check} size={11} />}</span><span><span className="lms-lesson-name">{lesson.title}</span><span className="lms-lesson-time">{lesson.locked ? "Complete previous chapter requirements to unlock" : `${lesson.durationMinutes ? `${lesson.durationMinutes} min` : "Lesson"}${lesson.requiredForAssessment ? " · Assessment required" : ""}`}</span></span></button>
+            <button className="lms-icon-button" type="button" aria-label={`${lesson.completed ? "Mark incomplete" : "Mark complete"}: ${lesson.title}`} title={lesson.completed ? "Mark incomplete" : "Mark complete"} disabled={mark.isPending || lesson.locked} onClick={() => toggleComplete(lesson)} style={{ width: 30, height: 30, flex: "none" }}><Icon icon={lesson.locked ? LockKeyhole : lesson.completed ? CheckCircle2 : Check} size={14} /></button>
+          </div>)}</div>)}</div>)}</div>
+        </aside>
+      </div>}
+      {assessmentChapterId !== null && <section className="lms-panel lms-assessment-panel">
+        <div className="lms-panel-head"><div><div className="lms-eyebrow">Chapter assessment</div><h2>{assessmentQuery.data?.assessment.title ?? "Assessment"}</h2></div><button className="lms-button lms-button-secondary lms-button-sm" onClick={() => setAssessmentChapterId(null)}>Close</button></div>
+        {assessmentQuery.isLoading ? <LoadingRows count={3} /> : assessmentQuery.isError ? <ErrorState message={niceError(assessmentQuery.error, "This assessment could not be loaded.")} retry={() => void assessmentQuery.refetch()} /> : assessmentQuery.data && <>
+          <p className="lms-muted">{assessmentQuery.data.assessment.instructions || "Choose one answer for each question. You need 100% to pass, and you can retry as often as needed."}</p>
+          <div className="lms-assessment-summary"><span>{assessmentQuery.data.assessment.questionCount} questions</span><span>{assessmentQuery.data.attempts} attempts</span><span>{assessmentQuery.data.passed ? "Passed" : "Not passed yet"}</span></div>
+          {assessmentQuery.data.attemptHistory.length > 0 && <div className="lms-attempt-history"><strong>Recent attempts</strong>{assessmentQuery.data.attemptHistory.map(attempt => <div key={attempt.attemptNumber} className="lms-attempt-row"><span>Attempt {attempt.attemptNumber} · {formatDate(attempt.submittedAt, true)}</span><span className={attempt.passed ? "lms-result-pass" : "lms-result-fail"}>{attempt.scorePercent}% · {attempt.passed ? "Passed" : "Not passed"}</span></div>)}</div>}
+          <form onSubmit={submitAssessment} className="lms-assessment-form">
+            {assessmentQuery.data.questions.map((question, index) => <fieldset key={question.id} className="lms-question">
+              <legend><span className="lms-question-number">{index + 1}</span>{question.prompt}</legend>
+              <div className="lms-option-list">{question.options.map(option => <label key={option.id} className={`lms-assessment-option ${answers[String(question.id)] === option.id ? "is-selected" : ""}`}>
+                <input type="radio" name={`question-${question.id}`} checked={answers[String(question.id)] === option.id} onChange={() => setAnswers(current => ({ ...current, [String(question.id)]: option.id }))} />
+                <span>{option.label}</span>
+              </label>)}</div>
+            </fieldset>)}
+            {latestAttempt && <div className={`lms-alert ${latestAttempt.passed ? "lms-alert-success" : "lms-alert-warning"}`} role="status">
+              <Icon icon={latestAttempt.passed ? CheckCircle2 : CircleAlert} />
+              <span><strong>{latestAttempt.passed ? "Passed — 100%." : `Not passed — ${latestAttempt.scorePercent}%.`}</strong> Attempt {latestAttempt.attemptNumber}. {latestAttempt.passed ? "This chapter requirement is complete." : "You can review the material and try again."}</span>
+            </div>}
+            {latestAttempt && latestAttempt.explanations.length > 0 && <div className="lms-explanations"><strong>Review notes</strong>{latestAttempt.explanations.filter(item => item.explanation).map(item => <p key={item.questionId}>{item.explanation}</p>)}</div>}
+            {assessmentSubmit.isError && <div className="lms-alert lms-alert-error" role="alert">{niceError(assessmentSubmit.error, "Your answers could not be submitted.")}</div>}
+            <button className="lms-button" type="submit" disabled={assessmentSubmit.isPending || Object.keys(answers).length !== assessmentQuery.data.questions.length}>
+              {assessmentSubmit.isPending ? "Submitting…" : latestAttempt ? "Try again" : "Submit answers"} <Icon icon={ArrowRight} size={15} />
+            </button>
+          </form>
+        </>}
+      </section>}
+  </PageFrame>;
+}
+
+export function TrainerPage() {
+  return <SessionGuard allow="trainer">{user => <TrainerContent user={user} />}</SessionGuard>;
+}
+function TrainerContent({ user }: { user: LmsUser }) {
+  const courses = useTrainerCourses(true);
+  const logout = useLogoutAction();
+  if (courses.isLoading) return <div className="lms"><BrandHeader user={user} onLogout={logout} /><main className="lms-shell lms-main"><LoadingRows /></main></div>;
+  return <PageFrame user={user} onLogout={logout}>
+    <div className="lms-page-head"><div><div className="lms-eyebrow">Trainer workspace</div><h1>Teaching, with intention.</h1><p className="lms-subtitle">Your assigned Aroma LEAP courses are gathered here.</p></div><span className="lms-tag">Trainer</span></div>
+    {courses.isError ? <ErrorState message={niceError(courses.error, "Assigned courses could not be loaded.")} retry={() => void courses.refetch()} /> :
+      courses.data?.length ? <div className="lms-grid lms-grid-courses">{courses.data.map(course => <TrainerCourseCard key={course.id} course={course} />)}</div> :
+      <EmptyState icon={GraduationCap} title="No courses assigned yet" detail="When the institute assigns a course to you, it will appear here. There are no course-management actions available in this workspace yet." />}
+  </PageFrame>;
+}
+function TrainerCourseCard({ course }: { course: LmsCourse }) {
+  return <article className="lms-panel lms-course-card"><div className="lms-course-band" /><div className="lms-course-body"><div className="lms-course-meta"><span className={`lms-status lms-status-${course.status}`}>{course.status}</span><span className="lms-mono lms-muted" style={{ fontSize: 11 }}>{course.slug}</span></div><h3>{course.title}</h3><p className="lms-muted">{course.description}</p><Link className="lms-button lms-button-secondary lms-button-sm" href={`/manage/courses/${course.id}`}>Manage course outline <Icon icon={ArrowRight} size={14} /></Link></div></article>;
+}
+
+export function AdminPage() {
+  return <SessionGuard allow="admin">{user => <AdminContent user={user} />}</SessionGuard>;
+}
+function AdminContent({ user }: { user: LmsUser }) {
+  const overview = useAdminOverview(true);
+  const courses = useAdminCourses(true);
+  const invitations = useAdminInvitations(true);
+  const certificateReviews = useAdminCertificates(true);
+  const createCourse = useCreateLmsCourse();
+  const setStatus = useSetLmsCourseStatus();
+  const createInvitation = useCreateLmsInvitation();
+  const revokeInvitation = useRevokeLmsInvitation();
+  const reviewCertificate = useReviewLmsCertificate();
+  const logout = useLogoutAction();
+  const [courseDialog, setCourseDialog] = useState(false);
+  const [inviteDialog, setInviteDialog] = useState(false);
+  const [newCourse, setNewCourse] = useState<LmsCourse | null>(null);
+  const [oneTimeCode, setOneTimeCode] = useState<string | null>(null);
+  const [inviteError, setInviteError] = useState("");
+  const [courseError, setCourseError] = useState("");
+  const [inviteCourseId, setInviteCourseId] = useState("");
+  const [invitePhone, setInvitePhone] = useState("");
+  const [inviteUses, setInviteUses] = useState("1");
+  const [inviteExpiry, setInviteExpiry] = useState("");
+  const [title, setTitle] = useState("");
+  const [slug, setSlug] = useState("");
+  const [description, setDescription] = useState("");
+  const [certificateReviewNote, setCertificateReviewNote] = useState("");
+  const [certificateReviewMessage, setCertificateReviewMessage] = useState("");
+  const stats = overview.data;
+  const listedCourses = courses.data ?? [];
+  const activeCourses = listedCourses.filter(c => c.status === "published");
+
+  const submitCourse = (event: FormEvent) => {
+    event.preventDefault(); setCourseError("");
+    createCourse.mutate({ title: title.trim(), slug: slug.trim(), description: description.trim() }, {
+      onSuccess: course => { setNewCourse(course); setTitle(""); setSlug(""); setDescription(""); },
+      onError: error => setCourseError(niceError(error, "Course could not be created.")),
+    });
+  };
+  const submitInvite = (event: FormEvent) => {
+    event.preventDefault(); setInviteError("");
+    createInvitation.mutate({
+      courseId: Number(inviteCourseId),
+      maxUses: Number(inviteUses),
+      ...(invitePhone.trim() ? { reservedForPhone: invitePhone.trim() } : {}),
+      ...(inviteExpiry ? { expiresAt: new Date(inviteExpiry).toISOString() } : {}),
+    }, { onSuccess: result => { setOneTimeCode(result.code); setInviteDialog(false); setInvitePhone(""); setInviteUses("1"); setInviteExpiry(""); }, onError: error => setInviteError(niceError(error, "Invitation could not be created.")) });
+  };
+  const changeStatus = (course: LmsCourse) => {
+    const status = course.status === "published" ? "archived" : "published";
+    setStatus.mutate({ courseId: course.id, status });
+  };
+  const revoke = (invitation: LmsInvitation) => {
+    if (invitation.status === "active" && window.confirm(`Revoke invitation ending ${invitation.codeHint}? Students will no longer be able to redeem it.`)) revokeInvitation.mutate(invitation.id);
+  };
+  const decideCertificate = (certificateId: number, decision: "approved" | "rejected") => {
+    const action = decision === "approved" ? "approve and issue this certificate" : "reject this certificate";
+    if (!window.confirm(`Are you sure you want to ${action}?`)) return;
+    setCertificateReviewMessage("");
+    reviewCertificate.mutate(
+      { certificateId, decision, reviewNote: certificateReviewNote },
+      {
+        onSuccess: () => {
+          setCertificateReviewNote("");
+          setCertificateReviewMessage(decision === "approved" ? "Certificate approved and issued." : "Certificate review was rejected.");
+        },
+        onError: error => setCertificateReviewMessage(niceError(error, "Certificate review could not be saved.")),
+      },
+    );
+  };
+  return <PageFrame user={user} onLogout={logout}>
+    <div className="lms-page-head"><div><div className="lms-eyebrow">Institute operations</div><h1>Learning, at a glance.</h1><p className="lms-subtitle">Manage the published course catalogue and issue student invitations.</p></div><div className="lms-row"><button className="lms-button lms-button-secondary" onClick={() => { setCourseError(""); setCourseDialog(true); }}><Icon icon={Plus} size={16} /> New course</button><button className="lms-button" onClick={() => { setInviteError(""); setInviteDialog(true); }} disabled={!activeCourses.length}><Icon icon={KeyRound} size={16} /> New invitation</button></div></div>
+    {overview.isError && <ErrorState message={niceError(overview.error, "Admin overview could not be loaded.")} retry={() => void overview.refetch()} />}
+    {setStatus.isError && <div className="lms-alert lms-alert-error" role="alert" style={{ marginBottom: 14 }}>{niceError(setStatus.error, "Course status could not be changed.")}</div>}
+    {stats && <div className="lms-stat-grid">
+      {[["Students", stats.students], ["Trainers", stats.trainers], ["Courses", stats.courses], ["Active enrollments", stats.activeEnrollments]].map(([label, value]) => <div className="lms-stat" key={label}><span>{label}</span><strong>{value}</strong><span>Current institute total</span></div>)}
+    </div>}
+    <div className="lms-grid lms-grid-2">
+      <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Catalogue</div><h2>Courses</h2></div><span className="lms-tag">{listedCourses.length} total</span></div>
+        {courses.isLoading ? <LoadingRows count={3} /> : courses.isError ? <ErrorState message={niceError(courses.error, "Courses could not be loaded.")} retry={() => void courses.refetch()} /> : !listedCourses.length ? <EmptyState title="No courses in the catalogue" detail="Create a course to start building your LEAP catalogue." icon={BookOpen} /> :
+          <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>Course</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>{listedCourses.map(course => <tr key={course.id}><td><strong>{course.title}</strong><div className="lms-help lms-mono">{course.slug}</div></td><td><span className={`lms-status lms-status-${course.status}`}>{course.status}</span></td><td>{course.createdAt ? formatDate(course.createdAt) : "—"}</td><td><div className="lms-row"><Link className="lms-button lms-button-secondary lms-button-sm" href={`/manage/courses/${course.id}`}>Edit outline</Link><button className="lms-button lms-button-secondary lms-button-sm" onClick={() => changeStatus(course)} disabled={setStatus.isPending || course.status === "archived"}>{course.status === "published" ? "Archive" : course.status === "draft" ? "Publish" : "Archived"}</button></div></td></tr>)}</tbody></table></div>}
+      </section>
+      <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Access control</div><h2>Invitations</h2></div><span className="lms-tag">{invitations.data?.filter(i => i.status === "active").length ?? "—"} active</span></div>
+        {inviteError && <div className="lms-alert lms-alert-error" role="alert" style={{ marginBottom: 14 }}>{inviteError}</div>}
+        {invitations.isLoading ? <LoadingRows count={3} /> : invitations.isError ? <ErrorState message={niceError(invitations.error, "Invitations could not be loaded.")} retry={() => void invitations.refetch()} /> : !invitations.data?.length ? <EmptyState icon={KeyRound} title="No invitations yet" detail="Create a course invitation when you are ready to onboard a learner." /> :
+          <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>Course / code</th><th>Uses</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>{invitations.data.map(invitation => <tr key={invitation.id}><td><strong>{invitation.courseTitle}</strong><div className="lms-help lms-mono">•••• {invitation.codeHint}</div></td><td>{invitation.usesCount} / {invitation.maxUses}</td><td>{invitation.expiresAt ? formatDate(invitation.expiresAt) : "No expiry"}</td><td><span className={`lms-status lms-status-${invitation.status}`}>{invitation.status}</span></td><td>{invitation.status === "active" && <button className="lms-button lms-button-danger lms-button-sm" onClick={() => revoke(invitation)} disabled={revokeInvitation.isPending}>Revoke</button>}</td></tr>)}</tbody></table></div>}
+      </section>
+    </div>
+    {overview.isLoading && <p className="lms-help" style={{ marginTop: 14 }}>Refreshing institute totals…</p>}
+    <section className="lms-panel lms-admin-certificates">
+      <div className="lms-panel-head"><div><div className="lms-eyebrow">Completion review</div><h2>Certificates</h2></div><span className="lms-tag">{certificateReviews.data?.filter(item => item.status === "pending_review").length ?? "—"} awaiting review</span></div>
+      <div className="lms-field"><label htmlFor="certificate-review-note">Review note <span className="lms-muted">(optional)</span></label><input id="certificate-review-note" className="lms-input" maxLength={2000} value={certificateReviewNote} onChange={event => setCertificateReviewNote(event.target.value)} placeholder="Note to include if you reject a request" /></div>
+      {certificateReviewMessage && <div className={`lms-alert ${reviewCertificate.isError ? "lms-alert-error" : "lms-alert-success"}`} role="status">{certificateReviewMessage}</div>}
+      {certificateReviews.isLoading ? <LoadingRows count={2} /> : certificateReviews.isError ? <ErrorState message={niceError(certificateReviews.error, "Certificate requests could not be loaded.")} retry={() => void certificateReviews.refetch()} /> : !certificateReviews.data?.length ? <EmptyState icon={GraduationCap} title="No certificate requests yet" detail="Eligible student certificates will appear here for review." /> :
+        <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>Student</th><th>Course</th><th>Status</th><th>Certificate</th><th>Actions</th></tr></thead><tbody>{certificateReviews.data.map(item => <tr key={item.id}>
+          <td><strong>{item.studentName || "Name required"}</strong><div className="lms-help">{item.phoneE164}</div></td><td>{item.courseTitle}</td><td><span className={`lms-status lms-status-${item.status}`}>{item.status.replaceAll("_", " ")}</span></td><td>{item.certificateNumber || "—"}</td>
+          <td>{item.status === "pending_review" ? <div className="lms-row"><button className="lms-button lms-button-sm" disabled={reviewCertificate.isPending} onClick={() => decideCertificate(item.id, "approved")}>Approve</button><button className="lms-button lms-button-danger lms-button-sm" disabled={reviewCertificate.isPending} onClick={() => decideCertificate(item.id, "rejected")}>Reject</button></div> : item.status === "approved" ? <a className="lms-button lms-button-secondary lms-button-sm" href={`/api/lms/certificates/${item.id}/pdf`}>Download PDF</a> : item.reviewNote || "—"}</td>
+        </tr>)}</tbody></table></div>}
+    </section>
+    <p className="lms-footer-note">Course authoring, learner account management, notifications, reports, and settings are still being built.</p>
+    {courseDialog && <div className="lms-dialog-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) setCourseDialog(false); }}><section className="lms-dialog" role="dialog" aria-modal="true" aria-labelledby="new-course-title"><div className="lms-dialog-head"><div><div className="lms-eyebrow">Catalogue</div><h2 id="new-course-title">Create a course</h2></div><button className="lms-icon-button" onClick={() => setCourseDialog(false)} aria-label="Close"><Icon icon={X} /></button></div>
+      {newCourse ? <><div className="lms-alert lms-alert-success">Course created as a draft. Publish it from the course list when it's ready.</div><div style={{ marginTop: 18 }}><button className="lms-button" onClick={() => { setCourseDialog(false); setNewCourse(null); }}>Done</button></div></> : <form onSubmit={submitCourse}>
+        <div className="lms-field"><label htmlFor="course-title">Course title</label><input className="lms-input" id="course-title" value={title} onChange={e => setTitle(e.target.value)} required maxLength={120} /></div>
+        <div className="lms-field"><label htmlFor="course-slug">Course slug</label><input className="lms-input lms-mono" id="course-slug" value={slug} onChange={e => setSlug(e.target.value)} required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" /><span className="lms-help">Lowercase letters, numbers, and hyphens.</span></div>
+        <div className="lms-field"><label htmlFor="course-desc">Description</label><textarea className="lms-textarea" id="course-desc" value={description} onChange={e => setDescription(e.target.value)} required maxLength={2000} /></div>
+        {courseError && <div className="lms-alert lms-alert-error" role="alert">{courseError}</div>}
+        <div className="lms-row" style={{ justifyContent: "flex-end", marginTop: 18 }}><button className="lms-button lms-button-secondary" type="button" onClick={() => setCourseDialog(false)}>Cancel</button><button className="lms-button" type="submit" disabled={createCourse.isPending}>{createCourse.isPending ? "Creating…" : "Create draft course"}</button></div>
+      </form>}</section></div>}
+    {inviteDialog && <div className="lms-dialog-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) setInviteDialog(false); }}><section className="lms-dialog" role="dialog" aria-modal="true" aria-labelledby="new-invite-title"><div className="lms-dialog-head"><div><div className="lms-eyebrow">Student access</div><h2 id="new-invite-title">Create invitation</h2></div><button className="lms-icon-button" onClick={() => setInviteDialog(false)} aria-label="Close"><Icon icon={X} /></button></div>
+      <div className="lms-alert lms-alert-warning" style={{ marginBottom: 18 }}><Icon icon={ShieldAlert} /><span>The full invitation code is shown only once after creation. Copy it securely and share it only with the intended learner.</span></div>
+      <form onSubmit={submitInvite}>
+        <div className="lms-field"><label htmlFor="invite-course">Published course</label><select id="invite-course" className="lms-select" value={inviteCourseId} onChange={e => setInviteCourseId(e.target.value)} required><option value="">Choose a course</option>{activeCourses.map(course => <option key={course.id} value={course.id}>{course.title}</option>)}</select></div>
+        <div className="lms-field"><label htmlFor="invite-phone">Reserve for phone <span className="lms-muted">(optional)</span></label><input id="invite-phone" className="lms-input" type="tel" value={invitePhone} onChange={e => setInvitePhone(e.target.value)} placeholder="+91…" /></div>
+        <div className="lms-field"><label htmlFor="invite-uses">Maximum redemptions</label><input id="invite-uses" className="lms-input" type="number" min="1" max="1000" value={inviteUses} onChange={e => setInviteUses(e.target.value)} required /></div>
+        <div className="lms-field"><label htmlFor="invite-expiry">Expiry <span className="lms-muted">(optional)</span></label><input id="invite-expiry" className="lms-input" type="datetime-local" value={inviteExpiry} onChange={e => setInviteExpiry(e.target.value)} /></div>
+        {inviteError && <div className="lms-alert lms-alert-error" role="alert">{inviteError}</div>}
+        <div className="lms-row" style={{ justifyContent: "flex-end", marginTop: 18 }}><button className="lms-button lms-button-secondary" type="button" onClick={() => setInviteDialog(false)}>Cancel</button><button className="lms-button" type="submit" disabled={createInvitation.isPending || !inviteCourseId}>{createInvitation.isPending ? "Generating…" : "Generate one-time code"}</button></div>
+      </form></section></div>}
+    {oneTimeCode && <div className="lms-dialog-backdrop"><section className="lms-dialog" role="dialog" aria-modal="true" aria-labelledby="one-time-code-title"><div className="lms-dialog-head"><div><div className="lms-eyebrow">Created successfully</div><h2 id="one-time-code-title">Copy this invitation now</h2></div><button className="lms-icon-button" onClick={() => setOneTimeCode(null)} aria-label="Close and hide code"><Icon icon={X} /></button></div><div className="lms-alert lms-alert-warning"><Icon icon={ShieldAlert} /><span>This code will not be shown again. Store or share it securely before closing this window.</span></div><div className="lms-code-display" aria-label="Invitation code">{oneTimeCode}</div><div className="lms-row" style={{ justifyContent: "flex-end" }}><button className="lms-button lms-button-secondary" onClick={async () => { try { await navigator.clipboard.writeText(oneTimeCode); } catch { setInviteError("Clipboard access was unavailable. Select and copy the invitation code manually."); } }}>Copy code</button><button className="lms-button" onClick={() => setOneTimeCode(null)}>I've secured it</button></div></section></div>}
+  </PageFrame>;
+}
+
+export const lmsRouteMap = {
+  "/learn": LearnLoginPage,
+  "/learn/dashboard": StudentDashboardPage,
+  "/learn/courses/:courseId": CoursePage,
+  "/trainer": TrainerPage,
+  "/lms-admin": AdminPage,
+} as const;
+
+export const LmsPages = {
+  LearnLoginPage,
+  StudentDashboardPage,
+  CoursePage,
+  TrainerPage,
+  AdminPage,
+};
+export { CourseManagerPage } from "./CourseManager";
+export default LmsPages;

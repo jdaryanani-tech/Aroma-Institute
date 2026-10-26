@@ -7,6 +7,14 @@ import Home from "@/pages/Home";
 import VSL from "@/pages/VSL";
 import Admin from "@/pages/Admin";
 import NotFound from "@/pages/not-found";
+import {
+  AdminPage as LmsAdminPage,
+  CoursePage as LmsCoursePage,
+  CourseManagerPage,
+  LearnLoginPage,
+  StudentDashboardPage,
+  TrainerPage,
+} from "@/lms-ui";
 
 function Router() {
   return (
@@ -14,6 +22,12 @@ function Router() {
       <Route path="/" component={Home} />
       <Route path="/vsl" component={VSL} />
       <Route path="/admin" component={Admin} />
+      <Route path="/learn" component={LearnLoginPage} />
+      <Route path="/learn/dashboard" component={StudentDashboardPage} />
+      <Route path="/learn/courses/:courseId" component={LmsCoursePage} />
+      <Route path="/manage/courses/:courseId" component={CourseManagerPage} />
+      <Route path="/trainer" component={TrainerPage} />
+      <Route path="/lms-admin" component={LmsAdminPage} />
       <Route component={NotFound} />
     </Switch>
   );

@@ -1,13 +1,12 @@
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { type Inquiry } from "@shared/schema";
-import { LogOut, Download, Users, Mail, Phone, BookOpen, MessageSquare, Lock } from "lucide-react";
+import { LogOut, Download, Users, Mail, Phone, BookOpen, MessageSquare } from "lucide-react";
+import { useLocation } from "wouter";
+import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
 
-async function fetchInquiries(password: string): Promise<Inquiry[]> {
-  const res = await fetch("/api/admin/inquiries", {
-    headers: { "x-admin-password": password },
-  });
-  if (!res.ok) throw new Error("Unauthorized");
+async function fetchInquiries(): Promise<Inquiry[]> {
+  const res = await fetch("/api/admin/inquiries", { credentials: "include" });
+  if (!res.ok) throw new Error(res.status === 403 ? "Administrator access required." : "Unable to load inquiries.");
   return res.json();
 }
 
@@ -33,78 +32,44 @@ function exportCSV(data: Inquiry[]) {
   URL.revokeObjectURL(url);
 }
 
-const SESSION_KEY = "aroma_admin_session";
-
 export default function Admin() {
-  const [password, setPassword] = useState("");
-  const [submitted, setSubmitted] = useState(() => sessionStorage.getItem(SESSION_KEY) ?? "");
-  const [inputError, setInputError] = useState("");
-
+  const session = useLmsSession();
+  const logout = useLmsLogout();
+  const [, setLocation] = useLocation();
+  const isAdmin = Boolean(session.data?.roles.includes("admin"));
   const { data, isLoading, isError } = useQuery<Inquiry[]>({
-    queryKey: ["/api/admin/inquiries", submitted],
-    queryFn: () => fetchInquiries(submitted),
-    enabled: !!submitted,
+    queryKey: ["/api/admin/inquiries"],
+    queryFn: fetchInquiries,
+    enabled: isAdmin,
     retry: false,
   });
 
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!password.trim()) {
-      setInputError("Please enter a password.");
-      return;
-    }
-    setInputError("");
-    sessionStorage.setItem(SESSION_KEY, password);
-    setSubmitted(password);
-  };
-
   const handleLogout = () => {
-    sessionStorage.removeItem(SESSION_KEY);
-    setSubmitted("");
-    setPassword("");
+    logout.mutate(undefined, { onSuccess: () => setLocation("/learn") });
   };
 
-  const isUnauthorized = isError && submitted;
-
-  if (!submitted || isUnauthorized) {
+  if (session.isLoading) {
     return (
       <div className="min-h-screen bg-[#0e0a07] flex items-center justify-center px-4" data-testid="page-admin-login">
-        <div className="w-full max-w-sm">
-          <div className="text-center mb-8">
-            <div className="w-14 h-14 rounded-2xl bg-amber-400/15 border border-amber-400/30 flex items-center justify-center mx-auto mb-4">
-              <Lock className="h-6 w-6 text-amber-400" />
-            </div>
-            <h1 className="text-white font-serif text-2xl font-bold">Admin Access</h1>
-            <p className="text-white/45 text-sm mt-1">Aroma Institute — Leads Dashboard</p>
-          </div>
-
-          <form onSubmit={handleLogin} className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4">
-            {isUnauthorized && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-red-400 text-sm text-center">
-                Incorrect password. Please try again.
-              </div>
-            )}
-            <div>
-              <label className="text-white/60 text-xs font-medium uppercase tracking-wider block mb-2">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter admin password"
-                className="w-full h-11 px-4 rounded-lg border border-white/20 bg-white/8 text-white placeholder:text-white/30 focus:outline-none focus:border-amber-400/60 text-sm"
-                data-testid="admin-input-password"
-                autoFocus
-              />
-              {inputError && <p className="text-red-400 text-xs mt-1">{inputError}</p>}
-            </div>
-            <button
-              type="submit"
-              className="w-full h-11 bg-amber-400 hover:bg-amber-300 text-[#0e0a07] font-bold rounded-lg transition-colors text-sm"
-              data-testid="admin-button-login"
-            >
-              View Leads
-            </button>
-          </form>
+        <p className="text-white/60">Checking administrator access…</p>
+      </div>
+    );
+  }
+  if (session.isError || !session.data || !isAdmin) {
+    return (
+      <div className="min-h-screen bg-[#0e0a07] flex items-center justify-center px-4" data-testid="page-admin-login">
+        <div className="w-full max-w-sm text-center">
+          <h1 className="text-white font-serif text-2xl font-bold">Leads Dashboard</h1>
+          <p className="text-white/55 text-sm mt-2">
+            {session.isError
+              ? "We could not verify your session."
+              : session.data
+                ? "Administrator access is required."
+                : "Sign in with your Aroma Institute account to continue."}
+          </p>
+          <a href="/learn" className="inline-flex mt-6 h-11 items-center justify-center rounded-lg bg-amber-400 px-5 font-bold text-[#0e0a07]">
+            Continue to sign in
+          </a>
         </div>
       </div>
     );
@@ -143,6 +108,11 @@ export default function Admin() {
       </div>
 
       <div className="max-w-6xl mx-auto px-4 py-8">
+        {isError && (
+          <div className="mb-5 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300" role="alert">
+            Unable to load the leads dashboard. Check your administrator session and try again.
+          </div>
+        )}
         {/* Stats */}
         {data && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">

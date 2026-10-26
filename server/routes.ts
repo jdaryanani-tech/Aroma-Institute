@@ -4,13 +4,16 @@ import { storage } from "./storage";
 import { insertInquirySchema } from "@shared/schema";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
-
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "aroma@2024";
+import { configureLmsSessions, requireLmsRole, requireLmsUser } from "./lms/auth";
+import { registerLmsRoutes } from "./lms/routes";
+import { registerLmsManagementRoutes } from "./lms/management-routes";
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  configureLmsSessions(app);
+
   app.post("/api/inquiries", async (req, res) => {
     try {
       const data = insertInquirySchema.parse(req.body);
@@ -26,18 +29,22 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/admin/inquiries", async (req, res) => {
-    const token = req.headers["x-admin-password"] as string;
-    if (token !== ADMIN_PASSWORD) {
-      return res.status(401).json({ message: "Unauthorized" });
-    }
-    try {
-      const data = await storage.getInquiries();
-      res.json(data);
-    } catch {
-      res.status(500).json({ message: "Failed to fetch inquiries" });
-    }
-  });
+  app.get(
+    "/api/admin/inquiries",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (_req, res) => {
+      try {
+        const data = await storage.getInquiries();
+        res.json(data);
+      } catch {
+        res.status(500).json({ message: "Failed to fetch inquiries" });
+      }
+    },
+  );
+
+  registerLmsRoutes(app);
+  registerLmsManagementRoutes(app);
 
   return httpServer;
 }
