@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Express, Request, Response } from "express";
 import {
   and,
@@ -9,7 +9,6 @@ import {
   gt,
   inArray,
   isNull,
-  lt,
   sql,
 } from "drizzle-orm";
 import { z } from "zod";
@@ -30,7 +29,6 @@ import {
   lmsLessons,
   lmsLiveSessions,
   lmsModules,
-  lmsOtpChallenges,
   lmsUserRoles,
   lmsUsers,
   lmsTrainerAssignments,
@@ -38,19 +36,13 @@ import {
 import { db } from "../db";
 import {
   destroyLmsSession,
-  establishLmsSession,
   optionalLmsUser,
   requireLmsRole,
   requireLmsUser,
   type LmsRole,
 } from "./auth";
 import { calculateAssessmentScore } from "./assessment-scoring";
-import {
-  isN8nOtpConfigured,
-  OtpProviderNotConfiguredError,
-  sendOtpThroughN8n,
-  verifyOtpThroughN8n,
-} from "./n8n-otp";
+import { registerLmsPasswordAuthRoutes } from "./password-auth";
 
 const createCourseSchema = z.object({
   title: z.string().trim().min(2).max(180),
@@ -78,81 +70,12 @@ const submitAssessmentSchema = z.object({
   answers: z.record(z.string(), z.number().int().positive()),
 });
 
-const requestOtpSchema = z.object({
-  phone: z.string().trim().min(6).max(40),
-});
-
-const verifyOtpSchema = z.object({
-  phone: z.string().trim().min(6).max(40),
-  challengeId: z.string().uuid(),
-  code: z.string().regex(/^\d{6}$/),
-});
-
-const OTP_TTL_MS = 5 * 60 * 1000;
-const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
-const OTP_REQUEST_WINDOW_MS = 15 * 60 * 1000;
-const OTP_MAX_REQUESTS_PER_WINDOW = 3;
-const OTP_MAX_VERIFY_ATTEMPTS = 5;
-
 function hashCode(code: string) {
   return createHash("sha256").update(code.trim().toUpperCase()).digest("hex");
 }
 
 function normalizePhone(value: string) {
   return value.replace(/[^\d+]/g, "");
-}
-
-function normalizeE164Phone(value: string) {
-  const normalized = normalizePhone(value);
-  return /^\+[1-9]\d{7,14}$/.test(normalized) ? normalized : null;
-}
-
-async function findOrCreateVerifiedUser(phoneE164: string) {
-  return db.transaction(async (tx) => {
-    let [user] = await tx
-      .select()
-      .from(lmsUsers)
-      .where(eq(lmsUsers.phoneE164, phoneE164))
-      .limit(1);
-
-    if (user && !user.isActive) return null;
-    if (!user) {
-      [user] = await tx
-        .insert(lmsUsers)
-        .values({ phoneE164, displayName: null })
-        .onConflictDoNothing()
-        .returning();
-      if (!user) {
-        [user] = await tx
-          .select()
-          .from(lmsUsers)
-          .where(eq(lmsUsers.phoneE164, phoneE164))
-          .limit(1);
-      }
-    }
-    if (!user || !user.isActive) return null;
-
-    let assignments = await tx
-      .select({ role: lmsUserRoles.role })
-      .from(lmsUserRoles)
-      .where(eq(lmsUserRoles.userId, user.id));
-    if (assignments.length === 0) {
-      await tx
-        .insert(lmsUserRoles)
-        .values({ userId: user.id, role: "student" })
-        .onConflictDoNothing();
-      assignments = await tx
-        .select({ role: lmsUserRoles.role })
-        .from(lmsUserRoles)
-        .where(eq(lmsUserRoles.userId, user.id));
-    }
-    return {
-      id: user.id,
-      phoneE164: user.phoneE164,
-      displayName: user.displayName,
-      roles: assignments.map(({ role }) => role as LmsRole),
-    };
-  });
 }
 
 function writeAudit(
@@ -357,262 +280,28 @@ function requireSameOriginForWrites(req: Request, res: Response, next: () => voi
 
 export function registerLmsRoutes(app: Express) {
   app.use("/api/lms", requireSameOriginForWrites);
+  registerLmsPasswordAuthRoutes(app);
 
   app.get("/api/lms/auth/status", (_req, res) => {
-    const available = isN8nOtpConfigured();
     res.json({
-      available,
-      channel: "WhatsApp Business",
-      message: available
-        ? "WhatsApp one-time-code sign-in is available."
-        : "Student sign-in is disabled until the n8n OTP webhook URL and server-only token are configured.",
+      available: true,
+      channel: "Password",
+      message: "Sign in with the phone number on your Aroma LEAP account and your password.",
     });
   });
 
-  app.post("/api/lms/auth/otp/request", async (req, res) => {
-    if (!isN8nOtpConfigured()) {
-      return res.status(503).json({
-        message: "OTP sign-in is not configured. No code was sent.",
-        code: "OTP_PROVIDER_NOT_CONFIGURED",
-      });
-    }
-    const parsed = requestOtpSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ message: "Enter a valid phone number." });
-    }
-    const phoneE164 = normalizeE164Phone(parsed.data.phone);
-    if (!phoneE164) {
-      return res.status(400).json({ message: "Use a phone number in international E.164 format." });
-    }
-
-    const now = new Date();
-    const windowStart = new Date(now.getTime() - OTP_REQUEST_WINDOW_MS);
-    try {
-      const request = await db.transaction(async (tx) => {
-        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${phoneE164}))`);
-        await tx
-          .delete(lmsOtpChallenges)
-          .where(lt(lmsOtpChallenges.createdAt, new Date(now.getTime() - 24 * 60 * 60 * 1000)));
-        const [recent] = await tx
-          .select({ total: count() })
-          .from(lmsOtpChallenges)
-          .where(
-            and(
-              eq(lmsOtpChallenges.phoneE164, phoneE164),
-              gt(lmsOtpChallenges.createdAt, windowStart),
-            ),
-          );
-        const [latest] = await tx
-          .select({ createdAt: lmsOtpChallenges.createdAt })
-          .from(lmsOtpChallenges)
-          .where(
-            and(
-              eq(lmsOtpChallenges.phoneE164, phoneE164),
-              gt(lmsOtpChallenges.createdAt, windowStart),
-            ),
-          )
-          .orderBy(desc(lmsOtpChallenges.createdAt))
-          .limit(1);
-        const [oldest] = (recent?.total ?? 0) >= OTP_MAX_REQUESTS_PER_WINDOW
-          ? await tx
-              .select({ createdAt: lmsOtpChallenges.createdAt })
-              .from(lmsOtpChallenges)
-              .where(
-                and(
-                  eq(lmsOtpChallenges.phoneE164, phoneE164),
-                  gt(lmsOtpChallenges.createdAt, windowStart),
-                ),
-              )
-              .orderBy(asc(lmsOtpChallenges.createdAt))
-              .limit(1)
-          : [undefined];
-        const cooldownUntil = latest
-          ? latest.createdAt.getTime() + OTP_RESEND_COOLDOWN_MS
-          : now.getTime();
-        const windowLimitUntil = oldest
-          ? oldest.createdAt.getTime() + OTP_REQUEST_WINDOW_MS
-          : now.getTime();
-        const retryAt = Math.max(cooldownUntil, windowLimitUntil);
-        if (retryAt > now.getTime()) {
-          return {
-            limited: true as const,
-            retryAfterSeconds: Math.max(1, Math.ceil((retryAt - now.getTime()) / 1000)),
-          };
-        }
-
-        await tx
-          .update(lmsOtpChallenges)
-          .set({ consumedAt: now })
-          .where(
-            and(
-              eq(lmsOtpChallenges.phoneE164, phoneE164),
-              isNull(lmsOtpChallenges.consumedAt),
-              gt(lmsOtpChallenges.expiresAt, now),
-            ),
-          );
-        const challengeId = randomUUID();
-        const expiresAt = new Date(now.getTime() + OTP_TTL_MS);
-        await tx.insert(lmsOtpChallenges).values({
-          phoneE164,
-          providerChallengeId: challengeId,
-          expiresAt,
-          resendAvailableAt: new Date(now.getTime() + OTP_RESEND_COOLDOWN_MS),
-        });
-        return { limited: false as const, challengeId, expiresAt };
-      });
-
-      if (request.limited) {
-        res.setHeader("Retry-After", String(request.retryAfterSeconds));
-        return res.status(429).json({
-          message: "Please wait before requesting another code.",
-          retryAfterSeconds: request.retryAfterSeconds,
-        });
-      }
-
-      try {
-        await sendOtpThroughN8n({
-          version: 1,
-          action: "send",
-          challengeId: request.challengeId,
-          phoneE164,
-          expiresAt: request.expiresAt.toISOString(),
-        });
-      } catch (error) {
-        await db
-          .update(lmsOtpChallenges)
-          .set({ consumedAt: new Date() })
-          .where(eq(lmsOtpChallenges.providerChallengeId, request.challengeId));
-        if (error instanceof OtpProviderNotConfiguredError) {
-          return res.status(503).json({
-            message: "OTP sign-in is not configured. No code was sent.",
-            code: "OTP_PROVIDER_NOT_CONFIGURED",
-          });
-        }
-        return res.status(502).json({
-          message: "The code could not be sent. Please request a new code shortly.",
-          code: "OTP_DELIVERY_UNAVAILABLE",
-        });
-      }
-
-      return res.json({
-        challengeId: request.challengeId,
-        expiresAt: request.expiresAt.toISOString(),
-        resendAfterSeconds: OTP_RESEND_COOLDOWN_MS / 1000,
-        message: "If the number is eligible, a code will arrive shortly.",
-      });
-    } catch {
-      return res.status(500).json({ message: "Unable to request a sign-in code." });
-    }
+  app.post("/api/lms/auth/otp/request", (_req, res) => {
+    return res.status(503).json({
+      message: "OTP sign-in is not configured. No code was sent.",
+      code: "OTP_PROVIDER_NOT_CONFIGURED",
+    });
   });
 
-  app.post("/api/lms/auth/otp/verify", async (req, res) => {
-    if (!isN8nOtpConfigured()) {
-      return res.status(503).json({
-        message: "OTP verification is not configured. No session was created.",
-        code: "OTP_PROVIDER_NOT_CONFIGURED",
-      });
-    }
-    const parsed = verifyOtpSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ message: "Enter the six-digit code from WhatsApp." });
-    }
-    const phoneE164 = normalizeE164Phone(parsed.data.phone);
-    if (!phoneE164) {
-      return res.status(400).json({ message: "Use a phone number in international E.164 format." });
-    }
-
-    const now = new Date();
-    try {
-      const claim = await db.transaction(async (tx) => {
-        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${parsed.data.challengeId}))`);
-        const [challenge] = await tx
-          .select()
-          .from(lmsOtpChallenges)
-          .where(
-            and(
-              eq(lmsOtpChallenges.providerChallengeId, parsed.data.challengeId),
-              eq(lmsOtpChallenges.phoneE164, phoneE164),
-            ),
-          )
-          .limit(1);
-        if (!challenge || challenge.consumedAt) return { status: "invalid" as const };
-        if (challenge.expiresAt.getTime() <= now.getTime()) {
-          await tx
-            .update(lmsOtpChallenges)
-            .set({ consumedAt: now })
-            .where(eq(lmsOtpChallenges.id, challenge.id));
-          return { status: "invalid" as const };
-        }
-        if (challenge.attempts >= OTP_MAX_VERIFY_ATTEMPTS) {
-          await tx
-            .update(lmsOtpChallenges)
-            .set({ consumedAt: now })
-            .where(eq(lmsOtpChallenges.id, challenge.id));
-          return { status: "locked" as const };
-        }
-        const [claimed] = await tx
-          .update(lmsOtpChallenges)
-          .set({ attempts: challenge.attempts + 1, consumedAt: now })
-          .where(
-            and(
-              eq(lmsOtpChallenges.id, challenge.id),
-              isNull(lmsOtpChallenges.consumedAt),
-            ),
-          )
-          .returning();
-        if (!claimed) return { status: "invalid" as const };
-        return { status: "claimed" as const, challenge: claimed };
-      });
-
-      if (claim.status === "locked") {
-        return res.status(429).json({ message: "Too many attempts. Request a new code." });
-      }
-      if (claim.status !== "claimed") {
-        return res.status(400).json({ message: "This code request is invalid or expired. Request a new code." });
-      }
-
-      let verified: boolean;
-      try {
-        verified = await verifyOtpThroughN8n({
-          version: 1,
-          action: "verify",
-          challengeId: parsed.data.challengeId,
-          phoneE164,
-          expiresAt: claim.challenge.expiresAt.toISOString(),
-          otp: parsed.data.code,
-        });
-      } catch (error) {
-        if (error instanceof OtpProviderNotConfiguredError) {
-          return res.status(503).json({
-            message: "OTP verification is not configured. No session was created.",
-            code: "OTP_PROVIDER_NOT_CONFIGURED",
-          });
-        }
-        return res.status(502).json({
-          message: "Verification could not be completed. Request a new code.",
-          code: "OTP_VERIFICATION_UNAVAILABLE",
-        });
-      }
-
-      if (!verified) {
-        if (claim.challenge.attempts < OTP_MAX_VERIFY_ATTEMPTS) {
-          await db
-            .update(lmsOtpChallenges)
-            .set({ consumedAt: null })
-            .where(eq(lmsOtpChallenges.id, claim.challenge.id));
-        }
-        return res.status(401).json({ message: "The code is incorrect or expired." });
-      }
-
-      const user = await findOrCreateVerifiedUser(phoneE164);
-      if (!user) {
-        return res.status(403).json({ message: "This account cannot sign in. Contact your institute coordinator." });
-      }
-      await establishLmsSession(req, user.id);
-      return res.json(user);
-    } catch {
-      return res.status(500).json({ message: "Unable to verify the sign-in code." });
-    }
+  app.post("/api/lms/auth/otp/verify", (_req, res) => {
+    return res.status(503).json({
+      message: "OTP verification is not configured. No session was created.",
+      code: "OTP_PROVIDER_NOT_CONFIGURED",
+    });
   });
 
   app.get("/api/lms/auth/me", optionalLmsUser, (req, res) => {

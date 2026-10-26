@@ -7,11 +7,12 @@ import {
   LockKeyhole, LogOut, Plus, ShieldAlert, X,
 } from "lucide-react";
 import {
-  useAdminCertificates, useAdminCourses, useAdminInvitations, useAdminOverview, useCourseOutline, useCreateLmsCourse,
-  useCreateLmsInvitation, useLmsLogout, useLmsOtpStatus, useLmsSession, useMarkLessonComplete,
-  useRedeemLmsInvitation, useRequestLmsOtp, useRevokeLmsInvitation, useSetLmsCourseStatus,
+  useAdminCertificates, useAdminCourses, useAdminInvitations, useAdminOverview, useAdminUsers, useCourseOutline, useCreateLmsCourse,
+  useCreateLmsInvitation, useCreateLmsPasswordSetupLink, useCreateLmsUser, useLmsAuthStatus, useLmsLogout,
+  useLmsPasswordLogin, useLmsPasswordSetup, useLmsSession, useMarkLessonComplete,
+  useRedeemLmsInvitation, useRevokeLmsInvitation, useSetLmsCourseStatus,
   useRequestCertificateReview, useStudentAssessment, useStudentCertificates, useStudentDashboard,
-  useReviewLmsCertificate, useSubmitLmsAssessment, useTrainerCourses, useVerifyLmsOtp,
+  useReviewLmsCertificate, useSubmitLmsAssessment, useTrainerCourses,
 } from "@/hooks/use-lms";
 import type { CourseOutline, LmsCourse, LmsInvitation, LmsUser } from "@/hooks/use-lms";
 
@@ -71,59 +72,25 @@ function SessionGuard({ children, allow }: { children: (user: LmsUser) => ReactN
 }
 
 export function LearnLoginPage() {
-  const otpStatus = useLmsOtpStatus();
+  const authStatus = useLmsAuthStatus();
   const session = useLmsSession();
-  const requestOtp = useRequestLmsOtp();
-  const verifyOtp = useVerifyLmsOtp();
+  const login = useLmsPasswordLogin();
   const [, setLocation] = useLocation();
-  const [mode, setMode] = useState<"phone" | "verify">("phone");
   const [phone, setPhone] = useState("");
-  const [code, setCode] = useState("");
-  const [challengeId, setChallengeId] = useState("");
-  const [resendAvailableAt, setResendAvailableAt] = useState<number | null>(null);
-  const [secondsUntilResend, setSecondsUntilResend] = useState(0);
+  const [password, setPassword] = useState("");
   const [formError, setFormError] = useState("");
-  const otpAvailable = Boolean(otpStatus.data?.available);
-
-  useEffect(() => {
-    if (!resendAvailableAt) {
-      setSecondsUntilResend(0);
-      return;
-    }
-    const update = () => setSecondsUntilResend(Math.max(0, Math.ceil((resendAvailableAt - Date.now()) / 1000)));
-    update();
-    const timer = window.setInterval(update, 1000);
-    return () => window.clearInterval(timer);
-  }, [resendAvailableAt]);
 
   useEffect(() => {
     if (!session.data) return;
     const destination = session.data.roles.includes("admin") ? "/lms-admin" : session.data.roles.includes("trainer") && !session.data.roles.includes("student") ? "/trainer" : "/learn/dashboard";
     setLocation(destination);
   }, [session.data, setLocation]);
-  const sendOtp = (event: FormEvent) => {
-    event.preventDefault(); setFormError("");
-    if (!otpAvailable) return;
-    requestOtp.mutate(phone.trim(), { onSuccess: (result) => {
-      setChallengeId(result.challengeId);
-      setResendAvailableAt(Date.now() + result.resendAfterSeconds * 1000);
-      setMode("verify");
-      setCode("");
-    }, onError: (error) => setFormError(niceError(error, "We couldn't request a code. Please try again.")) });
-  };
-  const resendOtp = () => {
+  const signIn = (event: FormEvent) => {
+    event.preventDefault();
     setFormError("");
-    requestOtp.mutate(phone.trim(), { onSuccess: (result) => {
-      setChallengeId(result.challengeId);
-      setResendAvailableAt(Date.now() + result.resendAfterSeconds * 1000);
-      setCode("");
-    }, onError: (error) => setFormError(niceError(error, "We couldn't request a new code yet.")) });
-  };
-  const verify = (event: FormEvent) => {
-    event.preventDefault(); setFormError("");
-    verifyOtp.mutate({ phone: phone.trim(), challengeId, code: code.trim() }, {
+    login.mutate({ phone: phone.trim(), password }, {
       onSuccess: (user) => setLocation(user.roles.includes("admin") ? "/lms-admin" : user.roles.includes("trainer") && !user.roles.includes("student") ? "/trainer" : "/learn/dashboard"),
-      onError: (error) => setFormError(niceError(error, "That code could not be verified. Check it and try again.")),
+      onError: (error) => setFormError(niceError(error, "Phone number or password is incorrect.")),
     });
   };
   return <div className="lms lms-auth-wrap">
@@ -134,28 +101,90 @@ export function LearnLoginPage() {
     </aside>
     <main className="lms-auth-main"><div className="lms-auth-form">
       <div className="lms-eyebrow">Student access</div>
-      <h2>{mode === "phone" ? "Welcome to your learning space" : "Enter your one-time code"}</h2>
-      <p>{mode === "phone" ? "Use the phone number linked to your Aroma LEAP enrollment." : `We sent a code to ${phone}.`}</p>
+      <h2>Welcome to your learning space</h2>
+      <p>Sign in with the phone number on your Aroma LEAP account and your password.</p>
       {session.isError && <ErrorState message={niceError(session.error, "Unable to check sign-in status.")} retry={() => void session.refetch()} />}
-      {otpStatus.isLoading ? <div className="lms-alert lms-alert-warning" role="status"><Icon icon={LoaderCircle} /> Checking sign-in availability…</div> :
-        otpStatus.isError ? <ErrorState message={niceError(otpStatus.error, "Sign-in availability could not be checked.")} retry={() => void otpStatus.refetch()} /> :
-        !otpAvailable ? <div className="lms-alert lms-alert-warning" role="status"><Icon icon={LockKeyhole} /><span><strong>Phone sign-in is not configured yet.</strong><br />{otpStatus.data?.message || "The one-time code service is currently unavailable. Sending is disabled; please contact your institute coordinator."}</span></div> : null}
-      {formError && <div className={`lms-alert ${formError.startsWith("Invitation accepted") ? "lms-alert-success" : "lms-alert-error"}`} role="status">{formError}</div>}
-      {mode === "phone" ? <form onSubmit={sendOtp}>
+      {authStatus.isError && <ErrorState message={niceError(authStatus.error, "Sign-in availability could not be checked.")} retry={() => void authStatus.refetch()} />}
+      {!authStatus.isLoading && !authStatus.isError && !authStatus.data?.available &&
+        <div className="lms-alert lms-alert-warning" role="status"><Icon icon={LockKeyhole} /><span>{authStatus.data?.message || "Password sign-in is currently unavailable. Contact your institute coordinator."}</span></div>}
+      {formError && <div className="lms-alert lms-alert-error" role="alert">{formError}</div>}
+      <form onSubmit={signIn}>
         <div className="lms-field"><label htmlFor="lms-phone">Phone number</label><input id="lms-phone" className="lms-input" type="tel" autoComplete="tel" placeholder="+91 98765 43210" value={phone} onChange={e => setPhone(e.target.value)} required /></div>
-        <button className="lms-button" type="submit" disabled={!otpAvailable || !phone.trim() || requestOtp.isPending} style={{ width: "100%" }}>
-          {requestOtp.isPending ? <><Icon icon={LoaderCircle} /> Requesting code…</> : <>Send one-time code <Icon icon={ArrowRight} size={16} /></>}
+        <div className="lms-field"><label htmlFor="lms-password">Password</label><input id="lms-password" className="lms-input" type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} required /></div>
+        <button className="lms-button" type="submit" disabled={!phone.trim() || !password || login.isPending || !authStatus.data?.available} style={{ width: "100%" }}>
+          {login.isPending ? <><Icon icon={LoaderCircle} /> Signing in…</> : <>Sign in <Icon icon={ArrowRight} size={16} /></>}
         </button>
-        {requestOtp.isError && <p className="lms-help" role="alert">{niceError(requestOtp.error, "Request failed.")}</p>}
-      </form> : <form onSubmit={verify}>
-        <div className="lms-field"><label htmlFor="lms-otp">Six-digit WhatsApp code</label><input id="lms-otp" className="lms-input lms-mono" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} pattern="[0-9]{6}" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} required /></div>
-        <button className="lms-button" type="submit" disabled={!challengeId || code.length !== 6 || verifyOtp.isPending} style={{ width: "100%" }}>{verifyOtp.isPending ? "Verifying…" : "Verify and continue"}</button>
-        <button className="lms-switch" type="button" disabled={requestOtp.isPending || secondsUntilResend > 0} onClick={resendOtp}>{requestOtp.isPending ? "Requesting another code…" : secondsUntilResend > 0 ? `Resend code in ${secondsUntilResend}s` : "Resend code"}</button>
-        <button className="lms-switch" type="button" onClick={() => { setMode("phone"); setCode(""); setChallengeId(""); setFormError(""); }}>Use a different phone number</button>
-      </form>}
+      </form>
+      <p className="lms-help" style={{ marginTop: 16 }}>First time here or need a reset? Ask your institute coordinator for a one-time password setup link.</p>
       <div className="lms-footer-note">
-        Invitation codes are redeemed after you verify your phone number.
+        Student course access depends on your account's active enrolments.
       </div>
+    </div></main>
+  </div>;
+}
+
+export function PasswordSetupPage() {
+  const setup = useLmsPasswordSetup();
+  const [, setLocation] = useLocation();
+  const [token] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.hash.slice(1)).get("token") || "";
+  });
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [formError, setFormError] = useState("");
+  const [complete, setComplete] = useState(false);
+
+  useEffect(() => {
+    if (window.location.hash) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+  }, []);
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    setFormError("");
+    if (!token) {
+      setFormError("This setup link is invalid or expired. Ask your institute coordinator for a new one.");
+      return;
+    }
+    if (password !== confirmation) {
+      setFormError("The passwords do not match.");
+      return;
+    }
+    setup.mutate({ token, password }, {
+      onSuccess: () => {
+        setPassword("");
+        setConfirmation("");
+        setComplete(true);
+      },
+      onError: error => setFormError(niceError(error, "This setup link is invalid or expired.")),
+    });
+  };
+
+  return <div className="lms lms-auth-wrap">
+    <aside className="lms-auth-aside">
+      <Link href="/learn" className="lms-brand" style={{ color: "inherit" }}><span className="lms-mark" style={{ background: "#c49b57", color: "#37261a" }}>A</span><span><span className="lms-brand-name">Aroma LEAP</span><span className="lms-brand-sub" style={{ color: "rgba(255,247,233,.58)" }}>Learning space</span></span></Link>
+      <div><div className="lms-eyebrow">Secure account setup</div><h1>Set your password.<br />Start learning.</h1><p>Choose a private password for your Aroma LEAP account. Your password is stored securely as a one-way hash.</p></div>
+      <div className="lms-auth-caption">Aroma Institute · Café & Hospitality Management</div>
+    </aside>
+    <main className="lms-auth-main"><div className="lms-auth-form">
+      <div className="lms-eyebrow">One-time setup link</div>
+      <h2>{complete ? "Your password is ready" : "Create your password"}</h2>
+      {complete ? <>
+        <div className="lms-alert lms-alert-success" role="status">Password set. You can now sign in to the learning space.</div>
+        <Link className="lms-button" href="/learn" style={{ width: "100%", justifyContent: "center" }}>Continue to sign in <Icon icon={ArrowRight} size={16} /></Link>
+      </> : <>
+        <p>Use at least 12 characters. Don’t reuse a password from another account.</p>
+        {!token && <div className="lms-alert lms-alert-warning" role="status"><Icon icon={LockKeyhole} /><span>This setup link is missing or invalid. Ask your institute coordinator for a fresh link.</span></div>}
+        {formError && <div className="lms-alert lms-alert-error" role="alert">{formError}</div>}
+        <form onSubmit={submit}>
+          <div className="lms-field"><label htmlFor="lms-new-password">New password</label><input id="lms-new-password" className="lms-input" type="password" autoComplete="new-password" minLength={12} maxLength={128} value={password} onChange={event => setPassword(event.target.value)} required /></div>
+          <div className="lms-field"><label htmlFor="lms-confirm-password">Confirm password</label><input id="lms-confirm-password" className="lms-input" type="password" autoComplete="new-password" minLength={12} maxLength={128} value={confirmation} onChange={event => setConfirmation(event.target.value)} required /></div>
+          <button className="lms-button" type="submit" disabled={!token || setup.isPending || password.length < 12 || !confirmation} style={{ width: "100%" }}>{setup.isPending ? "Saving securely…" : "Set password"}</button>
+        </form>
+        <button className="lms-switch" type="button" onClick={() => setLocation("/learn")}>Back to sign in</button>
+      </>}
     </div></main>
   </div>;
 }
@@ -378,8 +407,11 @@ function AdminContent({ user }: { user: LmsUser }) {
   const overview = useAdminOverview(true);
   const courses = useAdminCourses(true);
   const invitations = useAdminInvitations(true);
+  const adminUsers = useAdminUsers(true);
   const certificateReviews = useAdminCertificates(true);
   const createCourse = useCreateLmsCourse();
+  const createUser = useCreateLmsUser();
+  const createPasswordSetupLink = useCreateLmsPasswordSetupLink();
   const setStatus = useSetLmsCourseStatus();
   const createInvitation = useCreateLmsInvitation();
   const revokeInvitation = useRevokeLmsInvitation();
@@ -391,6 +423,12 @@ function AdminContent({ user }: { user: LmsUser }) {
   const [oneTimeCode, setOneTimeCode] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState("");
   const [courseError, setCourseError] = useState("");
+  const [accountError, setAccountError] = useState("");
+  const [accountMessage, setAccountMessage] = useState("");
+  const [setupLink, setSetupLink] = useState<{ setupPath: string; expiresAt: string; userName: string } | null>(null);
+  const [accountName, setAccountName] = useState("");
+  const [accountPhone, setAccountPhone] = useState("");
+  const [accountRole, setAccountRole] = useState<"student" | "trainer">("student");
   const [inviteCourseId, setInviteCourseId] = useState("");
   const [invitePhone, setInvitePhone] = useState("");
   const [inviteUses, setInviteUses] = useState("1");
@@ -442,6 +480,30 @@ function AdminContent({ user }: { user: LmsUser }) {
       },
     );
   };
+  const submitAccount = (event: FormEvent) => {
+    event.preventDefault();
+    setAccountError("");
+    setAccountMessage("");
+    createUser.mutate(
+      { displayName: accountName.trim(), phoneE164: accountPhone.trim(), role: accountRole },
+      {
+        onSuccess: () => {
+          setAccountName("");
+          setAccountPhone("");
+          setAccountRole("student");
+          setAccountMessage("Account saved. Create a one-time password setup link below.");
+        },
+        onError: error => setAccountError(niceError(error, "Account could not be saved.")),
+      },
+    );
+  };
+  const issuePasswordLink = (userId: number, userName: string | null) => {
+    setAccountError("");
+    createPasswordSetupLink.mutate(userId, {
+      onSuccess: result => setSetupLink({ ...result, userName: userName || "LEAP user" }),
+      onError: error => setAccountError(niceError(error, "Password setup link could not be created.")),
+    });
+  };
   return <PageFrame user={user} onLogout={logout}>
     <div className="lms-page-head"><div><div className="lms-eyebrow">Institute operations</div><h1>Learning, at a glance.</h1><p className="lms-subtitle">Manage the published course catalogue and issue student invitations.</p></div><div className="lms-row"><button className="lms-button lms-button-secondary" onClick={() => { setCourseError(""); setCourseDialog(true); }}><Icon icon={Plus} size={16} /> New course</button><button className="lms-button" onClick={() => { setInviteError(""); setInviteDialog(true); }} disabled={!activeCourses.length}><Icon icon={KeyRound} size={16} /> New invitation</button></div></div>
     {overview.isError && <ErrorState message={niceError(overview.error, "Admin overview could not be loaded.")} retry={() => void overview.refetch()} />}
@@ -449,6 +511,26 @@ function AdminContent({ user }: { user: LmsUser }) {
     {stats && <div className="lms-stat-grid">
       {[["Students", stats.students], ["Trainers", stats.trainers], ["Courses", stats.courses], ["Active enrollments", stats.activeEnrollments]].map(([label, value]) => <div className="lms-stat" key={label}><span>{label}</span><strong>{value}</strong><span>Current institute total</span></div>)}
     </div>}
+    <section className="lms-panel" style={{ marginBottom: 16 }}>
+      <div className="lms-panel-head"><div><div className="lms-eyebrow">Account access</div><h2>Student and trainer accounts</h2></div><span className="lms-tag">{adminUsers.data?.length ?? "—"} accounts</span></div>
+      <p className="lms-help">Create an account, then give the person a one-time setup link so they can choose their own password. Setup links expire after 24 hours; share them privately.</p>
+      <form onSubmit={submitAccount} className="lms-grid lms-grid-2">
+        <div className="lms-field"><label htmlFor="account-name">Name</label><input id="account-name" className="lms-input" value={accountName} onChange={event => setAccountName(event.target.value)} minLength={2} maxLength={180} required /></div>
+        <div className="lms-field"><label htmlFor="account-phone">Phone number</label><input id="account-phone" className="lms-input" type="tel" autoComplete="off" placeholder="+91 98765 43210 or 10-digit Indian mobile" value={accountPhone} onChange={event => setAccountPhone(event.target.value)} required /></div>
+        <div className="lms-field"><label htmlFor="account-role">Account type</label><select id="account-role" className="lms-select" value={accountRole} onChange={event => setAccountRole(event.target.value as "student" | "trainer")}><option value="student">Student</option><option value="trainer">Trainer</option></select></div>
+        <div className="lms-row" style={{ alignItems: "end" }}><button className="lms-button" type="submit" disabled={createUser.isPending}>{createUser.isPending ? "Saving account…" : "Save account"}</button></div>
+      </form>
+      {accountMessage && <div className="lms-alert lms-alert-success" role="status" style={{ marginTop: 12 }}>{accountMessage}</div>}
+      {accountError && <div className="lms-alert lms-alert-error" role="alert" style={{ marginTop: 12 }}>{accountError}</div>}
+      {adminUsers.isLoading ? <LoadingRows count={3} /> : adminUsers.isError ? <ErrorState message={niceError(adminUsers.error, "Accounts could not be loaded.")} retry={() => void adminUsers.refetch()} /> : !adminUsers.data?.length ? <EmptyState icon={GraduationCap} title="No student or trainer accounts" detail="Add an account above to start onboarding." /> :
+        <div className="lms-table-wrap" style={{ marginTop: 16 }}><table className="lms-table"><thead><tr><th>Name</th><th>Phone</th><th>Role</th><th>Password</th><th>Action</th></tr></thead><tbody>{adminUsers.data.map(account => <tr key={account.id}>
+          <td><strong>{account.displayName || "Name required"}</strong>{!account.isActive && <div className="lms-help">Inactive</div>}</td>
+          <td className="lms-mono">{account.phoneE164}</td>
+          <td>{account.roles.length ? account.roles.join(", ") : "No role"}</td>
+          <td>{account.hasPassword ? "Set" : "Not set"}</td>
+          <td><button className="lms-button lms-button-secondary lms-button-sm" onClick={() => issuePasswordLink(account.id, account.displayName)} disabled={!account.isActive || createPasswordSetupLink.isPending}>{account.hasPassword ? "Reset password" : "Create setup link"}</button></td>
+        </tr>)}</tbody></table></div>}
+    </section>
     <div className="lms-grid lms-grid-2">
       <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Catalogue</div><h2>Courses</h2></div><span className="lms-tag">{listedCourses.length} total</span></div>
         {courses.isLoading ? <LoadingRows count={3} /> : courses.isError ? <ErrorState message={niceError(courses.error, "Courses could not be loaded.")} retry={() => void courses.refetch()} /> : !listedCourses.length ? <EmptyState title="No courses in the catalogue" detail="Create a course to start building your LEAP catalogue." icon={BookOpen} /> :
@@ -490,6 +572,11 @@ function AdminContent({ user }: { user: LmsUser }) {
         {inviteError && <div className="lms-alert lms-alert-error" role="alert">{inviteError}</div>}
         <div className="lms-row" style={{ justifyContent: "flex-end", marginTop: 18 }}><button className="lms-button lms-button-secondary" type="button" onClick={() => setInviteDialog(false)}>Cancel</button><button className="lms-button" type="submit" disabled={createInvitation.isPending || !inviteCourseId}>{createInvitation.isPending ? "Generating…" : "Generate one-time code"}</button></div>
       </form></section></div>}
+     {setupLink && <div className="lms-dialog-backdrop"><section className="lms-dialog" role="dialog" aria-modal="true" aria-labelledby="password-setup-link-title"><div className="lms-dialog-head"><div><div className="lms-eyebrow">Password access</div><h2 id="password-setup-link-title">Copy the one-time setup link</h2></div><button className="lms-icon-button" onClick={() => setSetupLink(null)} aria-label="Close and hide setup link"><Icon icon={X} /></button></div>
+       <div className="lms-alert lms-alert-warning"><Icon icon={ShieldAlert} /><span>This link is for {setupLink.userName}, can be used once, and expires {formatDate(setupLink.expiresAt)}. Share it privately. The full link will not be shown again after closing.</span></div>
+       <div className="lms-code-display" aria-label="One-time password setup link">{`${window.location.origin}${setupLink.setupPath}`}</div>
+       <div className="lms-row" style={{ justifyContent: "flex-end" }}><button className="lms-button lms-button-secondary" onClick={async () => { try { await navigator.clipboard.writeText(`${window.location.origin}${setupLink.setupPath}`); } catch { setAccountError("Clipboard access was unavailable. Select and copy the setup link manually."); } }}>Copy link</button><button className="lms-button" onClick={() => setSetupLink(null)}>I've shared it securely</button></div>
+     </section></div>}
     {oneTimeCode && <div className="lms-dialog-backdrop"><section className="lms-dialog" role="dialog" aria-modal="true" aria-labelledby="one-time-code-title"><div className="lms-dialog-head"><div><div className="lms-eyebrow">Created successfully</div><h2 id="one-time-code-title">Copy this invitation now</h2></div><button className="lms-icon-button" onClick={() => setOneTimeCode(null)} aria-label="Close and hide code"><Icon icon={X} /></button></div><div className="lms-alert lms-alert-warning"><Icon icon={ShieldAlert} /><span>This code will not be shown again. Store or share it securely before closing this window.</span></div><div className="lms-code-display" aria-label="Invitation code">{oneTimeCode}</div><div className="lms-row" style={{ justifyContent: "flex-end" }}><button className="lms-button lms-button-secondary" onClick={async () => { try { await navigator.clipboard.writeText(oneTimeCode); } catch { setInviteError("Clipboard access was unavailable. Select and copy the invitation code manually."); } }}>Copy code</button><button className="lms-button" onClick={() => setOneTimeCode(null)}>I've secured it</button></div></section></div>}
   </PageFrame>;
 }

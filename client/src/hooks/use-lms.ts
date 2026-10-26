@@ -10,16 +10,9 @@ export interface LmsUser {
   roles: LmsRole[];
 }
 
-export interface OtpStatus {
+export interface LmsAuthStatus {
   available: boolean;
   channel: string;
-  message: string;
-}
-
-export interface OtpRequestResult {
-  challengeId: string;
-  expiresAt: string;
-  resendAfterSeconds: number;
   message: string;
 }
 
@@ -136,6 +129,15 @@ export interface LmsInvitation {
   createdAt: string;
 }
 
+export interface LmsAdminUser {
+  id: number;
+  phoneE164: string;
+  displayName: string | null;
+  isActive: boolean;
+  hasPassword: boolean;
+  roles: LmsRole[];
+}
+
 export async function requestJson<T>(method: string, url: string, data?: unknown): Promise<T> {
   const response = await apiRequest(method, url, data);
   if (response.status === 204) return undefined as T;
@@ -149,8 +151,8 @@ async function optionalSession(): Promise<LmsUser | null> {
   return response.json();
 }
 
-export function useLmsOtpStatus() {
-  return useQuery<OtpStatus>({
+export function useLmsAuthStatus() {
+  return useQuery<LmsAuthStatus>({
     queryKey: ["/api/lms/auth/status"],
     queryFn: () => requestJson("GET", "/api/lms/auth/status"),
     staleTime: 30_000,
@@ -164,20 +166,19 @@ export function useLmsSession() {
     staleTime: 30_000,
   });
 }
-
-export function useRequestLmsOtp() {
+export function useLmsPasswordLogin() {
+  const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (phone: string) =>
-      requestJson<OtpRequestResult>("POST", "/api/lms/auth/otp/request", { phone }),
+    mutationFn: (input: { phone: string; password: string }) =>
+      requestJson<LmsUser>("POST", "/api/lms/auth/password/login", input),
+    onSuccess: (user) => queryClient.setQueryData(["/api/lms/auth/me"], user),
   });
 }
 
-export function useVerifyLmsOtp() {
-  const queryClient = useQueryClient();
+export function useLmsPasswordSetup() {
   return useMutation({
-    mutationFn: (input: { phone: string; challengeId: string; code: string }) =>
-      requestJson<LmsUser>("POST", "/api/lms/auth/otp/verify", input),
-    onSuccess: (user) => queryClient.setQueryData(["/api/lms/auth/me"], user),
+    mutationFn: (input: { token: string; password: string }) =>
+      requestJson<{ message: string }>("POST", "/api/lms/auth/password/setup", input),
   });
 }
 
@@ -347,6 +348,42 @@ export function useAdminCourses(enabled = true) {
     queryKey: ["/api/lms/admin/courses"],
     queryFn: () => requestJson("GET", "/api/lms/admin/courses"),
     enabled,
+  });
+}
+
+export function useAdminUsers(enabled = true) {
+  return useQuery<LmsAdminUser[]>({
+    queryKey: ["/api/lms/admin/users"],
+    queryFn: () => requestJson("GET", "/api/lms/admin/users"),
+    enabled,
+  });
+}
+
+export function useCreateLmsUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { phoneE164: string; displayName: string; role: "student" | "trainer" }) =>
+      requestJson<{ id: number; phoneE164: string; displayName: string; role: "student" | "trainer" }>(
+        "POST",
+        "/api/lms/admin/users",
+        input,
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/overview"] });
+    },
+  });
+}
+
+export function useCreateLmsPasswordSetupLink() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: number) =>
+      requestJson<{ setupPath: string; expiresAt: string }>(
+        "POST",
+        `/api/lms/admin/users/${userId}/password-setup`,
+      ),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/users"] }),
   });
 }
 

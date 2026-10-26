@@ -33,6 +33,8 @@ import {
 } from "@shared/lms-schema";
 import { db } from "../db";
 import { requireLmsRole, requireLmsUser } from "./auth";
+import { issueLmsPasswordSetupLink } from "./password-auth";
+import { normalizeLmsPhone } from "./password-security";
 
 const nameSchema = z.string().trim().min(2).max(180);
 const descriptionSchema = z.string().trim().max(5000).default("");
@@ -852,6 +854,47 @@ export function registerLmsManagementRoutes(app: Express) {
     },
   );
 
+  app.get(
+    "/api/lms/admin/users",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (_req, res) => {
+      try {
+        const users = await db
+          .select({
+            id: lmsUsers.id,
+            phoneE164: lmsUsers.phoneE164,
+            displayName: lmsUsers.displayName,
+            isActive: lmsUsers.isActive,
+            hasPassword: sql<boolean>`${lmsUsers.passwordHash} IS NOT NULL`,
+          })
+          .from(lmsUsers)
+          .orderBy(asc(lmsUsers.displayName), asc(lmsUsers.id))
+          .limit(500);
+        const roleRows = users.length
+          ? await db
+              .select({ userId: lmsUserRoles.userId, role: lmsUserRoles.role })
+              .from(lmsUserRoles)
+              .where(inArray(lmsUserRoles.userId, users.map((user) => user.id)))
+          : [];
+        const rolesByUser = new Map<number, string[]>();
+        for (const assignment of roleRows) {
+          const current = rolesByUser.get(assignment.userId) ?? [];
+          current.push(assignment.role);
+          rolesByUser.set(assignment.userId, current);
+        }
+        res.json(
+          users.map((user) => ({
+            ...user,
+            roles: rolesByUser.get(user.id) ?? [],
+          })),
+        );
+      } catch {
+        res.status(500).json({ message: "Unable to load accounts." });
+      }
+    },
+  );
+
   app.post(
     "/api/lms/admin/users",
     requireLmsUser,
@@ -859,17 +902,19 @@ export function registerLmsManagementRoutes(app: Express) {
     async (req, res) => {
       const parsed = z
         .object({
-          phoneE164: z.string().trim().regex(/^\+[1-9]\d{7,14}$/),
+          phoneE164: z.string().trim().min(1).max(32),
           displayName: z.string().trim().min(2).max(180),
           role: z.enum(["student", "trainer"]),
         })
         .safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ message: "Enter a valid phone, name, and role." });
+      const phoneE164 = normalizeLmsPhone(parsed.data.phoneE164);
+      if (!phoneE164) return res.status(400).json({ message: "Enter a valid phone, name, and role." });
       try {
         const user = await db.transaction(async (tx) => {
           const [created] = await tx
             .insert(lmsUsers)
-            .values(parsed.data)
+            .values({ phoneE164, displayName: parsed.data.displayName })
             .onConflictDoNothing({ target: lmsUsers.phoneE164 })
             .returning();
           const account =
@@ -878,7 +923,7 @@ export function registerLmsManagementRoutes(app: Express) {
               await tx
                 .select()
                 .from(lmsUsers)
-                .where(eq(lmsUsers.phoneE164, parsed.data.phoneE164))
+                .where(eq(lmsUsers.phoneE164, phoneE164))
                 .limit(1)
             )[0];
           if (!account) throw new Error("Unable to create account.");
@@ -906,6 +951,33 @@ export function registerLmsManagementRoutes(app: Express) {
         });
       } catch {
         res.status(500).json({ message: "Unable to provision this account." });
+      }
+    },
+  );
+
+  app.post(
+    "/api/lms/admin/users/:userId/password-setup",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (req, res) => {
+      const userId = Number(req.params.userId);
+      if (!Number.isSafeInteger(userId) || userId < 1) {
+        return res.status(400).json({ message: "Invalid account." });
+      }
+      try {
+        const setupLink = await issueLmsPasswordSetupLink(userId);
+        await appendAudit(
+          req.lmsUser!.id,
+          "user.password_setup_link_issued",
+          "user",
+          userId,
+        );
+        return res.json(setupLink);
+      } catch (error) {
+        if (error instanceof Error && error.message === "USER_NOT_FOUND") {
+          return res.status(404).json({ message: "Account not found." });
+        }
+        return res.status(500).json({ message: "Unable to create a password setup link." });
       }
     },
   );

@@ -12,6 +12,7 @@ import {
   CoursePage as LmsCoursePage,
   CourseManagerPage,
   LearnLoginPage,
+  PasswordSetupPage,
   StudentDashboardPage,
   TrainerPage,
 } from "@/lms-ui";
@@ -23,6 +24,7 @@ function Router() {
       <Route path="/vsl" component={VSL} />
       <Route path="/admin" component={Admin} />
       <Route path="/learn" component={LearnLoginPage} />
+      <Route path="/learn/setup" component={PasswordSetupPage} />
       <Route path="/learn/dashboard" component={StudentDashboardPage} />
       <Route path="/learn/courses/:courseId" component={LmsCoursePage} />
       <Route path="/manage/courses/:courseId" component={CourseManagerPage} />

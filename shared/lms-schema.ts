@@ -32,6 +32,7 @@ export const lmsUsers = pgTable(
     id: serial("id").primaryKey(),
     phoneE164: varchar("phone_e164", { length: 20 }).notNull().unique(),
     displayName: text("display_name"),
+    passwordHash: varchar("password_hash", { length: 255 }),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -445,6 +446,34 @@ export const lmsOtpChallenges = pgTable(
     index("lms_otp_challenges_phone_created_idx").on(table.phoneE164, table.createdAt),
     index("lms_otp_challenges_expiry_idx").on(table.expiresAt),
   ],
+);
+
+export const lmsPasswordSetupTokens = pgTable(
+  "lms_password_setup_tokens",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => lmsUsers.id, { onDelete: "cascade" }),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("lms_password_setup_tokens_user_idx").on(table.userId, table.createdAt),
+    index("lms_password_setup_tokens_expiry_idx").on(table.expiresAt),
+  ],
+);
+
+export const lmsAuthRateLimits = pgTable(
+  "lms_auth_rate_limits",
+  {
+    keyHash: varchar("key_hash", { length: 64 }).primaryKey(),
+    windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+    attempts: integer("attempts").notNull().default(0),
+  },
+  (table) => [index("lms_auth_rate_limits_window_idx").on(table.windowStartedAt)],
 );
 
 export const sessions = pgTable(

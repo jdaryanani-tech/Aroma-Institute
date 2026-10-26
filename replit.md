@@ -49,7 +49,7 @@ The Home page (`client/src/pages/Home.tsx`) is composed of these sections in ord
 - **Database**: PostgreSQL (required via `DATABASE_URL` environment variable)
 - **ORM**: Drizzle ORM with `drizzle-orm/node-postgres`
 - **Schema**: Inquiry definitions in `shared/schema.ts`; additive LMS definitions in `shared/lms-schema.ts`
-- **LMS tables**: Users and roles, courses, modules, chapters, lessons, enrollments, invitations, progress, assessment versions/attempts, trainer assignments, live sessions, attendance, certificates, notifications, audit records, OTP challenges, and PostgreSQL sessions
+- **LMS tables**: Users and roles, courses, modules, chapters, lessons, enrollments, invitations, progress, assessment versions/attempts, trainer assignments, live sessions, attendance, certificates, notifications, audit records, OTP challenges, password setup tokens, auth rate limits, and PostgreSQL sessions
 - **Schema Push**: Use `npm run db:push` (runs `drizzle-kit push`) to sync schema to database
 - **Migrations**: Output directory is `./migrations` (configured in `drizzle.config.ts`)
 
@@ -82,13 +82,12 @@ The Home page (`client/src/pages/Home.tsx`) is composed of these sections in ord
 ## LMS implementation status
 
 - LMS routes use the existing Express server and PostgreSQL database. LMS sessions are stored in the `sessions` table with HttpOnly, SameSite cookies and role checks on protected API routes.
-- The `/learn` login is wired to the draft contract in `docs/n8n-otp-contract.md`. OTP remains disabled and the API returns `503` until the institute implements the n8n send/verify webhook and configures `N8N_OTP_WEBHOOK_URL` plus `N8N_OTP_WEBHOOK_TOKEN`; no code is sent and no session is created while either setting is missing or invalid.
-- The institute's current n8n automation handles counselling inquiries and appointment bookings. Add the OTP branch to that automation, following the documented request/verification contract.
+- The `/learn` login currently uses phone and password as the temporary no-SMS method chosen by the institute. Passwords are scrypt-hashed server-side, login/setup attempts are rate-limited, and users set or reset passwords through single-use links issued by an LMS administrator. The n8n WhatsApp endpoint remains configured only on the server and is never called; OTP send/verify endpoints return `503` and cannot create a session. See `docs/lms-otp-provider-contract.md` for the provider contract still required before WhatsApp OTP can be enabled.
 - The initial UI includes student dashboard/course learning and assessment attempts, certificate status/review requests, a trainer course outline and assessment editor, and admin course/invitation/certificate-review workflows. More account, roster, reporting, live-session, notification, and settings screens remain.
 - Course modules, chapters, lessons, and assessments are stored in PostgreSQL. Resource metadata is modeled, but persistent resource upload/download storage is not connected.
 - Approved certificates can be rendered as a branded PDF and are protected by the student/admin authorization check.
 - The leads dashboard at `/admin` now requires an LMS administrator session; the previous hard-coded password fallback and browser `sessionStorage` password are removed.
-- Create the first admin account with `npm run lms:bootstrap-admin` after applying migrations. Sign-in remains unavailable until the institute's n8n send-and-verify flow is configured.
+- Create the first admin account with `npm run lms:bootstrap-admin` after applying migrations. The command prompts for the admin password without echoing it. An administrator can create student/trainer accounts and issue one-time password setup links from `/lms-admin`.
 
 ## External Dependencies
 
