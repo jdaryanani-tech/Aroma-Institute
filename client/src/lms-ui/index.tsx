@@ -2,19 +2,24 @@ import "./lms.css";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useLocation, useParams } from "wouter";
 import {
-  ArrowDownRight, ArrowLeft, ArrowRight, BookOpen, CalendarDays, Check, CheckCircle2,
-  CircleAlert, ClipboardCheck, Clock3, Coffee, GraduationCap, KeyRound, Layers3, LoaderCircle,
-  LockKeyhole, LogOut, Plus, ShieldAlert, X,
+  ArrowDownRight, ArrowLeft, ArrowRight, Bell, BookOpen, CalendarDays, Check, CheckCircle2,
+  CircleAlert, ClipboardCheck, Clock3, Coffee, FileBarChart2, GraduationCap, History,
+  KeyRound, Layers3, LoaderCircle, LockKeyhole, LogOut, Plus, Send, ShieldAlert,
+  UserRound, UserRoundCheck, UserRoundX, Users, X,
 } from "lucide-react";
 import {
-  useAdminCertificates, useAdminCourses, useAdminInvitations, useAdminOverview, useAdminUsers, useCourseOutline, useCreateLmsCourse,
+  useAdminAuditLogs, useAdminCertificates, useAdminCourseReports, useAdminCourses, useAdminEnrollments, useAdminInvitations, useAdminOverview, useAdminTrainerAssignments, useAdminUsers, useAssignLmsTrainer, useCourseOutline, useCreateAdminEnrollment, useCreateLmsCourse,
+  useCreateManagedLiveSession,
   useCreateLmsInvitation, useCreateLmsPasswordSetupLink, useCreateLmsUser, useLmsAuthStatus, useLmsLogout,
+  useLmsNotifications, useMarkLmsNotificationRead, useManagedCourseStudents, useManagedLiveSessions,
+  useRemoveLmsTrainerAssignment, useSendLmsCourseNotification, useSetAdminEnrollmentStatus,
+  useSetManagedLiveSessionStatus, useUpdateLmsProfile,
   useLmsPasswordLogin, useLmsPasswordSetup, useLmsSession, useMarkLessonComplete,
   useRedeemLmsInvitation, useRevokeLmsInvitation, useSetLmsCourseStatus,
   useRequestCertificateReview, useStudentAssessment, useStudentCertificates, useStudentDashboard,
   useReviewLmsCertificate, useSubmitLmsAssessment, useTrainerCourses,
 } from "@/hooks/use-lms";
-import type { CourseOutline, LmsCourse, LmsInvitation, LmsUser } from "@/hooks/use-lms";
+import type { AdminEnrollment, CourseOutline, LmsCourse, LmsInvitation, LmsUser } from "@/hooks/use-lms";
 
 type IconComponent = typeof Coffee;
 function Icon({ icon: Symbol, size = 18 }: { icon: IconComponent; size?: number }) {
@@ -55,6 +60,41 @@ function formatDate(value: string, withTime = false) {
 }
 function niceError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+function ProfileNotifications({ user }: { user: LmsUser }) {
+  const updateProfile = useUpdateLmsProfile();
+  const notifications = useLmsNotifications(true);
+  const markRead = useMarkLmsNotificationRead();
+  const [displayName, setDisplayName] = useState(user.displayName ?? "");
+  const [profileMessage, setProfileMessage] = useState("");
+  const saveProfile = (event: FormEvent) => {
+    event.preventDefault();
+    setProfileMessage("");
+    updateProfile.mutate(displayName.trim(), {
+      onSuccess: profile => setProfileMessage(`Profile updated${profile.displayName ? ` for ${profile.displayName}` : ""}.`),
+      onError: error => setProfileMessage(niceError(error, "Your profile could not be updated.")),
+    });
+  };
+  return <section className="lms-grid lms-grid-2 lms-account-tools">
+    <section className="lms-panel">
+      <div className="lms-panel-head"><div><div className="lms-eyebrow">Your account</div><h2>Profile</h2></div><Icon icon={UserRound} /></div>
+      <form onSubmit={saveProfile}>
+        <div className="lms-field"><label htmlFor={`profile-name-${user.id}`}>Display name</label><input id={`profile-name-${user.id}`} className="lms-input" value={displayName} onChange={event => setDisplayName(event.target.value)} minLength={2} maxLength={180} required /></div>
+        <div className="lms-field"><label>Phone number</label><div className="lms-input lms-readonly">{user.phoneE164}</div><span className="lms-help">Contact an administrator if this number needs to change.</span></div>
+        {profileMessage && <div className={`lms-alert ${updateProfile.isError ? "lms-alert-error" : "lms-alert-success"}`} role="status" style={{ marginBottom: 12 }}>{profileMessage}</div>}
+        <button className="lms-button lms-button-secondary" type="submit" disabled={updateProfile.isPending || displayName.trim().length < 2}>{updateProfile.isPending ? "Saving…" : "Save profile"}</button>
+      </form>
+    </section>
+    <section className="lms-panel">
+      <div className="lms-panel-head"><div><div className="lms-eyebrow">Updates</div><h2>Notifications</h2></div><span className="lms-tag">{notifications.data?.filter(item => !item.readAt).length ?? "—"} unread</span></div>
+      {notifications.isLoading ? <LoadingRows count={2} /> : notifications.isError ? <ErrorState message={niceError(notifications.error, "Notifications could not be loaded.")} retry={() => void notifications.refetch()} /> : !notifications.data?.length ? <EmptyState icon={Bell} title="No notifications" detail="Course announcements and account updates will appear here." /> :
+        <div className="lms-notification-list">{notifications.data.map(notification => <article className={`lms-notification ${notification.readAt ? "is-read" : ""}`} key={notification.id}>
+          <div><strong>{notification.title}</strong><p>{notification.body}</p><span className="lms-help">{notification.category.replaceAll("_", " ")} · {formatDate(notification.createdAt, true)}</span></div>
+          {!notification.readAt && <button className="lms-button lms-button-secondary lms-button-sm" onClick={() => markRead.mutate(notification.id)} disabled={markRead.isPending}>Mark read</button>}
+        </article>)}</div>}
+      {markRead.isError && <div className="lms-alert lms-alert-error" role="alert" style={{ marginTop: 12 }}>{niceError(markRead.error, "Notification could not be updated.")}</div>}
+    </section>
+  </section>;
 }
 function SessionGuard({ children, allow }: { children: (user: LmsUser) => ReactNode; allow: string }) {
   const session = useLmsSession();
@@ -252,6 +292,7 @@ function StudentDashboardContent({ user }: { user: LmsUser }) {
         }) : <EmptyState icon={CalendarDays} title="No sessions scheduled" detail="Your trainer's upcoming live sessions will show here." />}
       </aside>
     </div>
+    <ProfileNotifications user={user} />
     <section className="lms-panel lms-certificate-panel">
       <div className="lms-panel-head"><div><div className="lms-eyebrow">Course completion</div><h2>Certificates</h2></div><Icon icon={GraduationCap} /></div>
       {certificates.isLoading ? <LoadingRows count={2} /> : certificates.isError ? <ErrorState message={niceError(certificates.error, "Certificate status could not be loaded.")} retry={() => void certificates.refetch()} /> : !certificates.data?.length ? <EmptyState icon={GraduationCap} title="No certificate records yet" detail="Certificate status will appear after you enrol in a course." /> :
@@ -388,16 +429,183 @@ export function TrainerPage() {
 function TrainerContent({ user }: { user: LmsUser }) {
   const courses = useTrainerCourses(true);
   const logout = useLogoutAction();
+  const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
+  const students = useManagedCourseStudents(selectedCourseId);
+  const sessions = useManagedLiveSessions(selectedCourseId);
+  const createSession = useCreateManagedLiveSession();
+  const setSessionStatus = useSetManagedLiveSessionStatus();
+  const [sessionTitle, setSessionTitle] = useState("");
+  const [sessionTopic, setSessionTopic] = useState("");
+  const [sessionUrl, setSessionUrl] = useState("");
+  const [sessionStart, setSessionStart] = useState("");
+  const [sessionEnd, setSessionEnd] = useState("");
+  const [sessionMessage, setSessionMessage] = useState("");
+  useEffect(() => {
+    if (selectedCourseId === null && courses.data?.length) setSelectedCourseId(courses.data[0].id);
+    else if (selectedCourseId !== null && courses.data && !courses.data.some(course => course.id === selectedCourseId)) {
+      setSelectedCourseId(courses.data[0]?.id ?? null);
+    }
+  }, [courses.data, selectedCourseId]);
   if (courses.isLoading) return <div className="lms"><BrandHeader user={user} onLogout={logout} /><main className="lms-shell lms-main"><LoadingRows /></main></div>;
+  const submitSession = (event: FormEvent) => {
+    event.preventDefault();
+    if (!selectedCourseId) return;
+    setSessionMessage("");
+    createSession.mutate({
+      courseId: selectedCourseId,
+      title: sessionTitle.trim(),
+      topic: sessionTopic.trim(),
+      meetUrl: sessionUrl.trim(),
+      startsAt: new Date(sessionStart).toISOString(),
+      ...(sessionEnd ? { endsAt: new Date(sessionEnd).toISOString() } : {}),
+    }, {
+      onSuccess: () => {
+        setSessionTitle(""); setSessionTopic(""); setSessionUrl(""); setSessionStart(""); setSessionEnd("");
+        setSessionMessage("Live session scheduled. Enrolled students can now see it.");
+      },
+      onError: error => setSessionMessage(niceError(error, "Live session could not be scheduled.")),
+    });
+  };
   return <PageFrame user={user} onLogout={logout}>
-    <div className="lms-page-head"><div><div className="lms-eyebrow">Trainer workspace</div><h1>Teaching, with intention.</h1><p className="lms-subtitle">Your assigned Aroma LEAP courses are gathered here.</p></div><span className="lms-tag">Trainer</span></div>
+    <div className="lms-page-head"><div><div className="lms-eyebrow">Trainer workspace</div><h1>Teaching, with intention.</h1><p className="lms-subtitle">Review learner progress and schedule sessions for your assigned courses.</p></div><span className="lms-tag">Trainer</span></div>
     {courses.isError ? <ErrorState message={niceError(courses.error, "Assigned courses could not be loaded.")} retry={() => void courses.refetch()} /> :
       courses.data?.length ? <div className="lms-grid lms-grid-courses">{courses.data.map(course => <TrainerCourseCard key={course.id} course={course} />)}</div> :
-      <EmptyState icon={GraduationCap} title="No courses assigned yet" detail="When the institute assigns a course to you, it will appear here. There are no course-management actions available in this workspace yet." />}
+      <EmptyState icon={GraduationCap} title="No courses assigned yet" detail="When the institute assigns a course to you, it will appear here." />}
+    {courses.data?.length ? <>
+      <section className="lms-panel lms-trainer-operations">
+        <div className="lms-panel-head"><div><div className="lms-eyebrow">Learner progress</div><h2>Course roster</h2><p className="lms-help">Only learners enrolled in a course assigned to your account are shown.</p></div>
+          <select className="lms-select lms-course-picker" aria-label="Choose assigned course" value={selectedCourseId ?? ""} onChange={event => setSelectedCourseId(Number(event.target.value))}>{courses.data.map(course => <option key={course.id} value={course.id}>{course.title}</option>)}</select>
+        </div>
+        {students.isLoading ? <LoadingRows count={2} /> : students.isError ? <ErrorState message={niceError(students.error, "The learner roster could not be loaded.")} retry={() => void students.refetch()} /> : !students.data?.length ? <EmptyState icon={Users} title="No enrolled learners yet" detail="Student progress will appear when learners enrol in this course." /> :
+          <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>Student</th><th>Enrolled</th><th>Status</th><th>Progress</th></tr></thead><tbody>{students.data.map(student => <tr key={student.enrollmentId}>
+            <td><strong>{student.displayName || "Name not provided"}</strong><div className="lms-help">{student.phoneE164}</div></td><td>{formatDate(student.enrolledAt)}</td><td><span className={`lms-status lms-status-${student.enrollmentStatus}`}>{student.enrollmentStatus}</span></td><td><strong>{student.progressPercent}%</strong><div className="lms-help">{student.completedLessons} of {student.totalLessons} published lessons</div></td>
+          </tr>)}</tbody></table></div>}
+      </section>
+      <section className="lms-grid lms-grid-2 lms-trainer-operations">
+        <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Live learning</div><h2>Schedule a session</h2></div><Icon icon={CalendarDays} /></div>
+          <form onSubmit={submitSession}>
+            <div className="lms-field"><label htmlFor="trainer-session-title">Session title</label><input id="trainer-session-title" className="lms-input" value={sessionTitle} onChange={event => setSessionTitle(event.target.value)} maxLength={180} required /></div>
+            <div className="lms-field"><label htmlFor="trainer-session-topic">Topic</label><textarea id="trainer-session-topic" className="lms-textarea" value={sessionTopic} onChange={event => setSessionTopic(event.target.value)} maxLength={2000} /></div>
+            <div className="lms-field"><label htmlFor="trainer-session-url">Google Meet link</label><input id="trainer-session-url" type="url" className="lms-input" placeholder="https://meet.google.com/..." value={sessionUrl} onChange={event => setSessionUrl(event.target.value)} required /></div>
+            <div className="lms-grid lms-grid-2"><div className="lms-field"><label htmlFor="trainer-session-start">Starts</label><input id="trainer-session-start" type="datetime-local" className="lms-input" value={sessionStart} onChange={event => setSessionStart(event.target.value)} required /></div><div className="lms-field"><label htmlFor="trainer-session-end">Ends (optional)</label><input id="trainer-session-end" type="datetime-local" className="lms-input" value={sessionEnd} onChange={event => setSessionEnd(event.target.value)} /></div></div>
+            {sessionMessage && <div className={`lms-alert ${createSession.isError ? "lms-alert-error" : "lms-alert-success"}`} role="status" style={{ marginBottom: 12 }}>{sessionMessage}</div>}
+            <button className="lms-button" type="submit" disabled={createSession.isPending}>{createSession.isPending ? "Scheduling…" : "Schedule live session"}</button>
+          </form>
+        </section>
+        <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Course calendar</div><h2>Manage sessions</h2></div><Icon icon={CalendarDays} /></div>
+          {sessions.isLoading ? <LoadingRows count={2} /> : sessions.isError ? <ErrorState message={niceError(sessions.error, "Live sessions could not be loaded.")} retry={() => void sessions.refetch()} /> : !sessions.data?.length ? <EmptyState icon={CalendarDays} title="No sessions scheduled" detail="Schedule the first live session for this course." /> :
+            <div className="lms-managed-sessions">{sessions.data.map(session => <article key={session.id} className="lms-managed-session">
+              <div><strong>{session.title}</strong><div className="lms-help">{session.topic || "No topic details"} · {formatDate(session.startsAt, true)}</div><a href={session.meetUrl} target="_blank" rel="noreferrer" className="lms-course-link">Open Meet link <Icon icon={ArrowDownRight} size={13} /></a></div>
+              <div className="lms-session-actions"><span className={`lms-status lms-status-${session.status}`}>{session.status}</span>{session.status === "scheduled" && <><button className="lms-button lms-button-secondary lms-button-sm" disabled={setSessionStatus.isPending} onClick={() => setSessionStatus.mutate({ sessionId: session.id, courseId: session.courseId, status: "completed" })}>Complete</button><button className="lms-button lms-button-danger lms-button-sm" disabled={setSessionStatus.isPending} onClick={() => setSessionStatus.mutate({ sessionId: session.id, courseId: session.courseId, status: "cancelled" })}>Cancel</button></>}</div>
+            </article>)}</div>}
+          {setSessionStatus.isError && <div className="lms-alert lms-alert-error" role="alert" style={{ marginTop: 12 }}>{niceError(setSessionStatus.error, "Session status could not be updated.")}</div>}
+        </section>
+      </section>
+    </> : null}
+    <ProfileNotifications user={user} />
   </PageFrame>;
 }
 function TrainerCourseCard({ course }: { course: LmsCourse }) {
   return <article className="lms-panel lms-course-card"><div className="lms-course-band" /><div className="lms-course-body"><div className="lms-course-meta"><span className={`lms-status lms-status-${course.status}`}>{course.status}</span><span className="lms-mono lms-muted" style={{ fontSize: 11 }}>{course.slug}</span></div><h3>{course.title}</h3><p className="lms-muted">{course.description}</p><Link className="lms-button lms-button-secondary lms-button-sm" href={`/manage/courses/${course.id}`}>Manage course outline <Icon icon={ArrowRight} size={14} /></Link></div></article>;
+}
+
+function AdminOperations({ courses, users }: { courses: LmsCourse[]; users: ReturnType<typeof useAdminUsers>["data"] }) {
+  const assignments = useAdminTrainerAssignments(true);
+  const enrollments = useAdminEnrollments(true);
+  const reports = useAdminCourseReports(true);
+  const auditLogs = useAdminAuditLogs(true);
+  const assignTrainer = useAssignLmsTrainer();
+  const removeAssignment = useRemoveLmsTrainerAssignment();
+  const createEnrollment = useCreateAdminEnrollment();
+  const setEnrollmentStatus = useSetAdminEnrollmentStatus();
+  const sendNotification = useSendLmsCourseNotification();
+  const trainers = (users ?? []).filter(account => account.isActive && account.roles.includes("trainer"));
+  const students = (users ?? []).filter(account => account.isActive && account.roles.includes("student"));
+  const [trainerId, setTrainerId] = useState("");
+  const [assignmentCourseId, setAssignmentCourseId] = useState("");
+  const [enrollmentStudentId, setEnrollmentStudentId] = useState("");
+  const [enrollmentCourseId, setEnrollmentCourseId] = useState("");
+  const [announcementCourseId, setAnnouncementCourseId] = useState("");
+  const [announcementTitle, setAnnouncementTitle] = useState("");
+  const [announcementBody, setAnnouncementBody] = useState("");
+  const [feedback, setFeedback] = useState("");
+  const submitAssignment = (event: FormEvent) => {
+    event.preventDefault();
+    setFeedback("");
+    assignTrainer.mutate({ trainerId: Number(trainerId), courseId: Number(assignmentCourseId) }, {
+      onSuccess: () => setFeedback("Trainer assigned to the course."),
+      onError: error => setFeedback(niceError(error, "Trainer assignment could not be saved.")),
+    });
+  };
+  const submitEnrollment = (event: FormEvent) => {
+    event.preventDefault();
+    setFeedback("");
+    createEnrollment.mutate({ studentId: Number(enrollmentStudentId), courseId: Number(enrollmentCourseId) }, {
+      onSuccess: () => setFeedback("Student enrolled in the course."),
+      onError: error => setFeedback(niceError(error, "Student could not be enrolled.")),
+    });
+  };
+  const submitAnnouncement = (event: FormEvent) => {
+    event.preventDefault();
+    setFeedback("");
+    sendNotification.mutate({ courseId: Number(announcementCourseId), title: announcementTitle.trim(), body: announcementBody.trim() }, {
+      onSuccess: result => {
+        setFeedback(`Notification sent to ${result.sent} enrolled ${result.sent === 1 ? "student" : "students"} in ${result.courseTitle}.`);
+        setAnnouncementTitle(""); setAnnouncementBody("");
+      },
+      onError: error => setFeedback(niceError(error, "Notification could not be sent.")),
+    });
+  };
+  const onStatusChange = (enrollment: AdminEnrollment, status: AdminEnrollment["status"]) => {
+    if (status === enrollment.status) return;
+    setFeedback("");
+    setEnrollmentStatus.mutate({ enrollmentId: enrollment.id, status }, {
+      onSuccess: () => setFeedback("Enrolment status updated."),
+      onError: error => setFeedback(niceError(error, "Enrolment status could not be updated.")),
+    });
+  };
+  return <>
+    {feedback && <div className={`lms-alert ${assignTrainer.isError || createEnrollment.isError || sendNotification.isError || setEnrollmentStatus.isError ? "lms-alert-error" : "lms-alert-success"}`} role="status" style={{ marginBottom: 16 }}>{feedback}</div>}
+    <div className="lms-grid lms-grid-2">
+      <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Teaching teams</div><h2>Trainer assignments</h2></div><Icon icon={UserRoundCheck} /></div>
+        <form className="lms-grid lms-grid-2 lms-compact-form" onSubmit={submitAssignment}>
+          <div className="lms-field"><label htmlFor="assignment-trainer">Trainer</label><select id="assignment-trainer" className="lms-select" value={trainerId} onChange={event => setTrainerId(event.target.value)} required><option value="">Choose trainer</option>{trainers.map(trainer => <option key={trainer.id} value={trainer.id}>{trainer.displayName || trainer.phoneE164}</option>)}</select></div>
+          <div className="lms-field"><label htmlFor="assignment-course">Course</label><select id="assignment-course" className="lms-select" value={assignmentCourseId} onChange={event => setAssignmentCourseId(event.target.value)} required><option value="">Choose course</option>{courses.map(course => <option key={course.id} value={course.id}>{course.title}</option>)}</select></div>
+          <div><button className="lms-button" type="submit" disabled={!trainers.length || !courses.length || assignTrainer.isPending}>{assignTrainer.isPending ? "Assigning…" : "Assign trainer"}</button></div>
+        </form>
+        {assignments.isLoading ? <LoadingRows count={2} /> : assignments.isError ? <ErrorState message={niceError(assignments.error, "Trainer assignments could not be loaded.")} retry={() => void assignments.refetch()} /> : !assignments.data?.length ? <EmptyState icon={UserRoundX} title="No course assignments yet" detail="Assign a trainer to a course to let them manage its learning space." /> :
+          <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>Trainer</th><th>Course</th><th></th></tr></thead><tbody>{assignments.data.map(assignment => <tr key={assignment.id}><td><strong>{assignment.trainerName || "Trainer"}</strong><div className="lms-help">{assignment.trainerPhone}</div></td><td>{assignment.courseTitle}</td><td><button className="lms-button lms-button-danger lms-button-sm" disabled={removeAssignment.isPending} onClick={() => { if (window.confirm(`Remove ${assignment.trainerName || "this trainer"} from ${assignment.courseTitle}?`)) removeAssignment.mutate(assignment.id); }}>Remove</button></td></tr>)}</tbody></table></div>}
+        {removeAssignment.isError && <div className="lms-alert lms-alert-error" role="alert">{niceError(removeAssignment.error, "Trainer assignment could not be removed.")}</div>}
+      </section>
+      <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Learner access</div><h2>Manage enrolments</h2></div><Icon icon={Users} /></div>
+        <form className="lms-grid lms-grid-2 lms-compact-form" onSubmit={submitEnrollment}>
+          <div className="lms-field"><label htmlFor="enrol-student">Student</label><select id="enrol-student" className="lms-select" value={enrollmentStudentId} onChange={event => setEnrollmentStudentId(event.target.value)} required><option value="">Choose student</option>{students.map(student => <option key={student.id} value={student.id}>{student.displayName || student.phoneE164}</option>)}</select></div>
+          <div className="lms-field"><label htmlFor="enrol-course">Course</label><select id="enrol-course" className="lms-select" value={enrollmentCourseId} onChange={event => setEnrollmentCourseId(event.target.value)} required><option value="">Choose course</option>{courses.map(course => <option key={course.id} value={course.id}>{course.title}</option>)}</select></div>
+          <div><button className="lms-button" type="submit" disabled={!students.length || !courses.length || createEnrollment.isPending}>{createEnrollment.isPending ? "Enrolling…" : "Enrol student"}</button></div>
+        </form>
+        {enrollments.isLoading ? <LoadingRows count={2} /> : enrollments.isError ? <ErrorState message={niceError(enrollments.error, "Enrolments could not be loaded.")} retry={() => void enrollments.refetch()} /> : !enrollments.data?.length ? <EmptyState icon={GraduationCap} title="No enrolments yet" detail="Enrol an existing student into a course above." /> :
+          <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>Student</th><th>Course</th><th>Status</th><th>Enrolled</th></tr></thead><tbody>{enrollments.data.map(enrollment => <tr key={enrollment.id}><td><strong>{enrollment.studentName || "Student"}</strong><div className="lms-help">{enrollment.studentPhone}</div></td><td>{enrollment.courseTitle}</td><td><select aria-label={`Status for ${enrollment.studentName || "student"} in ${enrollment.courseTitle}`} className="lms-select lms-status-select" value={enrollment.status} onChange={event => onStatusChange(enrollment, event.target.value as AdminEnrollment["status"])} disabled={setEnrollmentStatus.isPending}>{["active", "completed", "suspended", "withdrawn"].map(status => <option key={status} value={status}>{status}</option>)}</select></td><td>{formatDate(enrollment.enrolledAt)}</td></tr>)}</tbody></table></div>}
+      </section>
+    </div>
+    <div className="lms-grid lms-grid-2 lms-admin-secondary">
+      <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Course updates</div><h2>Send notification</h2><p className="lms-help">Only active students enrolled in the selected course will receive this message.</p></div><Icon icon={Send} /></div>
+        <form onSubmit={submitAnnouncement}>
+          <div className="lms-field"><label htmlFor="announcement-course">Course</label><select id="announcement-course" className="lms-select" value={announcementCourseId} onChange={event => setAnnouncementCourseId(event.target.value)} required><option value="">Choose course</option>{courses.map(course => <option key={course.id} value={course.id}>{course.title}</option>)}</select></div>
+          <div className="lms-field"><label htmlFor="announcement-title">Title</label><input id="announcement-title" className="lms-input" value={announcementTitle} onChange={event => setAnnouncementTitle(event.target.value)} maxLength={180} required /></div>
+          <div className="lms-field"><label htmlFor="announcement-body">Message</label><textarea id="announcement-body" className="lms-textarea" value={announcementBody} onChange={event => setAnnouncementBody(event.target.value)} maxLength={2000} required /></div>
+          <button className="lms-button" type="submit" disabled={sendNotification.isPending || !courses.length}>{sendNotification.isPending ? "Sending…" : "Send to enrolled students"}</button>
+        </form>
+      </section>
+      <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Institute overview</div><h2>Course reports</h2></div><Icon icon={FileBarChart2} /></div>
+        {reports.isLoading ? <LoadingRows count={2} /> : reports.isError ? <ErrorState message={niceError(reports.error, "Course reports could not be loaded.")} retry={() => void reports.refetch()} /> : !reports.data?.length ? <EmptyState icon={FileBarChart2} title="No course data yet" detail="Reports will show up as courses and enrolments are added." /> :
+          <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>Course</th><th>Enrolled</th><th>Completed</th><th>Live sessions</th></tr></thead><tbody>{reports.data.map(report => <tr key={report.id}><td><strong>{report.title}</strong><div className="lms-help">{report.status} · {report.publishedLessons} published lessons</div></td><td>{report.activeEnrollments} active <div className="lms-help">{report.enrollments} total</div></td><td>{report.completedEnrollments}</td><td>{report.scheduledSessions} scheduled <div className="lms-help">{report.liveSessions} total</div></td></tr>)}</tbody></table></div>}
+      </section>
+    </div>
+    <section className="lms-panel lms-audit-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Accountability</div><h2>Audit log</h2><p className="lms-help">Recent administrative and learning-management changes.</p></div><Icon icon={History} /></div>
+      {auditLogs.isLoading ? <LoadingRows count={2} /> : auditLogs.isError ? <ErrorState message={niceError(auditLogs.error, "Audit history could not be loaded.")} retry={() => void auditLogs.refetch()} /> : !auditLogs.data?.length ? <EmptyState icon={History} title="No audit events yet" detail="Administrative actions will be recorded here." /> :
+        <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Record</th></tr></thead><tbody>{auditLogs.data.map(log => <tr key={log.id}><td>{formatDate(log.createdAt, true)}</td><td>{log.actorName || "System"}</td><td><span className="lms-mono">{log.action}</span></td><td>{log.entityType} {log.entityId ? `#${log.entityId}` : ""}</td></tr>)}</tbody></table></div>}
+    </section>
+  </>;
 }
 
 export function AdminPage() {
@@ -505,7 +713,7 @@ function AdminContent({ user }: { user: LmsUser }) {
     });
   };
   return <PageFrame user={user} onLogout={logout}>
-    <div className="lms-page-head"><div><div className="lms-eyebrow">Institute operations</div><h1>Learning, at a glance.</h1><p className="lms-subtitle">Manage the published course catalogue and issue student invitations.</p></div><div className="lms-row"><button className="lms-button lms-button-secondary" onClick={() => { setCourseError(""); setCourseDialog(true); }}><Icon icon={Plus} size={16} /> New course</button><button className="lms-button" onClick={() => { setInviteError(""); setInviteDialog(true); }} disabled={!activeCourses.length}><Icon icon={KeyRound} size={16} /> New invitation</button></div></div>
+    <div className="lms-page-head"><div><div className="lms-eyebrow">Institute operations</div><h1>Learning, at a glance.</h1><p className="lms-subtitle">Manage accounts, course access, trainer assignments, learning sessions, and institute reports.</p></div><div className="lms-row"><button className="lms-button lms-button-secondary" onClick={() => { setCourseError(""); setCourseDialog(true); }}><Icon icon={Plus} size={16} /> New course</button><button className="lms-button" onClick={() => { setInviteError(""); setInviteDialog(true); }} disabled={!activeCourses.length}><Icon icon={KeyRound} size={16} /> New invitation</button></div></div>
     {overview.isError && <ErrorState message={niceError(overview.error, "Admin overview could not be loaded.")} retry={() => void overview.refetch()} />}
     {setStatus.isError && <div className="lms-alert lms-alert-error" role="alert" style={{ marginBottom: 14 }}>{niceError(setStatus.error, "Course status could not be changed.")}</div>}
     {stats && <div className="lms-stat-grid">
@@ -531,6 +739,8 @@ function AdminContent({ user }: { user: LmsUser }) {
           <td><button className="lms-button lms-button-secondary lms-button-sm" onClick={() => issuePasswordLink(account.id, account.displayName)} disabled={!account.isActive || createPasswordSetupLink.isPending}>{account.hasPassword ? "Reset password" : "Create setup link"}</button></td>
         </tr>)}</tbody></table></div>}
     </section>
+    <AdminOperations courses={listedCourses} users={adminUsers.data} />
+    <ProfileNotifications user={user} />
     <div className="lms-grid lms-grid-2">
       <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Catalogue</div><h2>Courses</h2></div><span className="lms-tag">{listedCourses.length} total</span></div>
         {courses.isLoading ? <LoadingRows count={3} /> : courses.isError ? <ErrorState message={niceError(courses.error, "Courses could not be loaded.")} retry={() => void courses.refetch()} /> : !listedCourses.length ? <EmptyState title="No courses in the catalogue" detail="Create a course to start building your LEAP catalogue." icon={BookOpen} /> :
@@ -553,7 +763,7 @@ function AdminContent({ user }: { user: LmsUser }) {
           <td>{item.status === "pending_review" ? <div className="lms-row"><button className="lms-button lms-button-sm" disabled={reviewCertificate.isPending} onClick={() => decideCertificate(item.id, "approved")}>Approve</button><button className="lms-button lms-button-danger lms-button-sm" disabled={reviewCertificate.isPending} onClick={() => decideCertificate(item.id, "rejected")}>Reject</button></div> : item.status === "approved" ? <a className="lms-button lms-button-secondary lms-button-sm" href={`/api/lms/certificates/${item.id}/pdf`}>Download PDF</a> : item.reviewNote || "—"}</td>
         </tr>)}</tbody></table></div>}
     </section>
-    <p className="lms-footer-note">Course authoring, learner account management, notifications, reports, and settings are still being built.</p>
+    <p className="lms-footer-note">Account, access, communication, and course oversight actions are restricted to authorized institute administrators.</p>
     {courseDialog && <div className="lms-dialog-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) setCourseDialog(false); }}><section className="lms-dialog" role="dialog" aria-modal="true" aria-labelledby="new-course-title"><div className="lms-dialog-head"><div><div className="lms-eyebrow">Catalogue</div><h2 id="new-course-title">Create a course</h2></div><button className="lms-icon-button" onClick={() => setCourseDialog(false)} aria-label="Close"><Icon icon={X} /></button></div>
       {newCourse ? <><div className="lms-alert lms-alert-success">Course created as a draft. Publish it from the course list when it's ready.</div><div style={{ marginTop: 18 }}><button className="lms-button" onClick={() => { setCourseDialog(false); setNewCourse(null); }}>Done</button></div></> : <form onSubmit={submitCourse}>
         <div className="lms-field"><label htmlFor="course-title">Course title</label><input className="lms-input" id="course-title" value={title} onChange={e => setTitle(e.target.value)} required maxLength={120} /></div>

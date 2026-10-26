@@ -160,6 +160,25 @@
 .lms-certificate-list { display: grid; }
 .lms-certificate-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--lms-line); }
 .lms-certificate-row:last-child { border-bottom: 0; }
+.lms-account-tools, .lms-trainer-operations, .lms-admin-secondary { margin-top: 22px; }
+.lms-readonly { display: flex; align-items: center; color: var(--lms-muted); background: #f6f3ec; }
+.lms-notification-list { display: grid; }
+.lms-notification { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--lms-line); }
+.lms-notification:last-child { border-bottom: 0; }
+.lms-notification p { margin: 4px 0 6px; color: var(--lms-muted); font-size: 13px; white-space: pre-wrap; }
+.lms-notification.is-read { opacity: .72; }
+.lms-notification .lms-button { flex: none; }
+.lms-course-picker { max-width: 300px; }
+.lms-compact-form { align-items: end; gap: 10px; margin-bottom: 18px; }
+.lms-compact-form .lms-field { margin-bottom: 0; }
+.lms-admin-secondary { margin-top: 18px; }
+.lms-audit-panel { margin-top: 18px; }
+.lms-status-select { min-width: 118px; min-height: 36px; padding: 6px 8px; }
+.lms-managed-sessions { display: grid; }
+.lms-managed-session { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; padding: 15px 0; border-bottom: 1px solid var(--lms-line); }
+.lms-managed-session:last-child { border-bottom: 0; }
+.lms-session-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+.lms-session-actions .lms-status { white-space: nowrap; }
 .lms-builder-head { align-items: start; }
 .lms-builder-create { margin: 18px 0; }
 .lms-builder-form { display: grid; gap: 12px; }
@@ -198,6 +217,9 @@
 @media (max-width: 540px) {
   .lms-builder-two-col { grid-template-columns: 1fr; }
   .lms-certificate-row { align-items: start; flex-direction: column; }
+  .lms-notification, .lms-managed-session { flex-direction: column; }
+  .lms-session-actions { justify-content: flex-start; }
+  .lms-course-picker { max-width: 100%; }
   .lms-builder-lesson { align-items: start; flex-wrap: wrap; }
   .lms-assessment-summary { gap: 6px; }
   .lms-attempt-row { flex-direction: column; gap: 4px; }

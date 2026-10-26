@@ -27,6 +27,7 @@ import {
   lmsLessons,
   lmsLiveSessions,
   lmsModules,
+  lmsNotifications,
   lmsTrainerAssignments,
   lmsUserRoles,
   lmsUsers,
@@ -258,6 +259,69 @@ async function refreshCertificateEligibility(enrollmentId: number) {
 }
 
 export function registerLmsManagementRoutes(app: Express) {
+  app.patch(
+    "/api/lms/profile",
+    requireLmsUser,
+    async (req, res) => {
+      const parsed = z.object({ displayName: nameSchema }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: "Enter a name between 2 and 180 characters." });
+      try {
+        const [updated] = await db
+          .update(lmsUsers)
+          .set({ displayName: parsed.data.displayName, updatedAt: new Date() })
+          .where(eq(lmsUsers.id, req.lmsUser!.id))
+          .returning({ id: lmsUsers.id, phoneE164: lmsUsers.phoneE164, displayName: lmsUsers.displayName });
+        await appendAudit(req.lmsUser!.id, "profile.updated", "user", req.lmsUser!.id);
+        res.json(updated);
+      } catch {
+        res.status(500).json({ message: "Unable to update your profile." });
+      }
+    },
+  );
+
+  app.get(
+    "/api/lms/notifications",
+    requireLmsUser,
+    async (req, res) => {
+      try {
+        const notifications = await db
+          .select()
+          .from(lmsNotifications)
+          .where(eq(lmsNotifications.userId, req.lmsUser!.id))
+          .orderBy(desc(lmsNotifications.createdAt))
+          .limit(100);
+        res.json(notifications);
+      } catch {
+        res.status(500).json({ message: "Unable to load notifications." });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/lms/notifications/:notificationId/read",
+    requireLmsUser,
+    async (req, res) => {
+      const notificationId = Number(req.params.notificationId);
+      if (!Number.isSafeInteger(notificationId) || notificationId < 1) {
+        return res.status(400).json({ message: "Invalid notification." });
+      }
+      try {
+        const [updated] = await db
+          .update(lmsNotifications)
+          .set({ readAt: new Date() })
+          .where(and(
+            eq(lmsNotifications.id, notificationId),
+            eq(lmsNotifications.userId, req.lmsUser!.id),
+          ))
+          .returning();
+        if (!updated) return res.status(404).json({ message: "Notification not found." });
+        res.json(updated);
+      } catch {
+        res.status(500).json({ message: "Unable to update this notification." });
+      }
+    },
+  );
+
   app.get(
     "/api/lms/manage/courses/:courseId/outline",
     requireLmsUser,
@@ -1029,6 +1093,260 @@ export function registerLmsManagementRoutes(app: Express) {
   );
 
   app.get(
+    "/api/lms/admin/trainer-assignments",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (_req, res) => {
+      try {
+        const assignments = await db
+          .select({
+            id: lmsTrainerAssignments.id,
+            trainerId: lmsTrainerAssignments.trainerId,
+            trainerName: lmsUsers.displayName,
+            trainerPhone: lmsUsers.phoneE164,
+            courseId: lmsCourses.id,
+            courseTitle: lmsCourses.title,
+            createdAt: lmsTrainerAssignments.createdAt,
+          })
+          .from(lmsTrainerAssignments)
+          .innerJoin(lmsUsers, eq(lmsTrainerAssignments.trainerId, lmsUsers.id))
+          .innerJoin(lmsCourses, eq(lmsTrainerAssignments.courseId, lmsCourses.id))
+          .orderBy(asc(lmsCourses.title), asc(lmsUsers.displayName));
+        res.json(assignments);
+      } catch {
+        res.status(500).json({ message: "Unable to load trainer assignments." });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/lms/admin/trainer-assignments/:assignmentId",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (req, res) => {
+      const assignmentId = Number(req.params.assignmentId);
+      if (!Number.isSafeInteger(assignmentId) || assignmentId < 1) {
+        return res.status(400).json({ message: "Invalid trainer assignment." });
+      }
+      try {
+        const [assignment] = await db
+          .delete(lmsTrainerAssignments)
+          .where(eq(lmsTrainerAssignments.id, assignmentId))
+          .returning({ id: lmsTrainerAssignments.id, trainerId: lmsTrainerAssignments.trainerId, courseId: lmsTrainerAssignments.courseId });
+        if (!assignment) return res.status(404).json({ message: "Trainer assignment not found." });
+        await appendAudit(req.lmsUser!.id, "trainer.unassigned", "course", assignment.courseId, { trainerId: assignment.trainerId });
+        res.json({ removed: true });
+      } catch {
+        res.status(500).json({ message: "Unable to remove trainer assignment." });
+      }
+    },
+  );
+
+  app.get(
+    "/api/lms/admin/enrollments",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (_req, res) => {
+      try {
+        const enrollments = await db
+          .select({
+            id: lmsEnrollments.id,
+            studentId: lmsUsers.id,
+            studentName: lmsUsers.displayName,
+            studentPhone: lmsUsers.phoneE164,
+            courseId: lmsCourses.id,
+            courseTitle: lmsCourses.title,
+            status: lmsEnrollments.status,
+            enrolledAt: lmsEnrollments.enrolledAt,
+          })
+          .from(lmsEnrollments)
+          .innerJoin(lmsUsers, eq(lmsEnrollments.studentId, lmsUsers.id))
+          .innerJoin(lmsCourses, eq(lmsEnrollments.courseId, lmsCourses.id))
+          .orderBy(desc(lmsEnrollments.enrolledAt))
+          .limit(1000);
+        res.json(enrollments);
+      } catch {
+        res.status(500).json({ message: "Unable to load course enrolments." });
+      }
+    },
+  );
+
+  app.post(
+    "/api/lms/admin/enrollments",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (req, res) => {
+      const parsed = z.object({
+        studentId: z.number().int().positive(),
+        courseId: z.number().int().positive(),
+      }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: "Choose a valid student and course." });
+      try {
+        const [student] = await db
+          .select({ id: lmsUsers.id })
+          .from(lmsUsers)
+          .innerJoin(lmsUserRoles, eq(lmsUserRoles.userId, lmsUsers.id))
+          .where(and(
+            eq(lmsUsers.id, parsed.data.studentId),
+            eq(lmsUsers.isActive, true),
+            eq(lmsUserRoles.role, "student"),
+          ))
+          .limit(1);
+        const [course] = await db
+          .select({ id: lmsCourses.id })
+          .from(lmsCourses)
+          .where(eq(lmsCourses.id, parsed.data.courseId))
+          .limit(1);
+        if (!student || !course) return res.status(404).json({ message: "Student or course not found." });
+        const [existing] = await db
+          .select({ id: lmsEnrollments.id, status: lmsEnrollments.status })
+          .from(lmsEnrollments)
+          .where(and(
+            eq(lmsEnrollments.studentId, student.id),
+            eq(lmsEnrollments.courseId, course.id),
+          ))
+          .limit(1);
+        if (existing) {
+          if (existing.status === "active" || existing.status === "completed") {
+            return res.status(409).json({ message: "This student already has an active or completed enrolment in the course." });
+          }
+          const [reactivated] = await db
+            .update(lmsEnrollments)
+            .set({ status: "active", enrolledAt: new Date(), completedAt: null })
+            .where(eq(lmsEnrollments.id, existing.id))
+            .returning();
+          await appendAudit(req.lmsUser!.id, "enrollment.reactivated", "enrollment", reactivated.id, { studentId: student.id, courseId: course.id });
+          return res.json(reactivated);
+        }
+        const [enrollment] = await db
+          .insert(lmsEnrollments)
+          .values({ studentId: student.id, courseId: course.id })
+          .returning();
+        await appendAudit(req.lmsUser!.id, "enrollment.created", "enrollment", enrollment.id, { studentId: student.id, courseId: course.id });
+        res.status(201).json(enrollment);
+      } catch {
+        res.status(500).json({ message: "Unable to enrol this student." });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/lms/admin/enrollments/:enrollmentId/status",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (req, res) => {
+      const enrollmentId = Number(req.params.enrollmentId);
+      const parsed = z.object({ status: z.enum(["active", "completed", "suspended", "withdrawn"]) }).safeParse(req.body);
+      if (!Number.isSafeInteger(enrollmentId) || enrollmentId < 1 || !parsed.success) {
+        return res.status(400).json({ message: "Choose a valid enrolment status." });
+      }
+      try {
+        const [updated] = await db
+          .update(lmsEnrollments)
+          .set({
+            status: parsed.data.status,
+            completedAt: parsed.data.status === "completed" ? new Date() : null,
+          })
+          .where(eq(lmsEnrollments.id, enrollmentId))
+          .returning();
+        if (!updated) return res.status(404).json({ message: "Enrolment not found." });
+        await appendAudit(req.lmsUser!.id, `enrollment.${parsed.data.status}`, "enrollment", enrollmentId);
+        res.json(updated);
+      } catch {
+        res.status(500).json({ message: "Unable to update enrolment status." });
+      }
+    },
+  );
+
+  app.get(
+    "/api/lms/admin/reports",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (_req, res) => {
+      try {
+        const courses = await db.select({
+          id: lmsCourses.id,
+          title: lmsCourses.title,
+          status: lmsCourses.status,
+        }).from(lmsCourses).orderBy(asc(lmsCourses.title));
+        const reports = await Promise.all(courses.map(async (course) => {
+          const [enrollmentTotals] = await db.select({
+            total: count(),
+            active: sql<number>`count(*) filter (where ${lmsEnrollments.status} = 'active')`,
+            completed: sql<number>`count(*) filter (where ${lmsEnrollments.status} = 'completed')`,
+          }).from(lmsEnrollments).where(eq(lmsEnrollments.courseId, course.id));
+          const [lessonTotals] = await db.select({ total: count() })
+            .from(lmsLessons)
+            .innerJoin(lmsChapters, eq(lmsLessons.chapterId, lmsChapters.id))
+            .innerJoin(lmsModules, eq(lmsChapters.moduleId, lmsModules.id))
+            .where(and(
+              eq(lmsModules.courseId, course.id),
+              eq(lmsModules.status, "published"),
+              eq(lmsChapters.status, "published"),
+              eq(lmsLessons.status, "published"),
+            ));
+          const [sessionTotals] = await db.select({
+            total: count(),
+            scheduled: sql<number>`count(*) filter (where ${lmsLiveSessions.status} = 'scheduled')`,
+          }).from(lmsLiveSessions).where(eq(lmsLiveSessions.courseId, course.id));
+          return {
+            ...course,
+            enrollments: enrollmentTotals.total,
+            activeEnrollments: Number(enrollmentTotals.active),
+            completedEnrollments: Number(enrollmentTotals.completed),
+            publishedLessons: lessonTotals.total,
+            liveSessions: sessionTotals.total,
+            scheduledSessions: Number(sessionTotals.scheduled),
+          };
+        }));
+        res.json(reports);
+      } catch {
+        res.status(500).json({ message: "Unable to load course reports." });
+      }
+    },
+  );
+
+  app.post(
+    "/api/lms/admin/notifications",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (req, res) => {
+      const parsed = z.object({
+        courseId: z.number().int().positive(),
+        title: z.string().trim().min(2).max(180),
+        body: z.string().trim().min(2).max(2000),
+      }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: "Enter a title, message, and course." });
+      try {
+        const recipients = await db.selectDistinct({ userId: lmsEnrollments.studentId })
+          .from(lmsEnrollments)
+          .innerJoin(lmsUserRoles, eq(lmsUserRoles.userId, lmsEnrollments.studentId))
+          .innerJoin(lmsUsers, eq(lmsUsers.id, lmsEnrollments.studentId))
+          .where(and(
+            eq(lmsEnrollments.courseId, parsed.data.courseId),
+            eq(lmsEnrollments.status, "active"),
+            eq(lmsUserRoles.role, "student"),
+            eq(lmsUsers.isActive, true),
+          ));
+        const [course] = await db.select({ title: lmsCourses.title }).from(lmsCourses).where(eq(lmsCourses.id, parsed.data.courseId)).limit(1);
+        if (!course) return res.status(404).json({ message: "Course not found." });
+        if (recipients.length) {
+          await db.insert(lmsNotifications).values(recipients.map(({ userId }) => ({
+            userId,
+            title: parsed.data.title,
+            body: parsed.data.body,
+            category: "course_announcement",
+          })));
+        }
+        await appendAudit(req.lmsUser!.id, "notification.course_announcement", "course", parsed.data.courseId, { recipients: recipients.length });
+        res.status(201).json({ sent: recipients.length, courseTitle: course.title });
+      } catch {
+        res.status(500).json({ message: "Unable to send the course notification." });
+      }
+    },
+  );
+
+  app.get(
     "/api/lms/manage/courses/:courseId/students",
     requireLmsUser,
     requireLmsRole("trainer", "admin"),
@@ -1405,11 +1723,25 @@ export function registerLmsManagementRoutes(app: Express) {
         if (!(await canManageCourse(parsed.data.courseId, req.lmsUser!.id, req.lmsUser!.roles))) {
           return res.status(404).json({ message: "Course not found." });
         }
+        const trainerId = req.lmsUser!.roles.includes("admin")
+          ? parsed.data.trainerId ?? req.lmsUser!.id
+          : req.lmsUser!.id;
+        if (req.lmsUser!.roles.includes("admin") && parsed.data.trainerId) {
+          const [assignedTrainer] = await db
+            .select({ id: lmsTrainerAssignments.id })
+            .from(lmsTrainerAssignments)
+            .where(and(
+              eq(lmsTrainerAssignments.courseId, parsed.data.courseId),
+              eq(lmsTrainerAssignments.trainerId, trainerId),
+            ))
+            .limit(1);
+          if (!assignedTrainer) return res.status(400).json({ message: "Assign this trainer to the course before scheduling a session for them." });
+        }
         const [session] = await db
           .insert(lmsLiveSessions)
           .values({
             courseId: parsed.data.courseId,
-            trainerId: parsed.data.trainerId ?? req.lmsUser!.id,
+            trainerId,
             title: parsed.data.title,
             topic: parsed.data.topic,
             meetUrl: parsed.data.meetUrl,

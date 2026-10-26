@@ -138,6 +138,72 @@ export interface LmsAdminUser {
   roles: LmsRole[];
 }
 
+export interface LmsNotification {
+  id: number;
+  title: string;
+  body: string;
+  category: string;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface ManagedStudent {
+  enrollmentId: number;
+  studentId: number;
+  displayName: string | null;
+  phoneE164: string;
+  enrolledAt: string;
+  enrollmentStatus: "active" | "completed" | "suspended" | "withdrawn";
+  totalLessons: number;
+  completedLessons: number;
+  progressPercent: number;
+}
+
+export interface ManagedLiveSession {
+  id: number;
+  courseId: number;
+  trainerId: number | null;
+  title: string;
+  topic: string;
+  meetUrl: string;
+  startsAt: string;
+  endsAt: string | null;
+  status: "scheduled" | "cancelled" | "completed";
+}
+
+export interface AdminTrainerAssignment {
+  id: number;
+  trainerId: number;
+  trainerName: string | null;
+  trainerPhone: string;
+  courseId: number;
+  courseTitle: string;
+  createdAt: string;
+}
+
+export interface AdminEnrollment {
+  id: number;
+  studentId: number;
+  studentName: string | null;
+  studentPhone: string;
+  courseId: number;
+  courseTitle: string;
+  status: "active" | "completed" | "suspended" | "withdrawn";
+  enrolledAt: string;
+}
+
+export interface AdminCourseReport {
+  id: number;
+  title: string;
+  status: LmsCourse["status"];
+  enrollments: number;
+  activeEnrollments: number;
+  completedEnrollments: number;
+  publishedLessons: number;
+  liveSessions: number;
+  scheduledSessions: number;
+}
+
 export async function requestJson<T>(method: string, url: string, data?: unknown): Promise<T> {
   const response = await apiRequest(method, url, data);
   if (response.status === 204) return undefined as T;
@@ -164,6 +230,41 @@ export function useLmsSession() {
     queryKey: ["/api/lms/auth/me"],
     queryFn: optionalSession,
     staleTime: 30_000,
+  });
+}
+
+export function useUpdateLmsProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (displayName: string) =>
+      requestJson<{ id: number; phoneE164: string; displayName: string | null }>(
+        "PATCH",
+        "/api/lms/profile",
+        { displayName },
+      ),
+    onSuccess: (profile) => {
+      queryClient.setQueryData<LmsUser | null>(["/api/lms/auth/me"], (user) =>
+        user ? { ...user, displayName: profile.displayName } : user,
+      );
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/student/dashboard"] });
+    },
+  });
+}
+
+export function useLmsNotifications(enabled = true) {
+  return useQuery<LmsNotification[]>({
+    queryKey: ["/api/lms/notifications"],
+    queryFn: () => requestJson("GET", "/api/lms/notifications"),
+    enabled,
+  });
+}
+
+export function useMarkLmsNotificationRead() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (notificationId: number) =>
+      requestJson<LmsNotification>("PATCH", `/api/lms/notifications/${notificationId}/read`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/lms/notifications"] }),
   });
 }
 export function useLmsPasswordLogin() {
@@ -325,6 +426,139 @@ export function useTrainerCourses(enabled = true) {
   return useQuery<LmsCourse[]>({
     queryKey: ["/api/lms/trainer/courses"],
     queryFn: () => requestJson("GET", "/api/lms/trainer/courses"),
+    enabled,
+  });
+}
+
+export function useManagedCourseStudents(courseId: number | null) {
+  return useQuery<ManagedStudent[]>({
+    queryKey: ["/api/lms/manage/courses", courseId, "students"],
+    queryFn: () => requestJson("GET", `/api/lms/manage/courses/${courseId}/students`),
+    enabled: Number.isSafeInteger(courseId) && (courseId ?? 0) > 0,
+  });
+}
+
+export function useManagedLiveSessions(courseId: number | null) {
+  return useQuery<ManagedLiveSession[]>({
+    queryKey: ["/api/lms/manage/courses", courseId, "live-sessions"],
+    queryFn: () => requestJson("GET", `/api/lms/manage/courses/${courseId}/live-sessions`),
+    enabled: Number.isSafeInteger(courseId) && (courseId ?? 0) > 0,
+  });
+}
+
+export function useCreateManagedLiveSession() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { courseId: number; title: string; topic: string; meetUrl: string; startsAt: string; endsAt?: string | null }) =>
+      requestJson<ManagedLiveSession>("POST", "/api/lms/manage/live-sessions", input),
+    onSuccess: (_session, input) => queryClient.invalidateQueries({ queryKey: ["/api/lms/manage/courses", input.courseId, "live-sessions"] }),
+  });
+}
+
+export function useSetManagedLiveSessionStatus() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { sessionId: number; courseId: number; status: ManagedLiveSession["status"] }) =>
+      requestJson<ManagedLiveSession>("POST", `/api/lms/manage/live-sessions/${input.sessionId}/status`, { status: input.status }),
+    onSuccess: (_session, input) => queryClient.invalidateQueries({ queryKey: ["/api/lms/manage/courses", input.courseId, "live-sessions"] }),
+  });
+}
+
+export function useAdminTrainerAssignments(enabled = true) {
+  return useQuery<AdminTrainerAssignment[]>({
+    queryKey: ["/api/lms/admin/trainer-assignments"],
+    queryFn: () => requestJson("GET", "/api/lms/admin/trainer-assignments"),
+    enabled,
+  });
+}
+
+export function useAssignLmsTrainer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { trainerId: number; courseId: number }) =>
+      requestJson("POST", `/api/lms/admin/trainers/${input.trainerId}/assignments`, { courseId: input.courseId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/trainer-assignments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/trainer/courses"] });
+    },
+  });
+}
+
+export function useRemoveLmsTrainerAssignment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (assignmentId: number) =>
+      requestJson<{ removed: boolean }>("DELETE", `/api/lms/admin/trainer-assignments/${assignmentId}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/trainer-assignments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/trainer/courses"] });
+    },
+  });
+}
+
+export function useAdminEnrollments(enabled = true) {
+  return useQuery<AdminEnrollment[]>({
+    queryKey: ["/api/lms/admin/enrollments"],
+    queryFn: () => requestJson("GET", "/api/lms/admin/enrollments"),
+    enabled,
+  });
+}
+
+export function useCreateAdminEnrollment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { studentId: number; courseId: number }) =>
+      requestJson("POST", "/api/lms/admin/enrollments", input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/enrollments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/overview"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/reports"] });
+    },
+  });
+}
+
+export function useSetAdminEnrollmentStatus() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { enrollmentId: number; status: AdminEnrollment["status"] }) =>
+      requestJson("PATCH", `/api/lms/admin/enrollments/${input.enrollmentId}/status`, { status: input.status }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/enrollments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/reports"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lms/admin/overview"] });
+    },
+  });
+}
+
+export function useAdminCourseReports(enabled = true) {
+  return useQuery<AdminCourseReport[]>({
+    queryKey: ["/api/lms/admin/reports"],
+    queryFn: () => requestJson("GET", "/api/lms/admin/reports"),
+    enabled,
+  });
+}
+
+export function useSendLmsCourseNotification() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { courseId: number; title: string; body: string }) =>
+      requestJson<{ sent: number; courseTitle: string }>("POST", "/api/lms/admin/notifications", input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/lms/admin"] }),
+  });
+}
+
+export function useAdminAuditLogs(enabled = true) {
+  return useQuery<{
+    id: number;
+    actorName: string | null;
+    action: string;
+    entityType: string;
+    entityId: string | null;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+  }[]>({
+    queryKey: ["/api/lms/admin/audit-logs"],
+    queryFn: () => requestJson("GET", "/api/lms/admin/audit-logs"),
     enabled,
   });
 }
