@@ -15,6 +15,13 @@
       "when": 1793037902413,
       "tag": "0001_lonely_nuke",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793039939076,
+      "tag": "0002_watery_rawhide_kid",
+      "breakpoints": true
     }
   ]
 }

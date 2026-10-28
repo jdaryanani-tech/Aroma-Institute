@@ -1,5 +1,5 @@
-import { createHash, randomBytes } from "node:crypto";
-import type { Express, Request, Response } from "express";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import express, { type Express, type Request, type Response } from "express";
 import {
   and,
   asc,
@@ -29,6 +29,7 @@ import {
   lmsLessons,
   lmsLiveSessions,
   lmsModules,
+  lmsResources,
   lmsUserRoles,
   lmsUsers,
   lmsTrainerAssignments,
@@ -42,6 +43,13 @@ import {
   type LmsRole,
 } from "./auth";
 import { calculateAssessmentScore } from "./assessment-scoring";
+import {
+  canDownloadLmsCertificate,
+  chapterPrerequisitesAreMet,
+  hasCourseResourceAccess,
+  nextAssessmentAttemptNumber,
+  redeemLockedSingleUseInvitation,
+} from "./access-policy";
 import { registerLmsPasswordAuthRoutes } from "./password-auth";
 
 const createCourseSchema = z.object({
@@ -100,7 +108,9 @@ async function hasCoursePermission(
   courseId: number,
   mode: "student" | "staff",
 ) {
-  if (mode === "staff" && roles.includes("admin")) return true;
+  if (mode === "staff" && roles.includes("admin")) {
+    return hasCourseResourceAccess(roles, mode, false, false);
+  }
   if (mode === "student" && roles.includes("student")) {
     const [enrollment] = await db
       .select({ id: lmsEnrollments.id })
@@ -113,7 +123,7 @@ async function hasCoursePermission(
         ),
       )
       .limit(1);
-    return Boolean(enrollment);
+    return hasCourseResourceAccess(roles, mode, Boolean(enrollment), false);
   }
   if (mode === "staff" && roles.includes("trainer")) {
     const [assignment] = await db
@@ -126,9 +136,9 @@ async function hasCoursePermission(
         ),
       )
       .limit(1);
-    return Boolean(assignment);
+    return hasCourseResourceAccess(roles, mode, false, Boolean(assignment));
   }
-  return false;
+  return hasCourseResourceAccess(roles, mode, false, false);
 }
 
 async function findChapterCourse(chapterId: number) {
@@ -171,6 +181,9 @@ async function chapterContentIsUnlocked(enrollmentId: number, chapterId: number)
   const currentIndex = ordered.findIndex((chapter) => chapter.id === chapterId);
   if (currentIndex < 0) return false;
 
+  const prerequisites: Array<{ requiredLessonIds: number[]; assessmentId: number | null }> = [];
+  const completedLessonIds = new Set<number>();
+  const passedAssessmentIds = new Set<number>();
   for (const previousChapter of ordered.slice(0, currentIndex)) {
     const required = await db
       .select({ id: lmsLessons.id })
@@ -196,7 +209,7 @@ async function chapterContentIsUnlocked(enrollmentId: number, chapterId: number)
             sql`${lmsLessonProgress.completedAt} IS NOT NULL`,
           ),
         );
-      if (completed.length !== required.length) return false;
+      completed.forEach(({ id }) => completedLessonIds.add(id));
     }
 
     const [assessment] = await db
@@ -221,10 +234,14 @@ async function chapterContentIsUnlocked(enrollmentId: number, chapterId: number)
           ),
         )
         .limit(1);
-      if (!passed) return false;
+      if (passed) passedAssessmentIds.add(assessment.id);
     }
+    prerequisites.push({
+      requiredLessonIds: required.map(({ id }) => id),
+      assessmentId: assessment?.id ?? null,
+    });
   }
-  return true;
+  return chapterPrerequisitesAreMet(prerequisites, completedLessonIds, passedAssessmentIds);
 }
 
 async function chapterAssessmentIsUnlocked(enrollmentId: number, chapterId: number) {
@@ -334,80 +351,88 @@ export function registerLmsRoutes(app: Express) {
 
       try {
         const result = await db.transaction(async (tx) => {
-          const [invitation] = await tx
-            .select()
-            .from(lmsInvitationCodes)
-            .where(eq(lmsInvitationCodes.codeHash, hashCode(code.data)))
-            .for("update")
-            .limit(1);
+          return redeemLockedSingleUseInvitation(
+            async () => {
+              const [invitation] = await tx
+                .select()
+                .from(lmsInvitationCodes)
+                .where(eq(lmsInvitationCodes.codeHash, hashCode(code.data)))
+                .for("update")
+                .limit(1);
+              return invitation ?? null;
+            },
+            async (invitation) => {
+              const [course] = await tx
+                .select({ id: lmsCourses.id, title: lmsCourses.title, status: lmsCourses.status })
+                .from(lmsCourses)
+                .where(eq(lmsCourses.id, invitation.courseId))
+                .limit(1);
+              if (!course || course.status !== "published") {
+                return { error: "This course is not available for enrolment.", status: 409 };
+              }
 
-          if (!invitation || invitation.status !== "active") {
-            return { error: "This invitation code is invalid or revoked.", status: 404 };
-          }
-          if (invitation.expiresAt && invitation.expiresAt <= new Date()) {
-            return { error: "This invitation code has expired.", status: 410 };
-          }
-          if (invitation.usesCount >= invitation.maxUses) {
-            return { error: "This invitation code has already been used.", status: 409 };
-          }
-          if (
-            invitation.reservedForPhone &&
-            invitation.reservedForPhone !== req.lmsUser!.phoneE164
-          ) {
-            return { error: "This invitation code was issued to another student.", status: 403 };
-          }
+              const [existing] = await tx
+                .select({ id: lmsEnrollments.id })
+                .from(lmsEnrollments)
+                .where(
+                  and(
+                    eq(lmsEnrollments.studentId, req.lmsUser!.id),
+                    eq(lmsEnrollments.courseId, course.id),
+                    eq(lmsEnrollments.status, "active"),
+                  ),
+                )
+                .limit(1);
+              if (existing) {
+                return { error: "You are already enrolled in this course.", status: 409 };
+              }
 
-          const [course] = await tx
-            .select({ id: lmsCourses.id, title: lmsCourses.title, status: lmsCourses.status })
-            .from(lmsCourses)
-            .where(eq(lmsCourses.id, invitation.courseId))
-            .limit(1);
-          if (!course || course.status !== "published") {
-            return { error: "This course is not available for enrolment.", status: 409 };
-          }
-
-          const [existing] = await tx
-            .select({ id: lmsEnrollments.id })
-            .from(lmsEnrollments)
-            .where(
-              and(
-                eq(lmsEnrollments.studentId, req.lmsUser!.id),
-                eq(lmsEnrollments.courseId, course.id),
-                eq(lmsEnrollments.status, "active"),
-              ),
-            )
-            .limit(1);
-          if (existing) {
-            return { error: "You are already enrolled in this course.", status: 409 };
-          }
-
-          const [enrollment] = await tx
-            .insert(lmsEnrollments)
-            .values({ studentId: req.lmsUser!.id, courseId: course.id })
-            .returning({ id: lmsEnrollments.id });
-          await tx
-            .update(lmsInvitationCodes)
-            .set({ usesCount: sql`${lmsInvitationCodes.usesCount} + 1` })
-            .where(eq(lmsInvitationCodes.id, invitation.id));
-          await tx.insert(lmsInvitationRedemptions).values({
-            invitationId: invitation.id,
-            studentId: req.lmsUser!.id,
-            enrollmentId: enrollment.id,
-          });
-          await tx.insert(lmsAuditLogs).values({
-            actorId: req.lmsUser!.id,
-            action: "invitation.redeemed",
-            entityType: "invitation",
-            entityId: String(invitation.id),
-            metadata: { courseId: course.id, enrollmentId: enrollment.id },
-          });
-          return { enrollmentId: enrollment.id, course };
+              const [enrollment] = await tx
+                .insert(lmsEnrollments)
+                .values({ studentId: req.lmsUser!.id, courseId: course.id })
+                .returning({ id: lmsEnrollments.id });
+              await tx
+                .update(lmsInvitationCodes)
+                .set({ usesCount: sql`${lmsInvitationCodes.usesCount} + 1` })
+                .where(eq(lmsInvitationCodes.id, invitation.id));
+              await tx.insert(lmsInvitationRedemptions).values({
+                invitationId: invitation.id,
+                studentId: req.lmsUser!.id,
+                enrollmentId: enrollment.id,
+              });
+              await tx.insert(lmsAuditLogs).values({
+                actorId: req.lmsUser!.id,
+                action: "invitation.redeemed",
+                entityType: "invitation",
+                entityId: String(invitation.id),
+                metadata: { courseId: course.id, enrollmentId: enrollment.id },
+              });
+              return { enrollmentId: enrollment.id, course };
+            },
+            (invitation) => {
+              if (invitation.status !== "active") {
+                return { error: "This invitation code is invalid or revoked.", status: 404 };
+              }
+              if (invitation.expiresAt && invitation.expiresAt <= new Date()) {
+                return { error: "This invitation code has expired.", status: 410 };
+              }
+              if (
+                invitation.reservedForPhone &&
+                invitation.reservedForPhone !== req.lmsUser!.phoneE164
+              ) {
+                return { error: "This invitation code was issued to another student.", status: 403 };
+              }
+              return null;
+            },
+          );
         });
 
         if ("error" in result) {
           return res.status(result.status ?? 500).json({ message: result.error });
         }
-        return res.status(201).json(result);
+        if ("error" in result.result) {
+          return res.status(result.result.status ?? 500).json({ message: result.result.error });
+        }
+        return res.status(201).json(result.result);
       } catch {
         return res.status(500).json({ message: "Unable to redeem this invitation code." });
       }
@@ -621,6 +646,28 @@ export function registerLmsRoutes(app: Express) {
             asc(lmsLessons.position),
           );
 
+        const lessonIds = Array.from(
+          new Set(outline.flatMap((row) => (row.lessonId ? [row.lessonId] : []))),
+        );
+        const resourceRows = lessonIds.length
+          ? await db
+              .select({
+                id: lmsResources.id,
+                lessonId: lmsResources.lessonId,
+                fileName: lmsResources.fileName,
+                contentType: lmsResources.contentType,
+                byteSize: lmsResources.byteSize,
+              })
+              .from(lmsResources)
+              .where(inArray(lmsResources.lessonId, lessonIds))
+          : [];
+        const resourcesByLesson = new Map<number, typeof resourceRows>();
+        for (const resource of resourceRows) {
+          const current = resourcesByLesson.get(resource.lessonId) ?? [];
+          current.push(resource);
+          resourcesByLesson.set(resource.lessonId, current);
+        }
+
         const chapterAccess = new Map<number, boolean>();
         for (const row of outline) {
           if (!chapterAccess.has(row.chapterId)) {
@@ -661,6 +708,9 @@ export function registerLmsRoutes(app: Express) {
               youtubeUrl: chapterAccess.get(row.chapterId) ? row.lessonYoutubeUrl : null,
               completed: chapterAccess.get(row.chapterId) && Boolean(row.lessonCompletedAt),
               locked: !chapterAccess.get(row.chapterId),
+              resources: chapterAccess.get(row.chapterId)
+                ? resourcesByLesson.get(row.lessonId) ?? []
+                : [],
             });
           }
         }
@@ -674,6 +724,99 @@ export function registerLmsRoutes(app: Express) {
         });
       } catch {
         res.status(500).json({ message: "Unable to load this course." });
+      }
+    },
+  );
+
+  app.get(
+    "/api/lms/resources/:resourceId",
+    requireAuthenticated,
+    async (req, res) => {
+      const resourceId = Number(req.params.resourceId);
+      if (!Number.isSafeInteger(resourceId) || resourceId < 1) {
+        return res.status(400).json({ message: "Invalid course resource." });
+      }
+      try {
+        const [resource] = await db
+          .select({
+            id: lmsResources.id,
+            fileName: lmsResources.fileName,
+            contentType: lmsResources.contentType,
+            byteSize: lmsResources.byteSize,
+            courseId: lmsCourses.id,
+            courseStatus: lmsCourses.status,
+            moduleStatus: lmsModules.status,
+            chapterId: lmsChapters.id,
+            chapterStatus: lmsChapters.status,
+            lessonStatus: lmsLessons.status,
+          })
+          .from(lmsResources)
+          .innerJoin(lmsLessons, eq(lmsResources.lessonId, lmsLessons.id))
+          .innerJoin(lmsChapters, eq(lmsLessons.chapterId, lmsChapters.id))
+          .innerJoin(lmsModules, eq(lmsChapters.moduleId, lmsModules.id))
+          .innerJoin(lmsCourses, eq(lmsModules.courseId, lmsCourses.id))
+          .where(eq(lmsResources.id, resourceId))
+          .limit(1);
+        if (!resource) return res.status(404).json({ message: "Course resource not found." });
+
+        const staffAccess = await hasCoursePermission(
+          req.lmsUser!.id,
+          req.lmsUser!.roles,
+          resource.courseId,
+          "staff",
+        );
+        if (!staffAccess) {
+          const studentAccess = await hasCoursePermission(
+            req.lmsUser!.id,
+            req.lmsUser!.roles,
+            resource.courseId,
+            "student",
+          );
+          if (
+            !studentAccess ||
+            resource.courseStatus !== "published" ||
+            resource.moduleStatus !== "published" ||
+            resource.chapterStatus !== "published" ||
+            resource.lessonStatus !== "published"
+          ) {
+            return res.status(404).json({ message: "Course resource not found." });
+          }
+          const [enrollment] = await db
+            .select({ id: lmsEnrollments.id })
+            .from(lmsEnrollments)
+            .where(
+              and(
+                eq(lmsEnrollments.studentId, req.lmsUser!.id),
+                eq(lmsEnrollments.courseId, resource.courseId),
+                eq(lmsEnrollments.status, "active"),
+              ),
+            )
+            .limit(1);
+          if (!enrollment || !(await chapterContentIsUnlocked(enrollment.id, resource.chapterId))) {
+            return res.status(404).json({ message: "Course resource not found." });
+          }
+        }
+
+        const [storedFile] = await db
+          .select({ fileData: lmsResources.fileData })
+          .from(lmsResources)
+          .where(eq(lmsResources.id, resourceId))
+          .limit(1);
+        if (!storedFile?.fileData) {
+          return res.status(404).json({ message: "Course resource file not found." });
+        }
+        const contents = storedFile.fileData;
+        res.setHeader("Content-Type", resource.contentType);
+        res.setHeader("Content-Length", contents.byteLength);
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename*=UTF-8''${encodeURIComponent(resource.fileName.replace(/[\r\n]/g, ""))}`,
+        );
+        res.setHeader("Cache-Control", "private, no-store");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        return res.status(200).send(contents);
+      } catch {
+        return res.status(500).json({ message: "Course resource could not be retrieved." });
       }
     },
   );
@@ -989,7 +1132,7 @@ export function registerLmsRoutes(app: Express) {
                 eq(lmsAssessmentAttempts.assessmentId, assessmentId),
               ),
             );
-          const attemptNumber = (previousAttempts?.total ?? 0) + 1;
+          const attemptNumber = nextAssessmentAttemptNumber(previousAttempts?.total ?? 0);
           const [attempt] = await tx
             .insert(lmsAssessmentAttempts)
             .values({

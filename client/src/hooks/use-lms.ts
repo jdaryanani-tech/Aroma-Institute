@@ -78,6 +78,7 @@ export interface CourseOutline {
         youtubeUrl: string | null;
         completed: boolean;
         locked: boolean;
+        resources: { id: number; fileName: string; contentType: string; byteSize: number }[];
       }[];
     }[];
   }[];

@@ -381,6 +381,7 @@ function CoursePageContent({ user }: { user: LmsUser }) {
               <div className="lms-empty" style={{ marginBottom: 18 }}><div className="lms-empty-mark"><Icon icon={BookOpen} /></div><h3>Lesson materials</h3><p className="lms-muted">{selected.youtubeUrl ? "The lesson video link is not a valid secure YouTube URL." : "There is no video attached to this lesson. Use the lesson notes below and mark your practice when complete."}</p></div>}
             {selected.description && <p style={{ marginTop: 18, color: "var(--lms-muted)" }}>{selected.description}</p>}
             {selected.requiredForAssessment && <p className="lms-help">Required for assessment</p>}
+            {selected.resources.length > 0 && <div className="lms-builder-lessons" style={{ margin: "18px 0" }}><strong>Learning files</strong>{selected.resources.map(resource => <div key={resource.id}><a className="lms-course-link" href={`/api/lms/resources/${resource.id}`}>{resource.fileName}</a><span className="lms-help"> · {(resource.byteSize / 1024).toFixed(0)} KB</span></div>)}</div>}
             <button className={`lms-button ${selected.completed ? "lms-button-secondary" : ""}`} onClick={() => toggleComplete(selected)} disabled={mark.isPending || selected.locked} aria-pressed={selected.completed}>
               {selected.locked ? <><Icon icon={LockKeyhole} /> Locked</> : mark.isPending ? "Saving progress…" : selected.completed ? <><Icon icon={CheckCircle2} /> Completed — mark as incomplete</> : <><Icon icon={Check} /> Mark lesson complete</>}
             </button>

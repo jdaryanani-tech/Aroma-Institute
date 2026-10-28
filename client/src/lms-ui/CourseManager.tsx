@@ -7,6 +7,7 @@ import type { LmsCourse } from "@/hooks/use-lms";
 import { AssessmentEditor } from "./AssessmentEditor";
 
 type Status = "draft" | "published" | "archived";
+type ManagedResource = { id: number; fileName: string; contentType: string; byteSize: number };
 type ManagedLesson = {
   id: number;
   title: string;
@@ -16,6 +17,7 @@ type ManagedLesson = {
   requiredForAssessment: boolean;
   position: number;
   status: Status;
+  resources: ManagedResource[];
 };
 type ManagedChapter = {
   id: number;
@@ -92,6 +94,28 @@ export function CourseManagerPage() {
       requestJson("POST", `/api/lms/manage/${input.kind}/${input.id}/status`, { status: input.status }),
     onSuccess: invalidate,
   });
+  const uploadResource = useMutation({
+    mutationFn: async (input: { lessonId: number; file: File }) => {
+      const contentType =
+        input.file.type ||
+        (input.file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "text/plain");
+      const response = await fetch(`/api/lms/manage/lessons/${input.lessonId}/resources`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": contentType,
+          "X-File-Name": encodeURIComponent(input.file.name),
+        },
+        body: input.file,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(typeof result.message === "string" ? result.message : "File upload failed.");
+      }
+      return result;
+    },
+    onSuccess: invalidate,
+  });
 
   if (session.isLoading || (session.data && allowed && outline.isLoading)) {
     return <div className="lms"><main className="lms-shell lms-main"><LoaderCircle className="lms-spin" /> Loading course workspace…</main></div>;
@@ -147,6 +171,28 @@ export function CourseManagerPage() {
     }, { onSuccess: () => { form.reset(); setFormMessage("Lesson added as a draft."); }, onError: error => setFormMessage(error instanceof Error ? error.message : "Lesson could not be added.") });
   }
 
+  function submitResource(event: FormEvent<HTMLFormElement>, lessonId: number) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const file = (new FormData(form).get("resource") as File | null) ?? null;
+    if (!file || file.size === 0) {
+      setFormMessage("Choose a PDF or plain text file first.");
+      return;
+    }
+    setFormMessage("");
+    uploadResource.mutate(
+      { lessonId, file },
+      {
+        onSuccess: () => {
+          form.reset();
+          setFormMessage("Learning file uploaded.");
+        },
+        onError: error =>
+          setFormMessage(error instanceof Error ? error.message : "File upload failed."),
+      },
+    );
+  }
+
   const toggleStatus = (kind: "modules" | "chapters" | "lessons", id: number, status: Status) => {
     const nextStatus = status === "published" ? "draft" : "published";
     if (window.confirm(`${nextStatus === "published" ? "Publish" : "Move back to draft"} this ${kind.slice(0, -1)}?`)) {
@@ -179,7 +225,7 @@ export function CourseManagerPage() {
               {module.chapters.map((chapter, chapterIndex) => <div className="lms-builder-chapter" key={chapter.id}>
                 <div className="lms-builder-title"><div><div className="lms-eyebrow">Chapter {moduleIndex + 1}.{chapterIndex + 1}</div><h3>{chapter.title}</h3></div><span className={statusClass(chapter.status)}>{chapter.status}</span>{isAdmin && <button className="lms-button lms-button-secondary lms-button-sm" disabled={setContentStatus.isPending} onClick={() => toggleStatus("chapters", chapter.id, chapter.status)}>{chapter.status === "published" ? "Unpublish" : "Publish"}</button>}</div>
                 {chapter.description && <p className="lms-muted">{chapter.description}</p>}
-                <div className="lms-builder-lessons">{chapter.lessons.map((lesson, lessonIndex) => <div className="lms-builder-lesson" key={lesson.id}><div><strong>{lessonIndex + 1}. {lesson.title}</strong><p className="lms-help">{lesson.durationMinutes ? `${lesson.durationMinutes} min · ` : ""}{lesson.requiredForAssessment ? "Required for assessment" : "Optional lesson"}</p>{lesson.youtubeUrl && <a href={lesson.youtubeUrl} target="_blank" rel="noreferrer" className="lms-course-link">View YouTube link</a>}</div><span className={statusClass(lesson.status)}>{lesson.status}</span>{isAdmin && <button className="lms-button lms-button-secondary lms-button-sm" disabled={setContentStatus.isPending} onClick={() => toggleStatus("lessons", lesson.id, lesson.status)}>{lesson.status === "published" ? "Unpublish" : "Publish"}</button>}</div>)}</div>
+                <div className="lms-builder-lessons">{chapter.lessons.map((lesson, lessonIndex) => <div className="lms-builder-lesson" key={lesson.id}><div><strong>{lessonIndex + 1}. {lesson.title}</strong><p className="lms-help">{lesson.durationMinutes ? `${lesson.durationMinutes} min · ` : ""}{lesson.requiredForAssessment ? "Required for assessment" : "Optional lesson"}</p>{lesson.youtubeUrl && <a href={lesson.youtubeUrl} target="_blank" rel="noreferrer" className="lms-course-link">View YouTube link</a>}{lesson.resources.map(resource => <div key={resource.id}><a href={`/api/lms/resources/${resource.id}`} className="lms-course-link">{resource.fileName}</a><span className="lms-help"> · {(resource.byteSize / 1024).toFixed(0)} KB</span></div>)}<form className="lms-builder-inline-form" onSubmit={event => submitResource(event, lesson.id)}><label className="lms-help">Add learning file (PDF or TXT, up to 10 MB)<input name="resource" type="file" accept=".pdf,.txt,application/pdf,text/plain" className="lms-input" required /></label><button className="lms-button lms-button-secondary lms-button-sm" type="submit" disabled={uploadResource.isPending}>{uploadResource.isPending ? "Uploading…" : "Upload file"}</button></form></div><span className={statusClass(lesson.status)}>{lesson.status}</span>{isAdmin && <button className="lms-button lms-button-secondary lms-button-sm" disabled={setContentStatus.isPending} onClick={() => toggleStatus("lessons", lesson.id, lesson.status)}>{lesson.status === "published" ? "Unpublish" : "Publish"}</button>}</div>)}</div>
                 <AssessmentEditor chapterId={chapter.id} courseId={courseId} assessment={chapter.assessment} canPublish={isAdmin} />
                 <form className="lms-builder-form lms-builder-inline-form" onSubmit={event => submitLesson(event, chapter)}>
                   <strong>Add lesson</strong>

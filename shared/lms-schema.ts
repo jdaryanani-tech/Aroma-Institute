@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  customType,
   index,
   integer,
   jsonb,
@@ -13,6 +14,10 @@ import {
   uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
+
+const lmsResourceBytes = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType: () => "bytea",
+});
 
 export const lmsRoleEnum = pgEnum("lms_role", ["student", "trainer", "admin"]);
 export const contentStatusEnum = pgEnum("lms_content_status", ["draft", "published", "archived"]);
@@ -156,6 +161,7 @@ export const lmsResources = pgTable(
     contentType: text("content_type").notNull(),
     byteSize: integer("byte_size").notNull(),
     storageKey: text("storage_key").notNull().unique(),
+    fileData: lmsResourceBytes("file_data"),
     uploadedBy: integer("uploaded_by").references(() => lmsUsers.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

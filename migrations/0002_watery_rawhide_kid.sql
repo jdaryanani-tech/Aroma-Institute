@@ -1,0 +1,1 @@
+ALTER TABLE "lms_resources" ADD COLUMN "file_data" "bytea";

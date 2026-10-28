@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import type { Express } from "express";
+import { randomBytes, randomUUID } from "node:crypto";
+import express, { type Express } from "express";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import {
   and,
@@ -28,6 +28,7 @@ import {
   lmsLiveSessions,
   lmsModules,
   lmsNotifications,
+  lmsResources,
   lmsTrainerAssignments,
   lmsUserRoles,
   lmsUsers,
@@ -36,6 +37,12 @@ import { db } from "../db";
 import { requireLmsRole, requireLmsUser } from "./auth";
 import { issueLmsPasswordSetupLink } from "./password-auth";
 import { normalizeLmsPhone } from "./password-security";
+import {
+  canDownloadLmsCertificate,
+  canManageLmsCourse,
+  MAX_LMS_RESOURCE_BYTES,
+  validateLmsResource,
+} from "./access-policy";
 
 const nameSchema = z.string().trim().min(2).max(180);
 const descriptionSchema = z.string().trim().max(5000).default("");
@@ -139,8 +146,8 @@ async function courseForLesson(lessonId: number) {
 }
 
 async function canManageCourse(courseId: number, userId: number, roles: string[]) {
-  if (roles.includes("admin")) return true;
-  if (!roles.includes("trainer")) return false;
+  if (roles.includes("admin")) return canManageLmsCourse(roles, false);
+  if (!roles.includes("trainer")) return canManageLmsCourse(roles, false);
   const [assignment] = await db
     .select({ id: lmsTrainerAssignments.id })
     .from(lmsTrainerAssignments)
@@ -151,7 +158,7 @@ async function canManageCourse(courseId: number, userId: number, roles: string[]
       ),
     )
     .limit(1);
-  return Boolean(assignment);
+  return canManageLmsCourse(roles, Boolean(assignment));
 }
 
 async function appendAudit(
@@ -369,7 +376,33 @@ export function registerLmsManagementRoutes(app: Express) {
                       .where(eq(lmsAssessments.chapterId, chapter.id))
                       .limit(1),
                   ]);
-                  return { ...chapter, lessons, assessment: assessment[0] ?? null };
+                  const lessonIds = lessons.map(({ id }) => id);
+                  const resources = lessonIds.length
+                    ? await db
+                        .select({
+                          id: lmsResources.id,
+                          lessonId: lmsResources.lessonId,
+                          fileName: lmsResources.fileName,
+                          contentType: lmsResources.contentType,
+                          byteSize: lmsResources.byteSize,
+                        })
+                        .from(lmsResources)
+                        .where(inArray(lmsResources.lessonId, lessonIds))
+                    : [];
+                  const resourcesByLesson = new Map<number, typeof resources>();
+                  for (const resource of resources) {
+                    const current = resourcesByLesson.get(resource.lessonId) ?? [];
+                    current.push(resource);
+                    resourcesByLesson.set(resource.lessonId, current);
+                  }
+                  return {
+                    ...chapter,
+                    lessons: lessons.map((lesson) => ({
+                      ...lesson,
+                      resources: resourcesByLesson.get(lesson.id) ?? [],
+                    })),
+                    assessment: assessment[0] ?? null,
+                  };
                 }),
               ),
             };
@@ -578,6 +611,78 @@ export function registerLmsManagementRoutes(app: Express) {
         res.status(201).json(lesson);
       } catch {
         res.status(500).json({ message: "Unable to create the lesson." });
+      }
+    },
+  );
+
+  app.post(
+    "/api/lms/manage/lessons/:lessonId/resources",
+    requireLmsUser,
+    requireLmsRole("trainer", "admin"),
+    express.raw({
+      type: ["application/pdf", "text/plain"],
+      limit: MAX_LMS_RESOURCE_BYTES,
+    }),
+    async (req, res) => {
+      const lessonId = Number(req.params.lessonId);
+      if (!Number.isSafeInteger(lessonId) || lessonId < 1) {
+        return res.status(400).json({ message: "Invalid lesson." });
+      }
+      if (!Buffer.isBuffer(req.body)) {
+        return res.status(415).json({ message: "Upload a PDF or UTF-8 plain text file." });
+      }
+
+      let fileName: string;
+      try {
+        fileName = decodeURIComponent(req.get("x-file-name") ?? "");
+      } catch {
+        return res.status(400).json({ message: "Enter a valid file name." });
+      }
+      const validation = validateLmsResource(
+        fileName,
+        req.get("content-type") ?? "",
+        req.body,
+      );
+      if (!validation.ok) return res.status(400).json({ message: validation.message });
+
+      try {
+        const courseId = await courseForLesson(lessonId);
+        if (!courseId || !(await canManageCourse(courseId, req.lmsUser!.id, req.lmsUser!.roles))) {
+          return res.status(404).json({ message: "Lesson not found." });
+        }
+
+        const storageKey = `lms/resources/course-${courseId}/lesson-${lessonId}/${randomUUID()}${validation.extension}`;
+        const resource = await db.transaction(async (tx) => {
+          const [created] = await tx
+            .insert(lmsResources)
+            .values({
+              lessonId,
+              fileName: validation.fileName,
+              contentType: validation.contentType,
+              byteSize: req.body.byteLength,
+              storageKey,
+              fileData: req.body,
+              uploadedBy: req.lmsUser!.id,
+            })
+            .returning({
+              id: lmsResources.id,
+              lessonId: lmsResources.lessonId,
+              fileName: lmsResources.fileName,
+              contentType: lmsResources.contentType,
+              byteSize: lmsResources.byteSize,
+            });
+          await tx.insert(lmsAuditLogs).values({
+            actorId: req.lmsUser!.id,
+            action: "resource.uploaded",
+            entityType: "resource",
+            entityId: String(created.id),
+            metadata: { lessonId, byteSize: created.byteSize },
+          });
+          return created;
+        });
+        return res.status(201).json(resource);
+      } catch {
+        return res.status(500).json({ message: "Unable to save this course resource." });
       }
     },
   );
@@ -1629,14 +1734,16 @@ export function registerLmsManagementRoutes(app: Express) {
           .limit(1);
         if (
           !certificate ||
-          certificate.status !== "approved" ||
-          !certificate.certificateNumber ||
-          !certificate.issuedAt ||
-          !certificate.studentName?.trim()
+          !canDownloadLmsCertificate({
+            roles: req.lmsUser!.roles,
+            userId: req.lmsUser!.id,
+            studentId: certificate.studentId,
+            status: certificate.status,
+            hasCertificateNumber: Boolean(certificate.certificateNumber),
+            hasIssueDate: Boolean(certificate.issuedAt),
+            hasStudentName: Boolean(certificate.studentName?.trim()),
+          })
         ) {
-          return res.status(404).json({ message: "Approved certificate not found." });
-        }
-        if (!req.lmsUser!.roles.includes("admin") && certificate.studentId !== req.lmsUser!.id) {
           return res.status(404).json({ message: "Approved certificate not found." });
         }
         const pdf = await PDFDocument.create();
@@ -1659,7 +1766,7 @@ export function registerLmsManagementRoutes(app: Express) {
         centerText("AROMA LEAP · LEARN. EARN. ADVANCE. PAY.", regular, 9, 455, dark);
         centerText("CERTIFICATE OF COMPLETION", bold, 25, 394, dark);
         centerText("This certificate is proudly presented to", regular, 13, 350, dark);
-        const studentName = certificate.studentName.trim();
+        const studentName = certificate.studentName!.trim();
         const nameSize = Math.min(32, Math.max(20, 620 / Math.max(1, bold.widthOfTextAtSize(studentName, 1))));
         centerText(studentName, bold, nameSize, 300, dark);
         centerText("for successfully completing", regular, 13, 265, dark);
@@ -1669,12 +1776,12 @@ export function registerLmsManagementRoutes(app: Express) {
         const issueDate = new Intl.DateTimeFormat("en-IN", {
           dateStyle: "long",
           timeZone: "Asia/Kolkata",
-        }).format(certificate.issuedAt);
+        }).format(certificate.issuedAt!);
         centerText(`Issued ${issueDate}`, regular, 12, 190, dark);
         page.drawLine({ start: { x: 290, y: 128 }, end: { x: 552, y: 128 }, thickness: 1, color: gold });
-        centerText(certificate.certificateNumber, regular, 10, 99, dark);
+        centerText(certificate.certificateNumber!, regular, 10, 99, dark);
         const bytes = await pdf.save();
-        const filename = `Aroma-LEAP-${certificate.certificateNumber.replace(/[^A-Z0-9-]/g, "")}.pdf`;
+        const filename = `Aroma-LEAP-${certificate.certificateNumber!.replace(/[^A-Z0-9-]/g, "")}.pdf`;
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
         res.setHeader("Cache-Control", "private, no-store");
