@@ -25,9 +25,10 @@ import {
   ChevronRight,
   X,
   Lock,
-  PlayCircle,
 } from "lucide-react";
 import aromaLogo from "@assets/ChatGPT_Image_Feb_24__2026__01_47_11_AM-removebg-preview_1771878331386.png";
+
+const VSL_VIDEO_EMBED_URL = "https://www.youtube-nocookie.com/embed/BZXNyfM0q6o?rel=0";
 
 const benefits = [
   "Hands-on training on professional espresso machines — not just theory",
@@ -320,14 +321,18 @@ export default function VSL() {
           data-testid="video-placeholder"
         >
           {videoUnlocked ? (
-            <div className="relative rounded-2xl overflow-hidden border border-amber-400/30 shadow-2xl bg-[#1a1109] aspect-video flex items-center justify-center">
-              <div className="absolute inset-0 bg-gradient-to-br from-amber-900/20 via-transparent to-transparent" />
-              <div className="text-center z-10 px-6">
-                <PlayCircle className="h-14 w-14 text-amber-400 mx-auto mb-4 opacity-80" />
-                <p className="text-white/80 text-base font-semibold">You're all set!</p>
-                <p className="text-white/45 text-sm mt-1">The video will appear here once it's ready. We'll notify you.</p>
-              </div>
-              <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-400/0 via-amber-400/80 to-amber-400/0" />
+            <div
+              className="relative aspect-video overflow-hidden rounded-2xl border border-amber-400/30 bg-[#1a1109] shadow-2xl"
+              data-testid="video-embed"
+            >
+              <iframe
+                className="absolute inset-0 h-full w-full border-0"
+                src={VSL_VIDEO_EMBED_URL}
+                title="Aroma Institute video sales letter"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                referrerPolicy="strict-origin-when-cross-origin"
+                allowFullScreen
+              />
             </div>
           ) : (
             <button
