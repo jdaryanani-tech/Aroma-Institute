@@ -1,5 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import type Hls from "hls.js";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "@tanstack/react-query";
@@ -27,8 +28,9 @@ import {
   Lock,
 } from "lucide-react";
 import aromaLogo from "@assets/ChatGPT_Image_Feb_24__2026__01_47_11_AM-removebg-preview_1771878331386.png";
+import vslThumbnail from "@assets/Barista_Career_in_Three_Months_1793184531131.png";
 
-const VSL_VIDEO_EMBED_URL = "https://www.youtube-nocookie.com/embed/BZXNyfM0q6o?rel=0";
+const VSL_PLAYLIST_URL = "/api/vsl/media/index.m3u8";
 
 const benefits = [
   "Hands-on training on professional espresso machines — not just theory",
@@ -61,9 +63,50 @@ const testimonials = [
 
 export default function VSL() {
   const formRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const { toast } = useToast();
   const [showGate, setShowGate] = useState(false);
   const [videoUnlocked, setVideoUnlocked] = useState(false);
+  const [videoError, setVideoError] = useState(false);
+
+  useEffect(() => {
+    if (!videoUnlocked || !videoRef.current) return;
+    const video = videoRef.current;
+    setVideoError(false);
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = VSL_PLAYLIST_URL;
+      return () => {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      };
+    }
+
+    let hls: Hls | undefined;
+    let cancelled = false;
+    void import("hls.js")
+      .then(({ default: HlsPlayer }) => {
+        if (cancelled) return;
+        if (!HlsPlayer.isSupported()) {
+          setVideoError(true);
+          return;
+        }
+        hls = new HlsPlayer();
+        hls.on(HlsPlayer.Events.ERROR, (_event, data) => {
+          if (data.fatal) setVideoError(true);
+        });
+        hls.loadSource(VSL_PLAYLIST_URL);
+        hls.attachMedia(video);
+      })
+      .catch(() => {
+        if (!cancelled) setVideoError(true);
+      });
+    return () => {
+      cancelled = true;
+      hls?.destroy();
+    };
+  }, [videoUnlocked]);
 
   const scrollToForm = () => {
     formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -325,14 +368,21 @@ export default function VSL() {
               className="relative aspect-video overflow-hidden rounded-2xl border border-amber-400/30 bg-[#1a1109] shadow-2xl"
               data-testid="video-embed"
             >
-              <iframe
-                className="absolute inset-0 h-full w-full border-0"
-                src={VSL_VIDEO_EMBED_URL}
-                title="Aroma Institute video sales letter"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                referrerPolicy="strict-origin-when-cross-origin"
-                allowFullScreen
+              <video
+                ref={videoRef}
+                className="absolute inset-0 h-full w-full"
+                poster={vslThumbnail}
+                controls
+                playsInline
+                preload="metadata"
+                aria-label="Aroma Institute video sales letter"
+                data-testid="vsl-video"
               />
+              {videoError && (
+                <p className="absolute inset-x-4 bottom-4 rounded-lg bg-black/80 px-4 py-3 text-center text-sm text-white" role="alert">
+                  The video could not be loaded. Please refresh the page and try again.
+                </p>
+              )}
             </div>
           ) : (
             <button
@@ -341,7 +391,12 @@ export default function VSL() {
               data-testid="button-play-gate"
             >
               <div className="relative rounded-2xl overflow-hidden border border-white/10 shadow-2xl bg-[#1a1109] aspect-video flex items-center justify-center group">
-                <div className="absolute inset-0 bg-gradient-to-br from-amber-900/20 via-transparent to-transparent" />
+                <img
+                  src={vslThumbnail}
+                  alt=""
+                  className="absolute inset-0 h-full w-full object-cover opacity-60 transition-opacity duration-300 group-hover:opacity-75"
+                />
+                <div className="absolute inset-0 bg-gradient-to-br from-black/25 via-black/45 to-black/70" />
                 <div className="text-center z-10 px-6">
                   <div className="w-20 h-20 rounded-full bg-amber-400 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-amber-400/30 group-hover:scale-110 transition-transform duration-300">
                     <Play className="h-8 w-8 text-[#0e0a07] ml-1" fill="currentColor" />

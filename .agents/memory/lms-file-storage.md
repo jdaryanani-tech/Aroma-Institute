@@ -1,10 +1,10 @@
 ---
-name: LMS file storage
-description: Workspace storage setup constraint for secure learning resources.
+name: App Storage media delivery
+description: App Storage availability, private-object access, and large-media delivery.
 ---
 
-Replit App Storage's SDK requires a provisioned default bucket. In this workspace, resolving that bucket failed at server startup, so LMS learning files use the existing PostgreSQL database instead.
+This workspace now has a provisioned default App Storage bucket. The bucket remains private and has no public object URLs; media for public pages must be served through a narrowly scoped application route.
 
-**Why:** A missing App Storage bucket prevented the application from starting, while the existing database is already configured and persistent.
+**Why:** The SDK cannot initialize until a bucket is provisioned, and its stream API does not document byte-range reads. Long videos need segmented delivery for browser seeking rather than a single proxied MP4.
 
-**How to apply:** Keep any new LMS resource storage bounded and private in the database unless App Storage is explicitly provisioned and verified before the SDK is initialized.
+**How to apply:** Verify bucket availability before initializing the SDK. Keep large assets out of Git and the site bundle, use HLS for long videos, and proxy only allowlisted objects through app routes. Keep LMS resources in the existing database when their role-based access rules require it.

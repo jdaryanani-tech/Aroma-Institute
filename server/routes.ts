@@ -7,6 +7,7 @@ import { fromZodError } from "zod-validation-error";
 import { configureLmsSessions, requireLmsRole, requireLmsUser } from "./lms/auth";
 import { registerLmsRoutes } from "./lms/routes";
 import { registerLmsManagementRoutes } from "./lms/management-routes";
+import { registerVslMediaRoutes } from "./vsl-media";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -45,6 +46,7 @@ export async function registerRoutes(
 
   registerLmsRoutes(app);
   registerLmsManagementRoutes(app);
+  registerVslMediaRoutes(app);
 
   return httpServer;
 }

@@ -46,3 +46,6 @@ LMS_OTP_WEBHOOK_URL = "https://n8n.aromacafeinstitute.in/webhook/aroma-whatsapp"
 [postMerge]
 path = "script/post-merge.sh"
 timeoutMs = 180000
+
+[objectStorage]
+defaultBucketID = "replit-objstore-5b0d8081-ed0f-4a5d-9348-39d6772a396a"

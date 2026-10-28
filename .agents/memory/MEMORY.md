@@ -1,1 +1,1 @@
-- [LMS file storage](lms-file-storage.md) — App Storage has no provisioned default bucket in this workspace; don't instantiate its SDK until a bucket is enabled.
+- [App Storage media delivery](lms-file-storage.md) — A default bucket is now enabled; keep large media there and proxy private objects through the app.
