@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertInquirySchema } from "@shared/schema";
+import { insertCounsellingInquirySchema, insertInquirySchema } from "@shared/schema";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 import { configureLmsSessions, requireLmsRole, requireLmsUser } from "./lms/auth";
@@ -26,6 +26,21 @@ export async function registerRoutes(
         res.status(400).json({ message: validationError.message });
       } else {
         res.status(500).json({ message: "Failed to submit inquiry" });
+      }
+    }
+  });
+
+  app.post("/api/counselling-inquiries", async (req, res) => {
+    try {
+      const data = insertCounsellingInquirySchema.parse(req.body);
+      const inquiry = await storage.createInquiry(data);
+      res.status(201).json(inquiry);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const validationError = fromZodError(error);
+        res.status(400).json({ message: validationError.message });
+      } else {
+        res.status(500).json({ message: "Failed to submit counselling request" });
       }
     }
   });

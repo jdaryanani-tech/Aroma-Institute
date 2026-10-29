@@ -1,14 +1,14 @@
-import { type InsertInquiry, type Inquiry, inquiries } from "@shared/schema";
+import { type Inquiry, type NewInquiry, inquiries } from "@shared/schema";
 import { db } from "./db";
 import { desc } from "drizzle-orm";
 
 export interface IStorage {
-  createInquiry(inquiry: InsertInquiry): Promise<Inquiry>;
+  createInquiry(inquiry: NewInquiry): Promise<Inquiry>;
   getInquiries(): Promise<Inquiry[]>;
 }
 
 export class DatabaseStorage implements IStorage {
-  async createInquiry(inquiry: InsertInquiry): Promise<Inquiry> {
+  async createInquiry(inquiry: NewInquiry): Promise<Inquiry> {
     const [result] = await db.insert(inquiries).values(inquiry).returning();
     return result;
   }

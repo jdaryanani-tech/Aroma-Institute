@@ -1,11 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
-import { type CounsellingAnswers, type Inquiry } from "@shared/schema";
+import { type Inquiry } from "@shared/schema";
 import { LogOut, Download, Users, Mail, Phone, BookOpen, MessageSquare } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
+import { counsellingQuestions } from "./counsellingQuestions";
 
-const counsellingFieldLabels: Record<keyof CounsellingAnswers, string> = {
-  ageRange: "Age range",
+const counsellingFieldLabels: Record<string, string> = {
+  ...Object.fromEntries(
+    counsellingQuestions.map((question) => [
+      question.key,
+      `${question.number}. ${question.prompt}`,
+    ]),
+  ),
   currentSituation: "Current situation",
   coffeeExperience: "Coffee or café experience",
   careerGoal: "Career goal",
@@ -48,12 +54,21 @@ const counsellingValueLabels: Record<string, string> = {
   no: "No",
 };
 
-function formatCounsellingAnswer(value: unknown): string {
+function formatCounsellingAnswer(key: string, value: unknown): string {
+  const question = counsellingQuestions.find((item) => item.key === key);
   if (Array.isArray(value)) {
-    return value.map((entry) => counsellingValueLabels[String(entry)] ?? String(entry)).join(", ");
+    return value.map((entry) => {
+      const token = String(entry);
+      return question?.choices?.find((choice) => choice.value === token)?.label
+        ?? counsellingValueLabels[token]
+        ?? token;
+    }).join(", ");
   }
+  if (typeof value === "boolean") return value ? "Haan" : "Nahi";
   if (typeof value !== "string" || !value) return "—";
-  return counsellingValueLabels[value] ?? value;
+  return question?.choices?.find((choice) => choice.value === value)?.label
+    ?? counsellingValueLabels[value]
+    ?? value;
 }
 
 async function fetchInquiries(): Promise<Inquiry[]> {
@@ -227,10 +242,14 @@ export default function Admin() {
                       <td className="px-5 py-4 text-white/30 text-xs">{lead.id}</td>
                       <td className="px-5 py-4 font-medium text-white">{lead.name}</td>
                       <td className="px-5 py-4">
-                        <a href={`mailto:${lead.email}`} className="text-amber-400/80 hover:text-amber-400 transition-colors flex items-center gap-1.5">
-                          <Mail className="h-3 w-3 shrink-0" />
-                          {lead.email}
-                        </a>
+                        {lead.email ? (
+                          <a href={`mailto:${lead.email}`} className="text-amber-400/80 hover:text-amber-400 transition-colors flex items-center gap-1.5">
+                            <Mail className="h-3 w-3 shrink-0" />
+                            {lead.email}
+                          </a>
+                        ) : (
+                          <span className="text-white/30">—</span>
+                        )}
                       </td>
                       <td className="px-5 py-4">
                         <a href={`tel:${lead.phone}`} className="text-white/70 hover:text-white transition-colors flex items-center gap-1.5">
@@ -259,10 +278,10 @@ export default function Admin() {
                                 .map(([key, value]) => (
                                   <div key={key}>
                                     <dt className="font-semibold text-white/70">
-                                      {counsellingFieldLabels[key as keyof CounsellingAnswers] ?? key}
+                                      {counsellingFieldLabels[key] ?? key}
                                     </dt>
                                     <dd className="mt-0.5 break-words text-white/50">
-                                      {formatCounsellingAnswer(value)}
+                                      {formatCounsellingAnswer(key, value)}
                                     </dd>
                                   </div>
                                 ))}
