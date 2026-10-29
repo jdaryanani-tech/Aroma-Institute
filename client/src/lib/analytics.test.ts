@@ -22,6 +22,7 @@ test("VSL start fires only on the first play, including pause and resume cycles"
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
+      innerWidth: 390,
       umami: {
         track: (name: string, data?: Record<string, unknown>) => {
           events.push({ name, data });
@@ -38,7 +39,11 @@ test("VSL start fires only on the first play, including pause and resume cycles"
   assert.deepEqual(events, [
     {
       name: "vsl_video_started",
-      data: { video: "aroma_training", page: "vsl" },
+      data: {
+        video: "aroma_training",
+        page: "vsl",
+        device_category: "mobile",
+      },
     },
   ]);
 });
@@ -48,6 +53,7 @@ test("VSL completion fires on playback end with only the expected properties", (
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
+      innerWidth: 1280,
       umami: {
         track: (name: string, data?: Record<string, unknown>) => {
           events.push({ name, data });
@@ -63,7 +69,11 @@ test("VSL completion fires on playback end with only the expected properties", (
   assert.deepEqual(events, [
     {
       name: "vsl_video_completed",
-      data: { video: "aroma_training", page: "vsl" },
+      data: {
+        video: "aroma_training",
+        page: "vsl",
+        device_category: "desktop",
+      },
     },
   ]);
 });
@@ -73,6 +83,7 @@ test("VSL progress events fire once when playback naturally crosses each milesto
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
+      innerWidth: 1280,
       umami: {
         track: (name: string, data?: Record<string, unknown>) => {
           events.push({ name, data });
@@ -98,6 +109,7 @@ test("VSL progress events fire once when playback naturally crosses each milesto
         video: "aroma_training",
         page: "vsl",
         progress_percent: percent,
+        device_category: "desktop",
       },
     })),
   );
@@ -108,6 +120,7 @@ test("VSL seeks and replays do not emit duplicate or skipped milestones", () => 
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
+      innerWidth: 1280,
       umami: {
         track: (name: string, data?: Record<string, unknown>) => {
           events.push({ name, data });
@@ -135,6 +148,7 @@ test("VSL seeks and replays do not emit duplicate or skipped milestones", () => 
         video: "aroma_training",
         page: "vsl",
         progress_percent: percent,
+        device_category: "desktop",
       },
     })),
   );

@@ -1,4 +1,5 @@
 type AnalyticsData = Record<string, string | number | boolean>;
+type VslDeviceCategory = "mobile" | "desktop";
 
 declare global {
   interface Window {
@@ -18,7 +19,12 @@ export function trackEvent(name: string, data?: AnalyticsData): void {
   }
 }
 
+function getVslDeviceCategory(): VslDeviceCategory {
+  return window.innerWidth < 768 ? "mobile" : "desktop";
+}
+
 export function createVslPlaybackTracker() {
+  const deviceCategory = getVslDeviceCategory();
   let started = false;
   let completed = false;
   let lastObservedTime = 0;
@@ -32,6 +38,7 @@ export function createVslPlaybackTracker() {
         trackEvent("vsl_video_started", {
           video: "aroma_training",
           page: "vsl",
+          device_category: deviceCategory,
         });
       }
       if (Number.isFinite(currentTime) && currentTime >= 0) {
@@ -65,6 +72,7 @@ export function createVslPlaybackTracker() {
             video: "aroma_training",
             page: "vsl",
             progress_percent: percent,
+            device_category: deviceCategory,
           });
         }
       }
@@ -82,6 +90,7 @@ export function createVslPlaybackTracker() {
       trackEvent("vsl_video_completed", {
         video: "aroma_training",
         page: "vsl",
+        device_category: deviceCategory,
       });
     },
   };

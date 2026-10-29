@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Maximize2, Minimize2, Pause, Play } from "lucide-react";
 import type Hls from "hls.js";
 import vslThumbnail from "@assets/Barista_Career_in_Three_Months_1793184531131.png";
+import { createVslPlaybackTracker } from "@/lib/analytics";
 
 const VSL_PLAYLIST_URL = "/api/vsl/media/index.m3u8";
 const MEDIA_ERROR_MESSAGE = "Video load nahi ho saka. Kripya page refresh karke dobara koshish karein.";
@@ -19,6 +20,10 @@ function getExponentialProgress(currentTime: number, duration: number) {
 export default function VSLVideo() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoFrameRef = useRef<HTMLDivElement>(null);
+  const playbackTrackerRef = useRef<ReturnType<typeof createVslPlaybackTracker> | null>(null);
+  if (!playbackTrackerRef.current) {
+    playbackTrackerRef.current = createVslPlaybackTracker();
+  }
   const playbackRequestedRef = useRef(false);
   const codecUnavailableRef = useRef(false);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -184,13 +189,24 @@ export default function VSLVideo() {
           tabIndex={-1}
           aria-label="Aroma LEAP free barista training video"
           data-testid="vsl-video"
-          onPlay={() => setIsPlaying(true)}
+          onPlay={(event) => {
+            setIsPlaying(true);
+            playbackTrackerRef.current?.onPlay(event.currentTarget.currentTime);
+          }}
           onPause={() => setIsPlaying(false)}
-          onTimeUpdate={(event) => updateProgress(event.currentTarget)}
+          onTimeUpdate={(event) => {
+            updateProgress(event.currentTarget);
+            playbackTrackerRef.current?.onTimeUpdate(
+              event.currentTarget.currentTime,
+              event.currentTarget.duration,
+              event.currentTarget.seeking,
+            );
+          }}
           onDurationChange={(event) => updateProgress(event.currentTarget)}
           onEnded={() => {
             setIsPlaying(false);
             setProgress(1);
+            playbackTrackerRef.current?.onEnded();
           }}
           onError={(event) => {
             const errorCode = event.currentTarget.error?.code;
