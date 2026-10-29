@@ -17,3 +17,27 @@ export function trackEvent(name: string, data?: AnalyticsData): void {
     // Analytics must never break the app.
   }
 }
+
+export function createVslPlaybackTracker() {
+  let started = false;
+  let completed = false;
+
+  return {
+    onPlay() {
+      if (started) return;
+      started = true;
+      trackEvent("vsl_video_started", {
+        video: "aroma_training",
+        page: "vsl",
+      });
+    },
+    onEnded() {
+      if (completed) return;
+      completed = true;
+      trackEvent("vsl_video_completed", {
+        video: "aroma_training",
+        page: "vsl",
+      });
+    },
+  };
+}
