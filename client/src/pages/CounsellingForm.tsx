@@ -1,5 +1,10 @@
 import { useState, type FormEvent } from "react";
+import { format, parseISO } from "date-fns";
+import { CalendarDays } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
+import { Calendar } from "@/components/ui/calendar";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   counsellingAnswersSchema,
   getIndiaDateString,
@@ -96,6 +101,7 @@ function questionErrorMessage(question: QuestionnaireQuestion, value: unknown) {
 export default function CounsellingForm() {
   const [started, setStarted] = useState(false);
   const [step, setStep] = useState(0);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [answers, setAnswers] = useState<Record<string, unknown>>(initialAnswers);
   const [questionError, setQuestionError] = useState("");
   const [submitError, setSubmitError] = useState("");
@@ -215,6 +221,62 @@ export default function CounsellingForm() {
       );
     }
 
+    if (question.kind === "date") {
+      const selectedDate = typeof currentValue === "string" && currentValue
+        ? parseISO(currentValue)
+        : undefined;
+      const firstAvailableDate = parseISO(`${localDateString()}T00:00:00`);
+
+      return (
+        <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              aria-expanded={calendarOpen}
+              aria-haspopup="dialog"
+              aria-label={selectedDate ? `Visit date: ${format(selectedDate, "EEEE, MMMM d, yyyy")}` : "Choose a visit date"}
+              className="mt-7 min-h-14 w-full justify-between rounded-xl border border-[#59432d]/70 bg-[#100b07]/70 px-4 text-left font-normal text-[#fff3df] hover:bg-[#21170f] hover:text-[#fff3df] focus-visible:ring-2 focus-visible:ring-amber-300/40"
+              data-testid={`field-${question.key}`}
+              type="button"
+              variant="outline"
+            >
+              <span className={selectedDate ? "text-[#fff3df]" : "text-[#9f8c75]"}>
+                {selectedDate ? format(selectedDate, "EEEE, MMMM d, yyyy") : "Choose a visit date"}
+              </span>
+              <CalendarDays className="size-5 shrink-0 text-amber-300" aria-hidden="true" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="center"
+            className="w-auto rounded-2xl border-[#624725]/80 bg-[#19110b] p-2 text-[#fff3df] shadow-[0_18px_55px_rgba(0,0,0,0.55)]"
+            data-testid="visit-date-calendar"
+            sideOffset={8}
+          >
+            <Calendar
+              mode="single"
+              selected={selectedDate}
+              onSelect={(date) => {
+                updateAnswer(question.key, date ? format(date, "yyyy-MM-dd") : "");
+                setCalendarOpen(false);
+              }}
+              disabled={{ before: firstAvailableDate }}
+              initialFocus
+              className="rounded-xl"
+              classNames={{
+                caption_label: "text-sm font-semibold text-[#fff3df]",
+                nav_button: "h-8 w-8 rounded-lg border border-[#624725]/70 bg-[#21170f] p-0 text-[#e7d8c5] opacity-100 hover:bg-[#342316] hover:text-[#fff3df]",
+                head_cell: "w-9 rounded-md text-[0.8rem] font-normal text-[#ad9b84]",
+                day: "h-9 w-9 rounded-md p-0 font-normal text-[#e7d8c5] hover:bg-amber-300/15 hover:text-[#fff3df] focus:bg-amber-300/20",
+                day_selected: "bg-amber-400 text-[#21140a] opacity-100 hover:bg-amber-300 hover:text-[#21140a] focus:bg-amber-300 focus:text-[#21140a]",
+                day_today: "border border-amber-300/60 text-amber-200",
+                day_disabled: "text-[#6c5a47] opacity-35",
+                day_outside: "text-[#6c5a47] opacity-35",
+              }}
+            />
+          </PopoverContent>
+        </Popover>
+      );
+    }
+
     if (question.kind === "consent") {
       return (
         <label className="mt-7 flex cursor-pointer items-start gap-3 rounded-xl border border-[#59432d]/70 bg-[#100b07]/55 p-4 text-sm leading-6 text-[#e7d8c5]">
@@ -230,19 +292,15 @@ export default function CounsellingForm() {
       );
     }
 
-    const inputType = question.kind === "date"
-      ? "date"
-      : question.kind === "email"
-        ? "email"
-        : question.kind === "phone"
-          ? "tel"
-          : "text";
+    const inputType = question.kind === "email"
+      ? "email"
+      : question.kind === "phone"
+        ? "tel"
+        : "text";
     return (
       <input
         className="mt-7 min-h-14 w-full rounded-xl border border-[#59432d]/70 bg-[#100b07]/70 px-4 text-base text-[#fff3df] outline-none transition placeholder:text-[#9f8c75] focus:border-amber-300/80 focus:ring-2 focus:ring-amber-300/20"
         data-testid={`field-${question.key}`}
-        max={question.kind === "date" ? "9999-12-31" : undefined}
-        min={question.kind === "date" ? localDateString() : undefined}
         maxLength={question.kind === "phone" ? 24 : undefined}
         onChange={(event) => updateAnswer(question.key, event.target.value)}
         placeholder={question.placeholder}

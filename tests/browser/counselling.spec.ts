@@ -72,7 +72,12 @@ test("submits and stores the complete 29-question counselling request in Chromiu
     String(futureDate.getMonth() + 1).padStart(2, "0"),
     String(futureDate.getDate()).padStart(2, "0"),
   ].join("-");
-  await page.getByTestId("field-preferredDate").fill(preferredDate);
+  await page.getByTestId("field-preferredDate").click();
+  await expect(page.getByTestId("visit-date-calendar")).toBeVisible();
+  await page.getByRole("gridcell", { name: String(futureDate.getDate()), exact: true }).click();
+  await expect(page.getByTestId("field-preferredDate")).toContainText(
+    new RegExp(String(futureDate.getDate())),
+  );
   await page.getByTestId("next-question").click();
   await page.getByTestId("choice-preferredTime-10to12").click();
   await page.getByTestId("next-question").click();
