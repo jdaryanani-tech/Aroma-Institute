@@ -380,6 +380,7 @@ export default function VSL() {
                 preload="metadata"
                 aria-label="Aroma Institute video sales letter"
                 data-testid="vsl-video"
+                onError={() => setVideoError(true)}
                 onPlay={() => {
                   if (videoStartedRef.current) return;
                   videoStartedRef.current = true;
