@@ -1,1 +1,2 @@
 - [App Storage media delivery](lms-file-storage.md) — A default bucket is now enabled; keep large media there and proxy private objects through the app.
+- [Playwright WebKit on Replit](playwright-webkit-nix.md) — Linux WebKit needs Ubuntu-compatible libraries; validate its project on a compatible runner when Replit’s Nix host cannot launch it.

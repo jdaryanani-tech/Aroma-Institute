@@ -4,6 +4,7 @@ hidden = [".config", ".git", "generated-icon.png", "node_modules", "dist"]
 
 [nix]
 channel = "stable-24_05"
+packages = ["gtk4", "pango", "harfbuzz", "glib", "cairo", "gdk-pixbuf", "gst_all_1.gstreamer", "gst_all_1.gst-plugins-base", "gst_all_1.gst-plugins-good", "gst_all_1.gst-plugins-bad", "nss", "atk", "at-spi2-atk", "dbus", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXfixes", "xorg.libXrandr", "mesa", "libxkbcommon", "alsa-lib", "icu", "gcc", "libxml2", "sqlite", "libxslt", "lcms2", "libevent", "libopus", "flite", "libwebp", "libavif", "libjpeg", "enchant", "libsecret", "hyphen", "libglvnd", "x264", "icu74", "libepoxy", "libjpeg_turbo", "gst_all_1.gst-libav", "libwpe", "libsoup_3", "libjxl", "libbacktrace", "libmanette"]
 
 [[ports]]
 localPort = 5000

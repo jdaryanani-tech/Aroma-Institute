@@ -9,6 +9,7 @@
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
     "test": "tsx --test server/lms/*.test.ts client/src/lib/*.test.ts",
+    "test:browser": "playwright test",
     "test:lms-auth": "NODE_ENV=test tsx --test server/lms/password-auth.integration.test.ts",
     "vsl:upload": "NODE_ENV=development tsx script/upload-vsl-hls.ts",
     "db:generate": "drizzle-kit generate",
@@ -85,6 +86,7 @@
     "zod-validation-error": "^3.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@replit/vite-plugin-cartographer": "^0.6.1",
     "@replit/vite-plugin-dev-banner": "^0.1.1",
     "@replit/vite-plugin-runtime-error-modal": "^0.0.3",
