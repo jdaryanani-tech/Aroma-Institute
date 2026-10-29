@@ -316,9 +316,6 @@ export default function CounsellingForm() {
 
         {!started && !complete && (
           <div className="px-6 py-8 sm:px-10 sm:py-10">
-            <p className="mb-4 inline-flex rounded-full border border-amber-400/25 bg-amber-400/[0.08] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-300 text-justify">
-              Aapka café career yahin se shuru ho sakta hai
-            </p>
             <h1 className="font-serif text-[2rem] font-semibold leading-[1.12] tracking-[-0.025em] text-[#fff3df] sm:text-[2.8rem] text-center">
               Aroma LEAP™ mein interest dikhane ke liye thank you!
             </h1>
