@@ -168,8 +168,6 @@ export default function CounsellingForm() {
   const [complete, setComplete] = useState(false);
 
   const totalSteps = questions.length + 2;
-  const progressStep = started ? step + 1 : 0;
-  const progress = complete ? 100 : (progressStep / totalSteps) * 100;
   const question = questions[step];
   const isTopics = question?.key === "counsellingTopics";
   const isAdditional = step === questions.length;
@@ -283,37 +281,6 @@ export default function CounsellingForm() {
         <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-amber-500/40 to-transparent" />
       </div>
       <section className="relative w-full max-w-[760px] overflow-hidden rounded-[26px] border border-[#624725]/50 bg-[#19110b]/95 shadow-[0_30px_100px_rgba(0,0,0,0.42)]">
-        <header className="border-b border-[#5c4228]/40 px-6 pb-5 pt-6 sm:px-10 sm:pb-6 sm:pt-8">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-400">Aroma LEAP™</p>
-              <p className="mt-1 text-xs text-[#b9a58e]">Counselling intake · Ahmedabad, Gujarat</p>
-            </div>
-            <div aria-label="Counselling conversation" className="flex items-center gap-1.5" role="img">
-              {[0, 1, 2].map((item) => (
-                <span
-                  key={item}
-                  className={`h-1.5 w-5 rounded-full ${item === 0 ? "bg-amber-400" : "bg-[#604a32]"}`}
-                />
-              ))}
-            </div>
-          </div>
-          {(started || complete) && (
-            <div className="mt-6" aria-label={`Progress: ${Math.round(progress)}%`}>
-              <div className="mb-2 flex items-center justify-between text-xs text-[#b9a58e]">
-                <span>{complete ? "Questionnaire complete" : `Step ${progressStep} of ${totalSteps}`}</span>
-                <span>{Math.round(progress)}%</span>
-              </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-[#382719]">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-amber-500 to-[#f1bd63] transition-[width] duration-500"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-            </div>
-          )}
-        </header>
-
         {!started && !complete && (
           <div className="px-6 py-8 sm:px-10 sm:py-10">
             <h1 className="font-serif text-[2rem] font-semibold leading-[1.12] tracking-[-0.025em] text-[#fff3df] sm:text-[2.8rem] text-center">
@@ -338,7 +305,7 @@ export default function CounsellingForm() {
                 onClick={() => setStarted(true)}
                 className="inline-flex min-h-12 items-center justify-center gap-3 rounded-xl bg-amber-400 px-6 text-sm font-bold text-[#21140a] transition hover:bg-amber-300 focus:outline-none focus:ring-2 focus:ring-amber-200 focus:ring-offset-2 focus:ring-offset-[#19110b]"
               >
-                Counselling shuru karein <span aria-hidden="true">→</span>
+                Get started <span aria-hidden="true">→</span>
               </button>
             </div>
           </div>
