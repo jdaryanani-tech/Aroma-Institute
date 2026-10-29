@@ -1,8 +1,60 @@
 import { useQuery } from "@tanstack/react-query";
-import { type Inquiry } from "@shared/schema";
+import { type CounsellingAnswers, type Inquiry } from "@shared/schema";
 import { LogOut, Download, Users, Mail, Phone, BookOpen, MessageSquare } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
+
+const counsellingFieldLabels: Record<keyof CounsellingAnswers, string> = {
+  ageRange: "Age range",
+  currentSituation: "Current situation",
+  coffeeExperience: "Coffee or café experience",
+  careerGoal: "Career goal",
+  scheduleReadiness: "Program and schedule readiness",
+  counsellingTopics: "Topics to discuss",
+  guardianInvolvement: "Parent or guardian involvement",
+  additionalQuestion: "Note for the counsellor",
+};
+
+const counsellingValueLabels: Record<string, string> = {
+  under18: "Under 18",
+  "18to20": "18–20",
+  "21to24": "21–24",
+  "25plus": "25 or older",
+  completed12th: "Completed 12th standard",
+  college: "Studying in college",
+  graduated: "Graduated",
+  workingOther: "Working in another field",
+  other: "Other",
+  none: "No prior experience",
+  personal: "Personal or hobby experience",
+  internship: "Café internship experience",
+  professional: "Professional café experience",
+  firstCafeJob: "First café job",
+  careerChange: "Career change",
+  buildSkills: "Build barista skills",
+  openCafe: "Explore opening a café",
+  explore: "Explore the career",
+  ready: "Ready to discuss the program",
+  needDetails: "Would like schedule details",
+  unsure: "Not sure yet",
+  programSchedule: "Program schedule",
+  internshipTerms: "Internship and stipend terms",
+  skillsCertification: "Skills and certification",
+  careerPreparation: "Career preparation and placement assistance",
+  feesScholarshipPayment: "Fees, scholarship, and payment options",
+  parentGuardian: "Parent or guardian participation",
+  yes: "Yes",
+  maybe: "Maybe",
+  no: "No",
+};
+
+function formatCounsellingAnswer(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((entry) => counsellingValueLabels[String(entry)] ?? String(entry)).join(", ");
+  }
+  if (typeof value !== "string" || !value) return "—";
+  return counsellingValueLabels[value] ?? value;
+}
 
 async function fetchInquiries(): Promise<Inquiry[]> {
   const res = await fetch("/api/admin/inquiries", { credentials: "include" });
@@ -11,7 +63,7 @@ async function fetchInquiries(): Promise<Inquiry[]> {
 }
 
 function exportCSV(data: Inquiry[]) {
-  const headers = ["ID", "Name", "Email", "Phone", "Program Interest", "Message"];
+  const headers = ["ID", "Name", "Email", "Phone", "Program Interest", "Message", "Counselling Answers"];
   const rows = data.map((r) => [
     r.id,
     r.name,
@@ -19,6 +71,7 @@ function exportCSV(data: Inquiry[]) {
     r.phone,
     r.programInterest,
     r.message ?? "",
+    r.counsellingAnswers ? JSON.stringify(r.counsellingAnswers) : "",
   ]);
   const csv = [headers, ...rows]
     .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
@@ -190,8 +243,32 @@ export default function Admin() {
                           {lead.programInterest}
                         </span>
                       </td>
-                      <td className="px-5 py-4 text-white/50 max-w-xs truncate">
-                        {lead.message || <span className="text-white/20 italic">—</span>}
+                      <td className="px-5 py-4 text-white/50 max-w-sm whitespace-normal">
+                        <p>{lead.message || <span className="text-white/20 italic">—</span>}</p>
+                        {lead.counsellingAnswers && (
+                          <details className="mt-2">
+                            <summary
+                              className="cursor-pointer text-xs font-semibold text-amber-400 hover:text-amber-300"
+                              data-testid={`lead-questionnaire-${lead.id}`}
+                            >
+                              View counselling answers
+                            </summary>
+                            <dl className="mt-3 space-y-2 text-xs">
+                              {Object.entries(lead.counsellingAnswers)
+                                .filter(([, value]) => value !== undefined && value !== "")
+                                .map(([key, value]) => (
+                                  <div key={key}>
+                                    <dt className="font-semibold text-white/70">
+                                      {counsellingFieldLabels[key as keyof CounsellingAnswers] ?? key}
+                                    </dt>
+                                    <dd className="mt-0.5 break-words text-white/50">
+                                      {formatCounsellingAnswer(value)}
+                                    </dd>
+                                  </div>
+                                ))}
+                            </dl>
+                          </details>
+                        )}
                       </td>
                     </tr>
                   ))}
