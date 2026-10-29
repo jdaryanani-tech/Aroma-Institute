@@ -6,6 +6,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "@tanstack/react-query";
 import { insertInquirySchema, type InsertInquiry } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
+import { trackEvent } from "@/lib/analytics";
 import { useToast } from "@/hooks/use-toast";
 import {
   Form,
@@ -64,6 +65,8 @@ const testimonials = [
 export default function VSL() {
   const formRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoStartedRef = useRef(false);
+  const videoCompletedRef = useRef(false);
   const { toast } = useToast();
   const [showGate, setShowGate] = useState(false);
   const [videoUnlocked, setVideoUnlocked] = useState(false);
@@ -377,6 +380,22 @@ export default function VSL() {
                 preload="metadata"
                 aria-label="Aroma Institute video sales letter"
                 data-testid="vsl-video"
+                onPlay={() => {
+                  if (videoStartedRef.current) return;
+                  videoStartedRef.current = true;
+                  trackEvent("vsl_video_started", {
+                    video: "aroma_training",
+                    page: "vsl",
+                  });
+                }}
+                onEnded={() => {
+                  if (videoCompletedRef.current) return;
+                  videoCompletedRef.current = true;
+                  trackEvent("vsl_video_completed", {
+                    video: "aroma_training",
+                    page: "vsl",
+                  });
+                }}
               />
               {videoError && (
                 <p className="absolute inset-x-4 bottom-4 rounded-lg bg-black/80 px-4 py-3 text-center text-sm text-white" role="alert">
