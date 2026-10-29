@@ -376,7 +376,20 @@ export default function VSL() {
                 aria-label="Aroma Institute video sales letter"
                 data-testid="vsl-video"
                 onError={() => setVideoError(true)}
-                onPlay={videoPlaybackTrackerRef.current.onPlay}
+                onPlay={(event) =>
+                  videoPlaybackTrackerRef.current.onPlay(event.currentTarget.currentTime)
+                }
+                onTimeUpdate={(event) => {
+                  const video = event.currentTarget;
+                  videoPlaybackTrackerRef.current.onTimeUpdate(
+                    video.currentTime,
+                    video.duration,
+                    video.seeking,
+                  );
+                }}
+                onSeeked={(event) =>
+                  videoPlaybackTrackerRef.current.onSeeked(event.currentTarget.currentTime)
+                }
                 onEnded={videoPlaybackTrackerRef.current.onEnded}
               />
               {videoError && (

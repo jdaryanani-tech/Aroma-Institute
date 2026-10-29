@@ -67,3 +67,75 @@ test("VSL completion fires on playback end with only the expected properties", (
     },
   ]);
 });
+
+test("VSL progress events fire once when playback naturally crosses each milestone", () => {
+  const events: Array<{ name: string; data?: Record<string, unknown> }> = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      umami: {
+        track: (name: string, data?: Record<string, unknown>) => {
+          events.push({ name, data });
+        },
+      },
+    } as UmamiWindow,
+  });
+
+  const tracker = createVslPlaybackTracker();
+  tracker.onPlay(0);
+  tracker.onTimeUpdate(20, 100, false);
+  tracker.onTimeUpdate(26, 100, false);
+  tracker.onTimeUpdate(52, 100, false);
+  tracker.onTimeUpdate(78, 100, false);
+  tracker.onTimeUpdate(92, 100, false);
+  tracker.onTimeUpdate(100, 100, false);
+
+  assert.deepEqual(
+    events.filter((event) => event.name === "vsl_video_progress"),
+    [25, 50, 75, 90].map((percent) => ({
+      name: "vsl_video_progress",
+      data: {
+        video: "aroma_training",
+        page: "vsl",
+        progress_percent: percent,
+      },
+    })),
+  );
+});
+
+test("VSL seeks and replays do not emit duplicate or skipped milestones", () => {
+  const events: Array<{ name: string; data?: Record<string, unknown> }> = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      umami: {
+        track: (name: string, data?: Record<string, unknown>) => {
+          events.push({ name, data });
+        },
+      },
+    } as UmamiWindow,
+  });
+
+  const tracker = createVslPlaybackTracker();
+  tracker.onPlay(0);
+  tracker.onTimeUpdate(26, 100, false);
+  tracker.onTimeUpdate(80, 100, true);
+  tracker.onSeeked(80);
+  tracker.onTimeUpdate(81, 100, false);
+  tracker.onSeeked(0);
+  tracker.onPlay(0);
+  tracker.onTimeUpdate(26, 100, false);
+  tracker.onTimeUpdate(52, 100, false);
+
+  assert.deepEqual(
+    events.filter((event) => event.name === "vsl_video_progress"),
+    [25, 50].map((percent) => ({
+      name: "vsl_video_progress",
+      data: {
+        video: "aroma_training",
+        page: "vsl",
+        progress_percent: percent,
+      },
+    })),
+  );
+});
