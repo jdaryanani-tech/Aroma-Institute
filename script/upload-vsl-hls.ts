@@ -7,7 +7,7 @@ import { Client } from "@replit/object-storage";
 const execFileAsync = promisify(execFile);
 const SOURCE_FILE = path.resolve("attached_assets/Aroma_VSL_Video_1793184188283.mp4");
 const OUTPUT_DIRECTORY = path.resolve("generated-artifacts/vsl-hls");
-const OBJECT_PREFIX = "vsl/hls/v1/";
+const OBJECT_PREFIX = "vsl/hls/v2/";
 const SEGMENT_PATTERN = /^segment-\d{5}\.ts$/;
 const UPLOAD_CONCURRENCY = 4;
 
@@ -47,7 +47,19 @@ async function main() {
     "-i", SOURCE_FILE,
     "-map", "0:v:0",
     "-map", "0:a?",
-    "-c", "copy",
+    "-vf", "scale=-2:480:flags=lanczos",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "23",
+    "-maxrate", "1200k",
+    "-bufsize", "2400k",
+    "-g", "360",
+    "-keyint_min", "360",
+    "-sc_threshold", "0",
+    "-force_key_frames", "expr:gte(t,n_forced*6)",
+    "-c:a", "aac",
+    "-b:a", "96k",
+    "-ac", "2",
     "-f", "hls",
     "-hls_time", "6",
     "-hls_playlist_type", "vod",
@@ -74,7 +86,7 @@ async function main() {
   );
   if (!playlistResult.ok) throw new Error(`Unable to upload the VSL playlist: ${playlistResult.error.message}`);
 
-  console.log(`Uploaded the VSL playlist and ${segmentNames.length} lossless video segments to App Storage.`);
+  console.log(`Uploaded the 480p VSL playlist and ${segmentNames.length} video segments to App Storage.`);
   await rm(OUTPUT_DIRECTORY, { recursive: true, force: true });
 }
 

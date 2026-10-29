@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { Client } from "@replit/object-storage";
 
-const VSL_OBJECT_PREFIX = "vsl/hls/v1/";
+const VSL_OBJECT_PREFIX = "vsl/hls/v2/";
 const SEGMENT_NAME_PATTERN = /^segment-\d{5}\.ts$/;
 const PLAYLIST_NAME = "index.m3u8";
 

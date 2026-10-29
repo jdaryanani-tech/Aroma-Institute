@@ -5,6 +5,8 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Home from "@/pages/Home";
 import VSL from "@/pages/VSL";
+import VSLVideo from "@/pages/VSLVideo";
+import CounsellingForm from "@/pages/CounsellingForm";
 import Admin from "@/pages/Admin";
 import NotFound from "@/pages/not-found";
 import {
@@ -22,6 +24,8 @@ function Router() {
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/vsl" component={VSL} />
+      <Route path="/vsl-video" component={VSLVideo} />
+      <Route path="/counselling" component={CounsellingForm} />
       <Route path="/admin" component={Admin} />
       <Route path="/learn" component={LearnLoginPage} />
       <Route path="/learn/setup" component={PasswordSetupPage} />

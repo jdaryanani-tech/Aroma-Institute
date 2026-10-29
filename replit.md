@@ -10,6 +10,8 @@ The application uses a React frontend and an Express backend with PostgreSQL. Th
 
 Preferred communication style: Simple, everyday language.
 
+For new or revised marketing pages, align the layout and theme with the established Aroma brand identity without waiting for the user to restate it. A logo is optional; brand identity should come through in the overall design.
+
 ## System Architecture
 
 ### Frontend
