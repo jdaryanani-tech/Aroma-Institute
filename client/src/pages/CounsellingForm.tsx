@@ -296,8 +296,7 @@ export default function CounsellingForm() {
             </div>
             <div className="mt-7 flex flex-col gap-4 border-t border-[#59432d]/50 pt-6 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-[#c9b69d]">
-                <span className="mr-2 font-mono text-amber-400">04–06 min</span>
-                Aapke answers counsellor ko aapki situation samajhne mein madad karenge.
+                Yeh questionnaire fill karne mein sirf 4–6 minutes lagenge.
               </p>
               <button
                 type="button"
