@@ -282,7 +282,6 @@ export default function CounsellingForm() {
         <div className="absolute -right-40 bottom-[-10rem] h-[34rem] w-[34rem] rounded-full bg-orange-950/30 blur-[110px]" />
         <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-amber-500/40 to-transparent" />
       </div>
-
       <section className="relative w-full max-w-[760px] overflow-hidden rounded-[26px] border border-[#624725]/50 bg-[#19110b]/95 shadow-[0_30px_100px_rgba(0,0,0,0.42)]">
         <header className="border-b border-[#5c4228]/40 px-6 pb-5 pt-6 sm:px-10 sm:pb-6 sm:pt-8">
           <div className="flex items-center justify-between gap-4">
@@ -317,17 +316,17 @@ export default function CounsellingForm() {
 
         {!started && !complete && (
           <div className="px-6 py-8 sm:px-10 sm:py-10">
-            <p className="mb-4 inline-flex rounded-full border border-amber-400/25 bg-amber-400/[0.08] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-300">
+            <p className="mb-4 inline-flex rounded-full border border-amber-400/25 bg-amber-400/[0.08] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-300 text-justify">
               Aapka café career yahin se shuru ho sakta hai
             </p>
-            <h1 className="font-serif text-[2rem] font-semibold leading-[1.12] tracking-[-0.025em] text-[#fff3df] sm:text-[2.8rem]">
+            <h1 className="font-serif text-[2rem] font-semibold leading-[1.12] tracking-[-0.025em] text-[#fff3df] sm:text-[2.8rem] text-center">
               Aroma LEAP™ mein interest dikhane ke liye thank you!
             </h1>
             <div className="mt-6 max-w-[620px] space-y-4 text-[15px] leading-7 text-[#d2c2ad] sm:text-base">
-              <p>
+              <p className="text-center">
                 Agar aap Barista banna chahte ho, café industry mein career banana chahte ho, ya apni first job ke liye practical skills seekhna chahte ho, toh yeh counselling session aapke liye hai.
               </p>
-              <p>
+              <p className="text-center">
                 Is short form mein humein apne baare mein thoda batao, taaki hamara counsellor aapki current situation samajh sake, aapke questions ke answers de sake aur guide kar sake ki Aroma LEAP aapke liye right fit hai ya nahi.
               </p>
             </div>
