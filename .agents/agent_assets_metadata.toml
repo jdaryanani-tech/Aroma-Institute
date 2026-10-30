@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "CQameqn2jsOr3Of9NTLV3"
+uri = "file://generated-artifacts/counselling-question-29.png"
+type = "image"
+title = "Counselling form — Question 29 of 29"
+description = "Preview of the final contact-consent question. This is a visual preview; the example answers were not submitted."
+logical_id = "b953e5b7-5078-4591-a6f5-6f6322312939"
+content_hash = "sha256:2202935bef861039c5dc9cf2c365dab79ea07c337b13ec77b3f12d8e50d502db"
+size = 86201
+mtime_ms = 1793340297884
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:8b0798a2-cd57-4204-a5e7-22d3adc8cafe/b953e5b7-5078-4591-a6f5-6f6322312939/edba7eb8-5327-4711-a9ad-c8a821fd5deb"
+storage_version_token = "1793340308658392"
+content_type = "image/png"
