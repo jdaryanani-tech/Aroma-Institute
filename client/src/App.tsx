@@ -1,4 +1,4 @@
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -18,6 +18,7 @@ import {
   StudentDashboardPage,
   TrainerPage,
 } from "@/lms-ui";
+import { PwaInstallPrompt } from "@/lms-ui/PwaInstallPrompt";
 
 function Router() {
   return (
@@ -28,6 +29,7 @@ function Router() {
       <Route path="/counselling" component={CounsellingForm} />
       <Route path="/admin" component={Admin} />
       <Route path="/learn" component={LearnLoginPage} />
+      <Route path="/learn/" component={LearnLoginPage} />
       <Route path="/learn/setup" component={PasswordSetupPage} />
       <Route path="/learn/dashboard" component={StudentDashboardPage} />
       <Route path="/learn/courses/:courseId" component={LmsCoursePage} />
@@ -40,11 +42,15 @@ function Router() {
 }
 
 function App() {
+  const [location] = useLocation();
+  const isLearnPortal = location === "/learn" || location.startsWith("/learn/");
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
         <Router />
+        {isLearnPortal && <PwaInstallPrompt />}
       </TooltipProvider>
     </QueryClientProvider>
   );

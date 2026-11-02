@@ -168,6 +168,14 @@
 .lms-notification p { margin: 4px 0 6px; color: var(--lms-muted); font-size: 13px; white-space: pre-wrap; }
 .lms-notification.is-read { opacity: .72; }
 .lms-notification .lms-button { flex: none; }
+.lms-pwa-prompt { position: fixed; z-index: 40; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(620px, calc(100% - 28px)); display: flex; align-items: center; gap: 13px; padding: 14px; border: 1px solid #e0d4c3; border-radius: 15px; background: rgba(255,253,248,.98); box-shadow: 0 15px 45px rgba(44,32,20,.2); }
+.lms-pwa-icon { flex: none; width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: #f1e8dc; color: var(--lms-brand); }
+.lms-pwa-copy { min-width: 0; flex: 1; }
+.lms-pwa-copy strong { display: block; font-size: 13px; line-height: 1.35; }
+.lms-pwa-copy p { margin: 4px 0 0; color: var(--lms-muted); font-size: 11px; line-height: 1.45; }
+.lms-pwa-actions { display: flex; align-items: center; gap: 7px; }
+.lms-pwa-dismiss { width: 34px; height: 34px; display: grid; place-items: center; flex: none; border: 0; border-radius: 8px; background: transparent; color: var(--lms-muted); }
+.lms-pwa-dismiss:hover { background: #f3ede3; color: var(--lms-ink); }
 .lms-course-picker { max-width: 300px; }
 .lms-compact-form { align-items: end; gap: 10px; margin-bottom: 18px; }
 .lms-compact-form .lms-field { margin-bottom: 0; }
@@ -231,6 +239,11 @@
   .lms-brand-sub { display: none; }
   .lms-user-chip { display: none; }
   .lms-page-head { align-items: flex-start; flex-direction: column; margin-bottom: 24px; }
+  .lms-pwa-prompt { gap: 10px; padding: 12px; }
+  .lms-pwa-icon { width: 36px; height: 36px; }
+  .lms-pwa-copy strong { font-size: 12px; }
+  .lms-pwa-copy p { font-size: 10px; }
+  .lms-pwa-actions { gap: 3px; }
   .lms-grid-courses { grid-template-columns: 1fr; }
   .lms-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lms-panel { padding: 19px; }
