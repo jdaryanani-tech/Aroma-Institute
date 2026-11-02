@@ -2,7 +2,7 @@ import "./lms.css";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useLocation, useParams } from "wouter";
 import {
-  ArrowDownRight, ArrowLeft, ArrowRight, Bell, BookOpen, CalendarDays, Check, CheckCircle2,
+  ArrowDownRight, ArrowLeft, ArrowRight, Bell, BookOpen, CalendarDays, Check, CheckCircle2, ChevronDown,
   CircleAlert, ClipboardCheck, Clock3, Coffee, FileBarChart2, GraduationCap, History,
   KeyRound, Layers3, LoaderCircle, LockKeyhole, LogOut, Plus, Send, ShieldAlert,
   UserRound, UserRoundCheck, UserRoundX, Users, X,
@@ -19,6 +19,7 @@ import {
   useRedeemLmsInvitation, useRevokeLmsInvitation, useSetLmsCourseStatus,
   useRequestCertificateReview, useStudentAssessment, useStudentCertificates, useStudentDashboard,
   useReviewLmsCertificate, useSubmitLmsAssessment, useTrainerCourses,
+  requestJson,
 } from "@/hooks/use-lms";
 import type { AdminEnrollment, CourseOutline, LmsCourse, LmsInvitation, LmsUser } from "@/hooks/use-lms";
 
@@ -348,6 +349,7 @@ function CoursePageContent({ user }: { user: LmsUser }) {
   } | null>(null);
   const logout = useLogoutAction();
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [openModuleId, setOpenModuleId] = useState<number | null | undefined>(undefined);
   if (!Number.isSafeInteger(id) || id <= 0) return <PageFrame><ErrorState message="This course address is not valid." retry={() => window.history.back()} /></PageFrame>;
   if (outlineQuery.isLoading) return <div className="lms"><BrandHeader user={user} onLogout={logout} /><main className="lms-shell lms-main"><LoadingRows count={4} /></main></div>;
   if (outlineQuery.isError) return <PageFrame user={user} onLogout={logout}><ErrorState message={niceError(outlineQuery.error, "The course outline could not be loaded.")} retry={() => void outlineQuery.refetch()} /></PageFrame>;
@@ -355,6 +357,7 @@ function CoursePageContent({ user }: { user: LmsUser }) {
   const lessons = allLessons(outline);
   const availableLessons = lessons.filter(item => !item.locked);
   const selected = availableLessons.find(item => item.id === selectedId) || availableLessons.find(item => !item.completed) || availableLessons[0] || lessons[0] || null;
+  const selectedModuleId = outline.modules.find(module => module.chapters.some(chapter => chapter.lessons.some(lesson => lesson.id === selected?.id)))?.id;
   const video = selected ? getYoutubeEmbed(selected.youtubeUrl) : null;
   const done = lessons.filter(item => item.completed).length;
   const toggleComplete = (lesson: Lesson) => mark.mutate({ lessonId: lesson.id, completed: !lesson.completed });
@@ -378,7 +381,7 @@ function CoursePageContent({ user }: { user: LmsUser }) {
         <section className="lms-panel">
           {selected ? <><div className="lms-panel-head"><div><div className="lms-eyebrow">Now learning</div><h2>{selected.title}</h2></div>{selected.durationMinutes && <span className="lms-tag"><Icon icon={Clock3} size={12} /> {selected.durationMinutes} min</span>}</div>
             {video ? <div className="lms-video"><iframe title={`Video lesson: ${selected.title}`} src={video} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen /></div> :
-              <div className="lms-empty" style={{ marginBottom: 18 }}><div className="lms-empty-mark"><Icon icon={BookOpen} /></div><h3>Lesson materials</h3><p className="lms-muted">{selected.youtubeUrl ? "The lesson video link is not a valid secure YouTube URL." : "There is no video attached to this lesson. Use the lesson notes below and mark your practice when complete."}</p></div>}
+              <div className="lms-empty" style={{ marginBottom: 18 }}><div className="lms-empty-mark"><Icon icon={BookOpen} /></div><h3>Chapter video</h3><p className="lms-muted">{selected.youtubeUrl ? "The lesson video link is not a valid secure YouTube URL." : "The chapter video has not been added yet."}</p></div>}
             {selected.description && <p style={{ marginTop: 18, color: "var(--lms-muted)" }}>{selected.description}</p>}
             {selected.requiredForAssessment && <p className="lms-help">Required for assessment</p>}
             {selected.resources.length > 0 && <div className="lms-builder-lessons" style={{ margin: "18px 0" }}><strong>Learning files</strong>{selected.resources.map(resource => <div key={resource.id}><a className="lms-course-link" href={`/api/lms/resources/${resource.id}`}>{resource.fileName}</a><span className="lms-help"> · {(resource.byteSize / 1024).toFixed(0)} KB</span></div>)}</div>}
@@ -388,11 +391,38 @@ function CoursePageContent({ user }: { user: LmsUser }) {
             {mark.isError && <p className="lms-help" role="alert">{niceError(mark.error, "Progress could not be saved.")}</p>}
           </> : <EmptyState title="No lessons yet" detail="This course outline has no lessons to display." />}
         </section>
-        <aside className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Course outline</div><h2>Lessons</h2></div><span className="lms-tag">{done}/{lessons.length}</span></div>
-          <div className="lms-lesson-list">{outline.modules.map(module => <div key={module.id} className="lms-module"><div className="lms-module-title"><span>{module.title}</span><span className="lms-muted">{module.chapters.reduce((n, c) => n + c.lessons.length, 0)}</span></div>{module.chapters.map(chapter => <div key={chapter.id} style={{ marginBottom: 9 }}><div className="lms-chapter-row"><div className="lms-overline">{chapter.title}{chapter.locked && <span className="lms-muted"> · Locked</span>}</div><button type="button" className="lms-text-button" disabled={chapter.locked} onClick={() => openAssessment(chapter.id)}><Icon icon={ClipboardCheck} size={13} /> Assessment</button></div>{chapter.lessons.map(lesson => <div key={lesson.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <button type="button" className="lms-lesson" aria-current={selected?.id === lesson.id ? "true" : undefined} onClick={() => setSelectedId(lesson.id)} disabled={lesson.locked}><span className={`lms-check ${lesson.completed ? "is-done" : ""}`}>{lesson.locked ? <Icon icon={LockKeyhole} size={11} /> : lesson.completed && <Icon icon={Check} size={11} />}</span><span><span className="lms-lesson-name">{lesson.title}</span><span className="lms-lesson-time">{lesson.locked ? "Complete previous chapter requirements to unlock" : `${lesson.durationMinutes ? `${lesson.durationMinutes} min` : "Lesson"}${lesson.requiredForAssessment ? " · Assessment required" : ""}`}</span></span></button>
-            <button className="lms-icon-button" type="button" aria-label={`${lesson.completed ? "Mark incomplete" : "Mark complete"}: ${lesson.title}`} title={lesson.completed ? "Mark incomplete" : "Mark complete"} disabled={mark.isPending || lesson.locked} onClick={() => toggleComplete(lesson)} style={{ width: 30, height: 30, flex: "none" }}><Icon icon={lesson.locked ? LockKeyhole : lesson.completed ? CheckCircle2 : Check} size={14} /></button>
-          </div>)}</div>)}</div>)}</div>
+        <aside className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Course outline</div><h2>Modules and chapters</h2></div><span className="lms-tag">{done}/{lessons.length}</span></div>
+          <div className="lms-lesson-list">{outline.modules.map(module => {
+            const expanded = module.id === (openModuleId === undefined ? selectedModuleId : openModuleId);
+            return <div key={module.id} className="lms-module">
+              <button type="button" className="lms-module-toggle" aria-expanded={expanded} onClick={() => setOpenModuleId(current => current === module.id ? null : module.id)}>
+                <span className="lms-module-toggle-title">{module.title}</span>
+                <span className="lms-module-toggle-meta">{module.chapters.length} chapters <Icon icon={ChevronDown} size={15} /></span>
+              </button>
+              {expanded && <div className="lms-module-chapters">{module.chapters.map(chapter => {
+                const chapterLesson = chapter.lessons.find(lesson => !lesson.locked) || chapter.lessons[0];
+                const chapterSelected = chapter.lessons.some(lesson => lesson.id === selected?.id);
+                const chapterCompleted = chapter.lessons.length > 0 && chapter.lessons.every(lesson => lesson.completed);
+                return <div key={chapter.id} className="lms-chapter-entry">
+                  <div className="lms-chapter-row">
+                    <button type="button" className="lms-chapter-select" aria-current={chapterSelected ? "true" : undefined} disabled={chapter.locked || !chapterLesson || chapterLesson.locked} onClick={() => chapterLesson && setSelectedId(chapterLesson.id)}>
+                      <span className={`lms-check ${chapterCompleted ? "is-done" : ""}`}>{chapter.locked ? <Icon icon={LockKeyhole} size={11} /> : chapterCompleted && <Icon icon={Check} size={11} />}</span>
+                      <span className="lms-chapter-select-title">{chapter.title}</span>
+                    </button>
+                    <button type="button" className="lms-text-button" disabled={chapter.locked} onClick={() => openAssessment(chapter.id)}><Icon icon={ClipboardCheck} size={13} /> Assessment</button>
+                  </div>
+                  {chapter.lessons.length > 1 && chapter.lessons.map(lesson => <div key={lesson.id} className="lms-nested-lesson">
+                    <button type="button" className="lms-lesson" aria-current={selected?.id === lesson.id ? "true" : undefined} onClick={() => setSelectedId(lesson.id)} disabled={lesson.locked}>
+                      <span className={`lms-check ${lesson.completed ? "is-done" : ""}`}>{lesson.locked ? <Icon icon={LockKeyhole} size={11} /> : lesson.completed && <Icon icon={Check} size={11} />}</span>
+                      <span><span className="lms-lesson-name">{lesson.title}</span><span className="lms-lesson-time">{lesson.locked ? "Complete previous chapter requirements to unlock" : `${lesson.durationMinutes ? `${lesson.durationMinutes} min` : "Lesson"}${lesson.requiredForAssessment ? " · Assessment required" : ""}`}</span></span>
+                    </button>
+                    <button className="lms-icon-button" type="button" aria-label={`${lesson.completed ? "Mark incomplete" : "Mark complete"}: ${lesson.title}`} title={lesson.completed ? "Mark incomplete" : "Mark complete"} disabled={mark.isPending || lesson.locked} onClick={() => toggleComplete(lesson)} style={{ width: 30, height: 30, flex: "none" }}><Icon icon={lesson.locked ? LockKeyhole : lesson.completed ? CheckCircle2 : Check} size={14} /></button>
+                  </div>)}
+                  {chapter.lessons.length === 1 && chapterLesson && <span className="lms-chapter-video-note">{chapterLesson.locked ? "Complete previous chapter requirements to unlock" : chapterLesson.completed ? "Video lesson · completed" : "Video lesson"}</span>}
+                </div>;
+              })}</div>}
+            </div>;
+          })}</div>
         </aside>
       </div>}
       {assessmentChapterId !== null && <section className="lms-panel lms-assessment-panel">
@@ -638,6 +668,9 @@ function AdminContent({ user }: { user: LmsUser }) {
   const [accountName, setAccountName] = useState("");
   const [accountPhone, setAccountPhone] = useState("");
   const [accountRole, setAccountRole] = useState<"student" | "trainer">("student");
+  const [curriculumImportBusy, setCurriculumImportBusy] = useState(false);
+  const [curriculumImportMessage, setCurriculumImportMessage] = useState("");
+  const [curriculumImportError, setCurriculumImportError] = useState("");
   const [inviteCourseId, setInviteCourseId] = useState("");
   const [invitePhone, setInvitePhone] = useState("");
   const [inviteUses, setInviteUses] = useState("1");
@@ -650,6 +683,29 @@ function AdminContent({ user }: { user: LmsUser }) {
   const stats = overview.data;
   const listedCourses = courses.data ?? [];
   const activeCourses = listedCourses.filter(c => c.status === "published");
+  const hasBaristaExecutive = listedCourses.some(course => course.slug === "barista-executive");
+
+  const importBaristaCurriculum = async () => {
+    setCurriculumImportBusy(true);
+    setCurriculumImportMessage("");
+    setCurriculumImportError("");
+    try {
+      const result = await requestJson<{ created: boolean; courseId: number; modules?: number; chapters?: number }>(
+        "POST",
+        "/api/lms/admin/curriculum/barista-executive",
+      );
+      await Promise.all([courses.refetch(), overview.refetch()]);
+      setCurriculumImportMessage(
+        result.created
+          ? `Barista Executive draft created with ${result.modules} modules and ${result.chapters} chapter video slots.`
+          : "Barista Executive already exists in this catalogue; it was left unchanged.",
+      );
+    } catch (error) {
+      setCurriculumImportError(niceError(error, "The curriculum could not be imported."));
+    } finally {
+      setCurriculumImportBusy(false);
+    }
+  };
 
   const submitCourse = (event: FormEvent) => {
     event.preventDefault(); setCourseError("");
@@ -743,7 +799,9 @@ function AdminContent({ user }: { user: LmsUser }) {
     <AdminOperations courses={listedCourses} users={adminUsers.data} />
     <ProfileNotifications user={user} />
     <div className="lms-grid lms-grid-2">
-      <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Catalogue</div><h2>Courses</h2></div><span className="lms-tag">{listedCourses.length} total</span></div>
+       <section className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">Catalogue</div><h2>Courses</h2></div><div className="lms-row"><span className="lms-tag">{listedCourses.length} total</span>{!hasBaristaExecutive && <button className="lms-button lms-button-secondary lms-button-sm" onClick={() => void importBaristaCurriculum()} disabled={curriculumImportBusy}>{curriculumImportBusy ? "Importing…" : "Import Barista Executive"}</button>}</div></div>
+         {curriculumImportMessage && <div className="lms-alert lms-alert-success" role="status" style={{ marginBottom: 12 }}>{curriculumImportMessage}</div>}
+         {curriculumImportError && <div className="lms-alert lms-alert-error" role="alert" style={{ marginBottom: 12 }}>{curriculumImportError}</div>}
         {courses.isLoading ? <LoadingRows count={3} /> : courses.isError ? <ErrorState message={niceError(courses.error, "Courses could not be loaded.")} retry={() => void courses.refetch()} /> : !listedCourses.length ? <EmptyState title="No courses in the catalogue" detail="Create a course to start building your LEAP catalogue." icon={BookOpen} /> :
           <div className="lms-table-wrap"><table className="lms-table"><thead><tr><th>Course</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>{listedCourses.map(course => <tr key={course.id}><td><strong>{course.title}</strong><div className="lms-help lms-mono">{course.slug}</div></td><td><span className={`lms-status lms-status-${course.status}`}>{course.status}</span></td><td>{course.createdAt ? formatDate(course.createdAt) : "—"}</td><td><div className="lms-row"><Link className="lms-button lms-button-secondary lms-button-sm" href={`/manage/courses/${course.id}`}>Edit outline</Link><button className="lms-button lms-button-secondary lms-button-sm" onClick={() => changeStatus(course)} disabled={setStatus.isPending || course.status === "archived"}>{course.status === "published" ? "Archive" : course.status === "draft" ? "Publish" : "Archived"}</button></div></td></tr>)}</tbody></table></div>}
       </section>

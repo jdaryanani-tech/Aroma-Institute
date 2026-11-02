@@ -43,6 +43,7 @@ import {
   MAX_LMS_RESOURCE_BYTES,
   validateLmsResource,
 } from "./access-policy";
+import { BARISTA_EXECUTIVE_CURRICULUM } from "@shared/barista-executive-curriculum";
 
 const nameSchema = z.string().trim().min(2).max(180);
 const descriptionSchema = z.string().trim().max(5000).default("");
@@ -266,6 +267,103 @@ async function refreshCertificateEligibility(enrollmentId: number) {
 }
 
 export function registerLmsManagementRoutes(app: Express) {
+  app.post(
+    "/api/lms/admin/curriculum/barista-executive",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (req, res) => {
+      try {
+        const [existing] = await db
+          .select({ id: lmsCourses.id })
+          .from(lmsCourses)
+          .where(eq(lmsCourses.slug, BARISTA_EXECUTIVE_CURRICULUM.slug))
+          .limit(1);
+        if (existing) {
+          return res.json({ created: false, courseId: existing.id });
+        }
+
+        const imported = await db.transaction(async (tx) => {
+          const [course] = await tx
+            .insert(lmsCourses)
+            .values({
+              slug: BARISTA_EXECUTIVE_CURRICULUM.slug,
+              title: BARISTA_EXECUTIVE_CURRICULUM.title,
+              description: BARISTA_EXECUTIVE_CURRICULUM.description,
+              status: "draft",
+              createdBy: req.lmsUser!.id,
+            })
+            .returning({ id: lmsCourses.id });
+
+          let chapterCount = 0;
+          for (let modulePosition = 0; modulePosition < BARISTA_EXECUTIVE_CURRICULUM.modules.length; modulePosition += 1) {
+            const module = BARISTA_EXECUTIVE_CURRICULUM.modules[modulePosition];
+            const [createdModule] = await tx
+              .insert(lmsModules)
+              .values({
+                courseId: course.id,
+                title: module.title,
+                description: module.description,
+                position: modulePosition,
+                status: "draft",
+              })
+              .returning({ id: lmsModules.id });
+
+            for (let chapterPosition = 0; chapterPosition < module.chapters.length; chapterPosition += 1) {
+              const chapter = module.chapters[chapterPosition];
+              const [createdChapter] = await tx
+                .insert(lmsChapters)
+                .values({
+                  moduleId: createdModule.id,
+                  title: chapter.title,
+                  description: chapter.description,
+                  position: chapterPosition,
+                  status: "draft",
+                })
+                .returning({ id: lmsChapters.id });
+
+              await tx.insert(lmsLessons).values({
+                chapterId: createdChapter.id,
+                title: chapter.title,
+                description: "Chapter video placeholder. Attach the video before publishing this course.",
+                youtubeUrl: null,
+                durationMinutes: null,
+                position: 0,
+                requiredForAssessment: false,
+                status: "draft",
+              });
+              chapterCount += 1;
+            }
+          }
+
+          await tx.insert(lmsAuditLogs).values({
+            actorId: req.lmsUser!.id,
+            action: "curriculum.imported",
+            entityType: "course",
+            entityId: String(course.id),
+            metadata: {
+              slug: BARISTA_EXECUTIVE_CURRICULUM.slug,
+              modules: BARISTA_EXECUTIVE_CURRICULUM.modules.length,
+              chapters: chapterCount,
+            },
+          });
+
+          return {
+            courseId: course.id,
+            modules: BARISTA_EXECUTIVE_CURRICULUM.modules.length,
+            chapters: chapterCount,
+          };
+        });
+
+        return res.status(201).json({ created: true, ...imported });
+      } catch (error) {
+        console.error("[lms] Barista Executive curriculum import failed", error);
+        return res.status(500).json({
+          message: "The curriculum could not be imported.",
+        });
+      }
+    },
+  );
+
   app.patch(
     "/api/lms/profile",
     requireLmsUser,
