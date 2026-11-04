@@ -8,6 +8,7 @@ import VSL from "@/pages/VSL";
 import VSLVideo from "@/pages/VSLVideo";
 import CounsellingForm from "@/pages/CounsellingForm";
 import Admin from "@/pages/Admin";
+import AdminLogin from "@/pages/AdminLogin";
 import NotFound from "@/pages/not-found";
 import {
   AdminPage as LmsAdminPage,
@@ -27,6 +28,7 @@ function Router() {
       <Route path="/vsl" component={VSL} />
       <Route path="/vsl-video" component={VSLVideo} />
       <Route path="/counselling" component={CounsellingForm} />
+      <Route path="/admin/login" component={AdminLogin} />
       <Route path="/admin" component={Admin} />
       <Route path="/learn" component={LearnLoginPage} />
       <Route path="/learn/" component={LearnLoginPage} />

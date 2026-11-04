@@ -199,7 +199,7 @@ export default function Admin() {
                 ? "Administrator access is required."
                 : "Sign in with your Aroma Institute account to continue."}
           </p>
-          <a href="/learn" className="inline-flex mt-6 h-11 items-center justify-center rounded-lg bg-amber-400 px-5 font-bold text-[#0e0a07]">
+          <a href="/admin/login" className="inline-flex mt-6 h-11 items-center justify-center rounded-lg bg-amber-400 px-5 font-bold text-[#0e0a07]">
             Continue to sign in
           </a>
         </div>
