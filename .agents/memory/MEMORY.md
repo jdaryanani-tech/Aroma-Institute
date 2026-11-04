@@ -1,3 +1,4 @@
 - [App Storage media delivery](lms-file-storage.md) — A default bucket is now enabled; keep large media there and proxy private objects through the app.
 - [Playwright WebKit on Replit](playwright-webkit-nix.md) — Linux WebKit needs Ubuntu-compatible libraries; validate its project on a compatible runner when Replit’s Nix host cannot launch it.
 - [Barista Executive curriculum scope](barista-executive-curriculum.md) — Build chapters from learning outcomes; omit durations and on-the-job training from the student outline.
+- [Inquiry schema history](inquiry-schema-history.md) — The live development schema contains counselling fields absent from older migration history; verify before replaying migrations.

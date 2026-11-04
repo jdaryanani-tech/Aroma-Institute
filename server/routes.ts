@@ -8,7 +8,10 @@ import { configureLmsSessions, requireLmsRole, requireLmsUser } from "./lms/auth
 import { registerLmsRoutes } from "./lms/routes";
 import { registerLmsManagementRoutes } from "./lms/management-routes";
 import { registerVslMediaRoutes } from "./vsl-media";
-import { sendCounsellingInquiryToN8n } from "./n8n-counselling";
+import {
+  sendCounsellingInquiryToN8n,
+  summarizeCounsellingDeliveryResult,
+} from "./n8n-counselling";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -34,11 +37,26 @@ export async function registerRoutes(
   app.post("/api/counselling-inquiries", async (req, res) => {
     try {
       const data = insertCounsellingInquirySchema.parse(req.body);
-      const inquiry = await storage.createInquiry(data);
+      const submittedAt = new Date();
+      const inquiry = await storage.createCounsellingInquiry(data, submittedAt);
       const delivery = await sendCounsellingInquiryToN8n({
         ...inquiry,
         counsellingAnswers: data.counsellingAnswers,
       });
+      const deliverySummary = summarizeCounsellingDeliveryResult(delivery);
+      try {
+        const recorded = await storage.finishCounsellingDeliveryAttempt(
+          inquiry.id,
+          inquiry.counsellingDeliveryAttempts,
+          deliverySummary.status,
+          deliverySummary.lastResult,
+        );
+        if (!recorded) {
+          console.error("[counselling] delivery result was not persisted", { inquiryId: inquiry.id });
+        }
+      } catch {
+        console.error("[counselling] delivery result was not persisted", { inquiryId: inquiry.id });
+      }
       if (delivery.status !== "sent") {
         console.error("[counselling] n8n delivery did not complete", {
           inquiryId: inquiry.id,
@@ -60,6 +78,78 @@ export async function registerRoutes(
       }
     }
   });
+
+  app.post(
+    "/api/admin/inquiries/:id/retry-counselling-delivery",
+    requireLmsUser,
+    requireLmsRole("admin"),
+    async (req, res) => {
+      const rawId = typeof req.params.id === "string" ? req.params.id : "";
+      const inquiryId = Number(rawId);
+      if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(inquiryId)) {
+        return res.status(400).json({ message: "Invalid inquiry ID." });
+      }
+
+      try {
+        const claimed = await storage.claimCounsellingInquiryRetry(inquiryId, new Date());
+        if (!claimed) {
+          const existing = await storage.getCounsellingDeliveryState(inquiryId);
+          if (!existing) return res.status(404).json({ message: "Inquiry not found." });
+          return res.status(409).json({
+            message: "This inquiry is not currently eligible for a delivery retry.",
+            deliveryStatus: existing.counsellingDeliveryStatus,
+          });
+        }
+
+        if (!claimed.counsellingAnswers || !claimed.counsellingSubmittedAt) {
+          const result = await storage.finishCounsellingDeliveryAttempt(
+            inquiryId,
+            claimed.counsellingDeliveryAttempts,
+            "failed",
+            "missing_stored_counselling_data",
+          );
+          return res.status(409).json({
+            message: "This inquiry is missing stored counselling data and cannot be retried.",
+            deliveryStatus: result?.counsellingDeliveryStatus ?? "failed",
+          });
+        }
+
+        const delivery = await sendCounsellingInquiryToN8n({
+          ...claimed,
+          counsellingAnswers: claimed.counsellingAnswers,
+        });
+        const summary = summarizeCounsellingDeliveryResult(delivery);
+        const recorded = await storage.finishCounsellingDeliveryAttempt(
+          inquiryId,
+          claimed.counsellingDeliveryAttempts,
+          summary.status,
+          summary.lastResult,
+        );
+        if (!recorded) {
+          console.error("[counselling] retry result was not persisted", { inquiryId });
+          return res.status(500).json({ message: "Retry result could not be saved." });
+        }
+
+        if (delivery.status !== "sent") {
+          console.error("[counselling] admin retry did not complete", {
+            inquiryId,
+            status: delivery.status,
+            ...(delivery.status === "failed" ? { reason: delivery.reason, httpStatus: delivery.httpStatus } : {}),
+          });
+        }
+
+        return res.json({
+          id: recorded.id,
+          deliveryStatus: recorded.counsellingDeliveryStatus,
+          attempts: recorded.counsellingDeliveryAttempts,
+          lastAttemptAt: recorded.counsellingDeliveryLastAttemptAt,
+          lastResult: recorded.counsellingDeliveryLastResult,
+        });
+      } catch {
+        return res.status(500).json({ message: "Unable to retry counselling delivery." });
+      }
+    },
+  );
 
   app.get(
     "/api/admin/inquiries",

@@ -10,7 +10,29 @@ export type CounsellingWebhookResult =
   | { status: "sent"; httpStatus: number }
   | { status: "failed"; reason: "timeout" | "network_error" | "http_error"; httpStatus?: number };
 
+export type PersistedCounsellingDeliveryResult = {
+  status: "sent" | "failed";
+  lastResult: string;
+};
+
 type CounsellingInquiry = Inquiry & { counsellingAnswers: CounsellingAnswers };
+
+export function summarizeCounsellingDeliveryResult(
+  result: CounsellingWebhookResult,
+): PersistedCounsellingDeliveryResult {
+  if (result.status === "sent") {
+    return { status: "sent", lastResult: `HTTP ${result.httpStatus}` };
+  }
+  if (result.status === "failed") {
+    return {
+      status: "failed",
+      lastResult: result.reason === "http_error"
+        ? `http_error (HTTP ${result.httpStatus ?? "unknown"})`
+        : result.reason,
+    };
+  }
+  return { status: "failed", lastResult: result.status };
+}
 
 export function isTrustedCounsellingWebhookUrl(value: string) {
   try {
@@ -30,7 +52,7 @@ export function isTrustedCounsellingWebhookUrl(value: string) {
 
 export function buildCounsellingWebhookPayload(
   inquiry: CounsellingInquiry,
-  submittedAt: Date = new Date(),
+  submittedAt: Date = inquiry.counsellingSubmittedAt ?? new Date(),
 ) {
   const answers = inquiry.counsellingAnswers;
   return {

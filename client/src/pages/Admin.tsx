@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type Inquiry } from "@shared/schema";
 import { LogOut, Download, Users, Mail, Phone, BookOpen, MessageSquare } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
+import { apiRequest } from "@/lib/queryClient";
 import { counsellingQuestions } from "./counsellingQuestions";
 
 const counsellingFieldLabels: Record<string, string> = {
@@ -77,6 +78,29 @@ async function fetchInquiries(): Promise<Inquiry[]> {
   return res.json();
 }
 
+function deliveryStatusLabel(
+  status: Inquiry["counsellingDeliveryStatus"],
+  hasCounsellingAnswers: boolean,
+) {
+  if (status === "not_applicable" && hasCounsellingAnswers) {
+    return "Not tracked (older inquiry)";
+  }
+  switch (status) {
+    case "not_applicable": return "Not a counselling inquiry";
+    case "untracked": return "Not tracked (older inquiry)";
+    case "sending": return "Initial delivery in progress";
+    case "retrying": return "Retry in progress";
+    case "sent": return "Delivered";
+    case "failed": return "Delivery failed";
+  }
+}
+
+function formatDeliveryTimestamp(value: Inquiry["counsellingDeliveryLastAttemptAt"]) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleString();
+}
+
 function exportCSV(data: Inquiry[]) {
   const headers = ["ID", "Name", "Email", "Phone", "Program Interest", "Message", "Counselling Answers"];
   const rows = data.map((r) => [
@@ -103,6 +127,7 @@ function exportCSV(data: Inquiry[]) {
 export default function Admin() {
   const session = useLmsSession();
   const logout = useLmsLogout();
+  const queryClient = useQueryClient();
   const [, setLocation] = useLocation();
   const isAdmin = Boolean(session.data?.roles.includes("admin"));
   const { data, isLoading, isError } = useQuery<Inquiry[]>({
@@ -110,6 +135,18 @@ export default function Admin() {
     queryFn: fetchInquiries,
     enabled: isAdmin,
     retry: false,
+  });
+  const retryDelivery = useMutation({
+    mutationFn: async (inquiryId: number) => {
+      const response = await apiRequest(
+        "POST",
+        `/api/admin/inquiries/${inquiryId}/retry-counselling-delivery`,
+      );
+      return response.json();
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/inquiries"] });
+    },
   });
 
   const handleLogout = () => {
@@ -230,6 +267,7 @@ export default function Admin() {
                     <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Phone</th>
                     <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Program</th>
                     <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Message</th>
+                    <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Webhook delivery</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -287,6 +325,67 @@ export default function Admin() {
                                 ))}
                             </dl>
                           </details>
+                        )}
+                      </td>
+                      <td className="px-5 py-4 min-w-56">
+                        {lead.counsellingAnswers ? (
+                          <div className="space-y-1.5">
+                            <p className={`font-semibold ${
+                              lead.counsellingDeliveryStatus === "failed"
+                                ? "text-red-300"
+                                : lead.counsellingDeliveryStatus === "sent"
+                                  ? "text-emerald-300"
+                                  : "text-white/70"
+                            }`}>
+                              {deliveryStatusLabel(
+                                lead.counsellingDeliveryStatus,
+                                Boolean(lead.counsellingAnswers),
+                              )}
+                            </p>
+                            {lead.counsellingDeliveryAttempts > 0 && (
+                              <p className="text-xs text-white/45">
+                                Attempts: {lead.counsellingDeliveryAttempts}
+                              </p>
+                            )}
+                            {formatDeliveryTimestamp(lead.counsellingDeliveryLastAttemptAt) && (
+                              <p className="text-xs text-white/45">
+                                Last attempt: {formatDeliveryTimestamp(lead.counsellingDeliveryLastAttemptAt)}
+                              </p>
+                            )}
+                            {lead.counsellingDeliveryLastResult && (
+                              <p className="text-xs text-white/55">
+                                Result: {lead.counsellingDeliveryLastResult}
+                              </p>
+                            )}
+                            {(lead.counsellingDeliveryStatus === "untracked"
+                              || lead.counsellingDeliveryStatus === "not_applicable") && (
+                              <p className="text-xs text-white/40">
+                                Earlier delivery outcome is unknown; retry is disabled to avoid duplicates.
+                              </p>
+                            )}
+                            {lead.counsellingDeliveryStatus === "failed" && (
+                              <button
+                                type="button"
+                                className="mt-1 rounded-md border border-amber-400/40 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-400/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                disabled={retryDelivery.isPending && retryDelivery.variables === lead.id}
+                                onClick={() => retryDelivery.mutate(lead.id)}
+                                data-testid={`admin-retry-counselling-${lead.id}`}
+                              >
+                                {retryDelivery.isPending && retryDelivery.variables === lead.id
+                                  ? "Retrying…"
+                                  : "Retry delivery"}
+                              </button>
+                            )}
+                            {retryDelivery.isError && retryDelivery.variables === lead.id && (
+                              <p className="text-xs text-red-300" role="alert">
+                                {retryDelivery.error instanceof Error
+                                  ? retryDelivery.error.message
+                                  : "Retry could not be started."}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-white/30">Not applicable</span>
                         )}
                       </td>
                     </tr>

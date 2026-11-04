@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, serial, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, jsonb, integer, timestamp } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -156,6 +156,16 @@ export const counsellingAnswersSchema = z.object({
 
 export type CounsellingAnswers = z.infer<typeof counsellingAnswersSchema>;
 
+export const counsellingDeliveryStatuses = [
+  "not_applicable",
+  "untracked",
+  "sending",
+  "retrying",
+  "sent",
+  "failed",
+] as const;
+export type CounsellingDeliveryStatus = (typeof counsellingDeliveryStatuses)[number];
+
 export const inquiries = pgTable("inquiries", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
@@ -164,10 +174,23 @@ export const inquiries = pgTable("inquiries", {
   programInterest: text("program_interest").notNull(),
   message: text("message"),
   counsellingAnswers: jsonb("counselling_answers").$type<CounsellingAnswers>(),
+  counsellingSubmittedAt: timestamp("counselling_submitted_at", { withTimezone: true }),
+  counsellingDeliveryStatus: text("counselling_delivery_status")
+    .$type<CounsellingDeliveryStatus>()
+    .notNull()
+    .default("not_applicable"),
+  counsellingDeliveryAttempts: integer("counselling_delivery_attempts").notNull().default(0),
+  counsellingDeliveryLastAttemptAt: timestamp("counselling_delivery_last_attempt_at", { withTimezone: true }),
+  counsellingDeliveryLastResult: text("counselling_delivery_last_result"),
 });
 
 export const insertInquirySchema = createInsertSchema(inquiries).omit({
   id: true,
+  counsellingSubmittedAt: true,
+  counsellingDeliveryStatus: true,
+  counsellingDeliveryAttempts: true,
+  counsellingDeliveryLastAttemptAt: true,
+  counsellingDeliveryLastResult: true,
 }).extend({
   email: z.string().email("Please enter a valid email address"),
   phone: z.string().min(10, "Please enter a valid phone number"),

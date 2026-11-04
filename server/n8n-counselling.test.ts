@@ -5,6 +5,7 @@ import {
   buildCounsellingWebhookPayload,
   isTrustedCounsellingWebhookUrl,
   sendCounsellingInquiryToN8n,
+  summarizeCounsellingDeliveryResult,
 } from "./n8n-counselling";
 
 const answerSet = {
@@ -47,6 +48,11 @@ const inquiry = {
   programInterest: "Aroma LEAP",
   message: "Counselling request",
   counsellingAnswers: answerSet,
+  counsellingSubmittedAt: new Date("2027-01-01T00:00:00.000Z"),
+  counsellingDeliveryStatus: "untracked",
+  counsellingDeliveryAttempts: 0,
+  counsellingDeliveryLastAttemptAt: null,
+  counsellingDeliveryLastResult: null,
 } satisfies Inquiry & { counsellingAnswers: CounsellingAnswers };
 
 const originalUrl = process.env.N8N_COUNSELLING_WEBHOOK_URL;
@@ -68,14 +74,30 @@ test("only production HTTPS webhooks on the Aroma n8n host are accepted", () => 
 });
 
 test("the payload carries the full questionnaire and keeps booking unconfirmed", () => {
-  const payload = buildCounsellingWebhookPayload(inquiry, new Date("2027-01-01T00:00:00.000Z"));
+  const payload = buildCounsellingWebhookPayload(inquiry);
   assert.equal(payload.event, "counselling.inquiry.submitted");
   assert.equal(payload.submissionId, "counselling-inquiry-42");
+  assert.equal(payload.submittedAt, "2027-01-01T00:00:00.000Z");
   assert.equal(payload.lead.phone, "9876543210");
   assert.equal(payload.counsellingAnswers.preferredDate, "2027-02-10");
   assert.equal(payload.appointmentRequest.status, "pending_availability_check");
   assert.equal(payload.appointmentRequest.confirmed, false);
   assert.equal(payload.consentToContact, true);
+});
+
+test("delivery summaries persist only status and safe result metadata", () => {
+  assert.deepEqual(
+    summarizeCounsellingDeliveryResult({ status: "sent", httpStatus: 202 }),
+    { status: "sent", lastResult: "HTTP 202" },
+  );
+  assert.deepEqual(
+    summarizeCounsellingDeliveryResult({ status: "failed", reason: "http_error", httpStatus: 403 }),
+    { status: "failed", lastResult: "http_error (HTTP 403)" },
+  );
+  assert.deepEqual(
+    summarizeCounsellingDeliveryResult({ status: "failed", reason: "timeout" }),
+    { status: "failed", lastResult: "timeout" },
+  );
 });
 
 test("an unset webhook leaves local submission delivery disabled", async () => {
