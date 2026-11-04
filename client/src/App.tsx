@@ -23,7 +23,7 @@ import { PwaInstallPrompt } from "@/lms-ui/PwaInstallPrompt";
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={Home} />
+      <Route path="/" component={RootLanding} />
       <Route path="/vsl" component={VSL} />
       <Route path="/vsl-video" component={VSLVideo} />
       <Route path="/counselling" component={CounsellingForm} />
@@ -39,6 +39,13 @@ function Router() {
       <Route component={NotFound} />
     </Switch>
   );
+}
+
+function RootLanding() {
+  const isTrainingHost = typeof window !== "undefined"
+    && window.location.hostname.toLowerCase() === "training.aromacafeinstitute.in";
+
+  return isTrainingHost ? <VSL /> : <Home />;
 }
 
 function App() {
