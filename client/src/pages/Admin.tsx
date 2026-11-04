@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type Inquiry } from "@shared/schema";
+import { type CounsellingDeliveryAttemptRecord, type Inquiry } from "@shared/schema";
 import { LogOut, Download, Users, Mail, Phone, BookOpen, MessageSquare } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
@@ -66,6 +66,10 @@ const counsellingValueLabels: Record<string, string> = {
   no: "No",
 };
 
+type AdminInquiry = Inquiry & {
+  deliveryAttemptHistory: CounsellingDeliveryAttemptRecord[];
+};
+
 function formatCounsellingAnswer(key: string, value: unknown): string {
   const question = counsellingQuestions.find((item) => item.key === key);
   if (Array.isArray(value)) {
@@ -83,7 +87,7 @@ function formatCounsellingAnswer(key: string, value: unknown): string {
     ?? value;
 }
 
-async function fetchInquiries(): Promise<Inquiry[]> {
+async function fetchInquiries(): Promise<AdminInquiry[]> {
   const res = await fetch("/api/admin/inquiries", { credentials: "include" });
   if (!res.ok) throw new Error(res.status === 403 ? "Administrator access required." : "Unable to load inquiries.");
   return res.json();
@@ -99,10 +103,12 @@ function deliveryStatusLabel(
   switch (status) {
     case "not_applicable": return "Not a counselling inquiry";
     case "untracked": return "Not tracked (older inquiry)";
-    case "sending": return "Initial delivery in progress";
-    case "retrying": return "Retry in progress";
-    case "sent": return "Delivered";
-    case "failed": return "Delivery failed";
+    case "pending": return "Pending";
+    case "sending":
+    case "retrying": return "Sending";
+    case "acknowledged": return "Acknowledged";
+    case "sent": return "Earlier 2xx (ack not verified)";
+    case "failed": return "Failed";
   }
 }
 
@@ -143,7 +149,7 @@ export default function Admin() {
   const [retryTargetId, setRetryTargetId] = useState<number | null>(null);
   const [verifiedNotDelivered, setVerifiedNotDelivered] = useState(false);
   const isAdmin = Boolean(session.data?.roles.includes("admin"));
-  const { data, isLoading, isError } = useQuery<Inquiry[]>({
+  const { data, isLoading, isError } = useQuery<AdminInquiry[]>({
     queryKey: ["/api/admin/inquiries"],
     queryFn: fetchInquiries,
     enabled: isAdmin,
@@ -354,9 +360,11 @@ export default function Admin() {
                             <p className={`font-semibold ${
                               lead.counsellingDeliveryStatus === "failed"
                                 ? "text-red-300"
-                                : lead.counsellingDeliveryStatus === "sent"
+                                : lead.counsellingDeliveryStatus === "acknowledged"
                                   ? "text-emerald-300"
-                                  : "text-white/70"
+                                  : lead.counsellingDeliveryStatus === "pending"
+                                    ? "text-amber-200"
+                                    : "text-white/70"
                             }`}>
                               {deliveryStatusLabel(
                                 lead.counsellingDeliveryStatus,
@@ -375,8 +383,31 @@ export default function Admin() {
                             )}
                             {lead.counsellingDeliveryLastResult && (
                               <p className="text-xs text-white/55">
-                                Result: {lead.counsellingDeliveryLastResult}
+                                Latest result: {lead.counsellingDeliveryLastResult}
                               </p>
+                            )}
+                            {lead.deliveryAttemptHistory.length > 0 && (
+                              <details className="mt-2">
+                                <summary className="cursor-pointer text-xs font-semibold text-white/55 hover:text-white/80">
+                                  Delivery attempt history ({lead.deliveryAttemptHistory.length})
+                                </summary>
+                                <ol className="mt-2 space-y-2 text-xs text-white/55">
+                                  {lead.deliveryAttemptHistory.map((attempt) => (
+                                    <li key={attempt.id} className="rounded-md border border-white/10 p-2">
+                                      <p className="font-semibold text-white/75">
+                                        Attempt {attempt.attemptNumber}: {deliveryStatusLabel(
+                                          attempt.deliveryState,
+                                          true,
+                                        )}
+                                      </p>
+                                      <p>Started: {formatDeliveryTimestamp(attempt.attemptedAt) ?? "—"}</p>
+                                      <p>Response: {formatDeliveryTimestamp(attempt.responseAt) ?? "No HTTP response"}</p>
+                                      {attempt.httpStatus !== null && <p>HTTP status: {attempt.httpStatus}</p>}
+                                      {attempt.errorSummary && <p>Error: {attempt.errorSummary}</p>}
+                                    </li>
+                                  ))}
+                                </ol>
+                              </details>
                             )}
                             {formatDeliveryTimestamp(lead.counsellingDeliveryLastVerifiedAt) && (
                               <p className="text-xs text-white/45">

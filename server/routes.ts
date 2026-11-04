@@ -39,35 +39,41 @@ export async function registerRoutes(
       const data = insertCounsellingInquirySchema.parse(req.body);
       const submittedAt = new Date();
       const inquiry = await storage.createCounsellingInquiry(data, submittedAt);
-      const delivery = await sendCounsellingInquiryToN8n({
-        ...inquiry,
-        counsellingAnswers: data.counsellingAnswers,
-      });
-      const deliverySummary = summarizeCounsellingDeliveryResult(delivery);
+      let attempt: typeof inquiry | undefined;
       try {
-        const recorded = await storage.finishCounsellingDeliveryAttempt(
-          inquiry.id,
-          inquiry.counsellingDeliveryAttempts,
-          deliverySummary.status,
-          deliverySummary.lastResult,
-        );
-        if (!recorded) {
+        attempt = await storage.startCounsellingDeliveryAttempt(inquiry.id, new Date());
+      } catch {
+        console.error("[counselling] delivery attempt could not be started", { inquiryId: inquiry.id });
+      }
+      if (attempt) {
+        const delivery = await sendCounsellingInquiryToN8n({
+          ...attempt,
+          counsellingAnswers: data.counsellingAnswers,
+        });
+        const deliverySummary = summarizeCounsellingDeliveryResult(delivery);
+        try {
+          const recorded = await storage.finishCounsellingDeliveryAttempt(
+            inquiry.id,
+            attempt.counsellingDeliveryAttempts,
+            deliverySummary,
+          );
+          if (!recorded) {
+            console.error("[counselling] delivery result was not persisted", { inquiryId: inquiry.id });
+          }
+        } catch {
           console.error("[counselling] delivery result was not persisted", { inquiryId: inquiry.id });
         }
-      } catch {
-        console.error("[counselling] delivery result was not persisted", { inquiryId: inquiry.id });
-      }
-      if (delivery.status !== "sent") {
-        console.error("[counselling] n8n delivery did not complete", {
-          inquiryId: inquiry.id,
-          status: delivery.status,
-          ...(delivery.status === "failed" ? { reason: delivery.reason, httpStatus: delivery.httpStatus } : {}),
-        });
+        if (delivery.status !== "acknowledged") {
+          console.error("[counselling] n8n delivery was not acknowledged", {
+            inquiryId: inquiry.id,
+            reason: deliverySummary.errorSummary,
+            httpStatus: deliverySummary.httpStatus,
+          });
+        }
       }
       res.status(201).json({
         id: inquiry.id,
         bookingStatus: "pending_availability_check",
-        n8nDelivery: delivery.status,
       });
     } catch (error) {
       if (error instanceof ZodError) {
@@ -118,8 +124,13 @@ export async function registerRoutes(
           const result = await storage.finishCounsellingDeliveryAttempt(
             inquiryId,
             claimed.counsellingDeliveryAttempts,
-            "failed",
-            "missing_stored_counselling_data",
+            {
+              status: "failed",
+              lastResult: "missing_stored_counselling_data",
+              responseAt: null,
+              httpStatus: null,
+              errorSummary: "missing_stored_counselling_data",
+            },
           );
           return res.status(409).json({
             message: "This inquiry is missing stored counselling data and cannot be retried.",
@@ -135,19 +146,18 @@ export async function registerRoutes(
         const recorded = await storage.finishCounsellingDeliveryAttempt(
           inquiryId,
           claimed.counsellingDeliveryAttempts,
-          summary.status,
-          summary.lastResult,
+          summary,
         );
         if (!recorded) {
           console.error("[counselling] retry result was not persisted", { inquiryId });
           return res.status(500).json({ message: "Retry result could not be saved." });
         }
 
-        if (delivery.status !== "sent") {
-          console.error("[counselling] admin retry did not complete", {
+        if (delivery.status !== "acknowledged") {
+          console.error("[counselling] admin retry was not acknowledged", {
             inquiryId,
-            status: delivery.status,
-            ...(delivery.status === "failed" ? { reason: delivery.reason, httpStatus: delivery.httpStatus } : {}),
+            reason: summary.errorSummary,
+            httpStatus: summary.httpStatus,
           });
         }
 

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, serial, jsonb, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, jsonb, integer, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -159,12 +159,17 @@ export type CounsellingAnswers = z.infer<typeof counsellingAnswersSchema>;
 export const counsellingDeliveryStatuses = [
   "not_applicable",
   "untracked",
+  "pending",
   "sending",
   "retrying",
   "sent",
+  "acknowledged",
   "failed",
 ] as const;
 export type CounsellingDeliveryStatus = (typeof counsellingDeliveryStatuses)[number];
+
+export const counsellingAttemptStates = ["sending", "acknowledged", "failed"] as const;
+export type CounsellingAttemptState = (typeof counsellingAttemptStates)[number];
 
 export const inquiries = pgTable("inquiries", {
   id: serial("id").primaryKey(),
@@ -185,6 +190,27 @@ export const inquiries = pgTable("inquiries", {
   counsellingDeliveryLastVerifiedAt: timestamp("counselling_delivery_last_verified_at", { withTimezone: true }),
   counsellingDeliveryLastVerifiedBy: integer("counselling_delivery_last_verified_by"),
 });
+
+export const counsellingDeliveryAttemptRecords = pgTable(
+  "counselling_delivery_attempts",
+  {
+    id: serial("id").primaryKey(),
+    inquiryId: integer("inquiry_id").notNull().references(() => inquiries.id, { onDelete: "cascade" }),
+    attemptNumber: integer("attempt_number").notNull(),
+    deliveryState: text("delivery_state").$type<CounsellingAttemptState>().notNull(),
+    attemptedAt: timestamp("attempted_at", { withTimezone: true }).notNull(),
+    responseAt: timestamp("response_at", { withTimezone: true }),
+    httpStatus: integer("http_status"),
+    errorSummary: text("error_summary"),
+  },
+  (table) => [
+    uniqueIndex("counselling_delivery_attempts_inquiry_attempt_unique").on(
+      table.inquiryId,
+      table.attemptNumber,
+    ),
+  ],
+);
+export type CounsellingDeliveryAttemptRecord = typeof counsellingDeliveryAttemptRecords.$inferSelect;
 
 export const insertInquirySchema = createInsertSchema(inquiries).omit({
   id: true,
