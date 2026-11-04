@@ -77,7 +77,7 @@ The Home page (`client/src/pages/Home.tsx`) is composed of these sections in ord
 - `npm run check` — TypeScript type checking
 - `npm test` — LMS assessment scoring tests
 - `npm run db:generate` — generate a Drizzle migration from both schemas
-- `npm run db:migrate` — apply pending migrations to the development database
+- `npm run db:migrate` — replay tracked migrations only on a database with verified matching migration history; existing development databases use schema push instead
 - `npm run db:push` — push Drizzle schema to database
 - `npm run lms:bootstrap-admin` — create the first admin account interactively
 
