@@ -43,7 +43,6 @@ waitForPort = 5000
 
 [userenv.shared]
 LMS_OTP_WEBHOOK_URL = "https://n8n.aromacafeinstitute.in/webhook/aroma-whatsapp"
-N8N_COUNSELLING_WEBHOOK_URL = "https://n8n.aromacafeinstitute.in/webhook/aroma-whatsapp"
 
 [postMerge]
 path = "script/post-merge.sh"
