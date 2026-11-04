@@ -75,7 +75,7 @@ export async function sendCounsellingInquiryToN8n(
       method: "POST",
       headers: {
         Accept: "application/json",
-        Authorization: `Bearer ${webhookSecret}`,
+        "x-aichm-webhook-secret": webhookSecret,
         "Content-Type": "application/json",
         "Idempotency-Key": `counselling-inquiry-${inquiry.id}`,
       },

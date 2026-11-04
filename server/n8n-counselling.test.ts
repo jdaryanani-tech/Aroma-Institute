@@ -90,9 +90,9 @@ test("an unset webhook leaves local submission delivery disabled", async () => {
   }
 });
 
-test("a successful webhook gets bearer auth and an idempotency key", async () => {
+test("a successful webhook uses the custom secret header and an idempotency key", async () => {
   process.env.N8N_COUNSELLING_WEBHOOK_URL = "https://n8n.aromacafeinstitute.in/webhook/counselling-intake";
-  process.env.N8N_COUNSELLING_WEBHOOK_SECRET = "test-only-secret";
+  process.env.N8N_COUNSELLING_WEBHOOK_SECRET = "  test-only-secret \n";
   let sentBody: unknown;
   let sentHeaders: Headers | null = null;
   try {
@@ -102,7 +102,8 @@ test("a successful webhook gets bearer auth and an idempotency key", async () =>
       return new Response(null, { status: 202 });
     });
     assert.deepEqual(result, { status: "sent", httpStatus: 202 });
-    assert.equal(sentHeaders?.get("authorization"), "Bearer test-only-secret");
+    assert.equal(sentHeaders?.get("x-aichm-webhook-secret"), "test-only-secret");
+    assert.equal(sentHeaders?.get("authorization"), null);
     assert.equal(sentHeaders?.get("idempotency-key"), "counselling-inquiry-42");
     assert.equal((sentBody as ReturnType<typeof buildCounsellingWebhookPayload>).appointmentRequest.confirmed, false);
   } finally {
