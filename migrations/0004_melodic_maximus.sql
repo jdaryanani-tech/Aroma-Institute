@@ -1,0 +1,2 @@
+ALTER TABLE "inquiries" ADD COLUMN "counselling_delivery_last_verified_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "inquiries" ADD COLUMN "counselling_delivery_last_verified_by" integer;

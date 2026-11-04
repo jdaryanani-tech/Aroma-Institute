@@ -89,9 +89,22 @@ export async function registerRoutes(
       if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(inquiryId)) {
         return res.status(400).json({ message: "Invalid inquiry ID." });
       }
+      if (req.body?.verifiedNotDelivered !== true) {
+        return res.status(400).json({
+          message: "Admin verification that the submission is not already received is required.",
+        });
+      }
+      const verifiedByUserId = req.lmsUser?.id;
+      if (!verifiedByUserId) {
+        return res.status(401).json({ message: "Authentication required." });
+      }
 
       try {
-        const claimed = await storage.claimCounsellingInquiryRetry(inquiryId, new Date());
+        const claimed = await storage.claimCounsellingInquiryRetry(
+          inquiryId,
+          new Date(),
+          verifiedByUserId,
+        );
         if (!claimed) {
           const existing = await storage.getCounsellingDeliveryState(inquiryId);
           if (!existing) return res.status(404).json({ message: "Inquiry not found." });
@@ -144,6 +157,7 @@ export async function registerRoutes(
           attempts: recorded.counsellingDeliveryAttempts,
           lastAttemptAt: recorded.counsellingDeliveryLastAttemptAt,
           lastResult: recorded.counsellingDeliveryLastResult,
+          lastVerifiedAt: recorded.counsellingDeliveryLastVerifiedAt,
         });
       } catch {
         return res.status(500).json({ message: "Unable to retry counselling delivery." });

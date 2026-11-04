@@ -7,7 +7,11 @@ export interface IStorage {
   createInquiry(inquiry: NewInquiry): Promise<Inquiry>;
   createCounsellingInquiry(inquiry: InsertCounsellingInquiry, submittedAt: Date): Promise<Inquiry>;
   getInquiries(): Promise<Inquiry[]>;
-  claimCounsellingInquiryRetry(id: number, attemptedAt: Date): Promise<Inquiry | undefined>;
+  claimCounsellingInquiryRetry(
+    id: number,
+    attemptedAt: Date,
+    verifiedByUserId: number,
+  ): Promise<Inquiry | undefined>;
   getCounsellingDeliveryState(id: number): Promise<Pick<Inquiry, "id" | "counsellingDeliveryStatus"> | undefined>;
   finishCounsellingDeliveryAttempt(
     id: number,
@@ -39,13 +43,19 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(inquiries).orderBy(desc(inquiries.id));
   }
 
-  async claimCounsellingInquiryRetry(id: number, attemptedAt: Date): Promise<Inquiry | undefined> {
+  async claimCounsellingInquiryRetry(
+    id: number,
+    attemptedAt: Date,
+    verifiedByUserId: number,
+  ): Promise<Inquiry | undefined> {
     const staleBefore = new Date(attemptedAt.getTime() - 2 * 60 * 1000);
     const [result] = await db.update(inquiries).set({
       counsellingDeliveryStatus: "retrying",
       counsellingDeliveryAttempts: sql`${inquiries.counsellingDeliveryAttempts} + 1`,
       counsellingDeliveryLastAttemptAt: attemptedAt,
       counsellingDeliveryLastResult: "Retry in progress",
+      counsellingDeliveryLastVerifiedAt: attemptedAt,
+      counsellingDeliveryLastVerifiedBy: verifiedByUserId,
     }).where(and(
       eq(inquiries.id, id),
       isNotNull(inquiries.counsellingAnswers),

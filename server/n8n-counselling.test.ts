@@ -53,6 +53,8 @@ const inquiry = {
   counsellingDeliveryAttempts: 0,
   counsellingDeliveryLastAttemptAt: null,
   counsellingDeliveryLastResult: null,
+  counsellingDeliveryLastVerifiedAt: null,
+  counsellingDeliveryLastVerifiedBy: null,
 } satisfies Inquiry & { counsellingAnswers: CounsellingAnswers };
 
 const originalUrl = process.env.N8N_COUNSELLING_WEBHOOK_URL;

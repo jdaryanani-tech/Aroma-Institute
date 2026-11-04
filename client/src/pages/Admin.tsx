@@ -1,9 +1,20 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type Inquiry } from "@shared/schema";
 import { LogOut, Download, Users, Mail, Phone, BookOpen, MessageSquare } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
 import { apiRequest } from "@/lib/queryClient";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { counsellingQuestions } from "./counsellingQuestions";
 
 const counsellingFieldLabels: Record<string, string> = {
@@ -129,6 +140,8 @@ export default function Admin() {
   const logout = useLmsLogout();
   const queryClient = useQueryClient();
   const [, setLocation] = useLocation();
+  const [retryTargetId, setRetryTargetId] = useState<number | null>(null);
+  const [verifiedNotDelivered, setVerifiedNotDelivered] = useState(false);
   const isAdmin = Boolean(session.data?.roles.includes("admin"));
   const { data, isLoading, isError } = useQuery<Inquiry[]>({
     queryKey: ["/api/admin/inquiries"],
@@ -137,10 +150,11 @@ export default function Admin() {
     retry: false,
   });
   const retryDelivery = useMutation({
-    mutationFn: async (inquiryId: number) => {
+    mutationFn: async ({ inquiryId }: { inquiryId: number }) => {
       const response = await apiRequest(
         "POST",
         `/api/admin/inquiries/${inquiryId}/retry-counselling-delivery`,
+        { verifiedNotDelivered: true },
       );
       return response.json();
     },
@@ -151,6 +165,13 @@ export default function Admin() {
 
   const handleLogout = () => {
     logout.mutate(undefined, { onSuccess: () => setLocation("/learn") });
+  };
+
+  const handleRetryDialogChange = (open: boolean) => {
+    if (!open) {
+      setRetryTargetId(null);
+      setVerifiedNotDelivered(false);
+    }
   };
 
   if (session.isLoading) {
@@ -357,26 +378,34 @@ export default function Admin() {
                                 Result: {lead.counsellingDeliveryLastResult}
                               </p>
                             )}
+                            {formatDeliveryTimestamp(lead.counsellingDeliveryLastVerifiedAt) && (
+                              <p className="text-xs text-white/45">
+                                Admin verification: {formatDeliveryTimestamp(lead.counsellingDeliveryLastVerifiedAt)}
+                              </p>
+                            )}
                             {(lead.counsellingDeliveryStatus === "untracked"
                               || lead.counsellingDeliveryStatus === "not_applicable") && (
                               <p className="text-xs text-white/40">
-                                Earlier delivery outcome is unknown; retry is disabled to avoid duplicates.
+                                Delivery outcome was not recorded. Do not resend; ask the lead to submit the form again.
                               </p>
                             )}
                             {lead.counsellingDeliveryStatus === "failed" && (
                               <button
                                 type="button"
                                 className="mt-1 rounded-md border border-amber-400/40 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-400/10 disabled:cursor-not-allowed disabled:opacity-50"
-                                disabled={retryDelivery.isPending && retryDelivery.variables === lead.id}
-                                onClick={() => retryDelivery.mutate(lead.id)}
+                                disabled={retryDelivery.isPending && retryDelivery.variables?.inquiryId === lead.id}
+                                onClick={() => {
+                                  setRetryTargetId(lead.id);
+                                  setVerifiedNotDelivered(false);
+                                }}
                                 data-testid={`admin-retry-counselling-${lead.id}`}
                               >
-                                {retryDelivery.isPending && retryDelivery.variables === lead.id
+                                {retryDelivery.isPending && retryDelivery.variables?.inquiryId === lead.id
                                   ? "Retrying…"
-                                  : "Retry delivery"}
+                                  : "Review & retry"}
                               </button>
                             )}
-                            {retryDelivery.isError && retryDelivery.variables === lead.id && (
+                            {retryDelivery.isError && retryDelivery.variables?.inquiryId === lead.id && (
                               <p className="text-xs text-red-300" role="alert">
                                 {retryDelivery.error instanceof Error
                                   ? retryDelivery.error.message
@@ -396,6 +425,45 @@ export default function Admin() {
           </div>
         ) : null}
       </div>
+      <AlertDialog
+        open={retryTargetId !== null}
+        onOpenChange={handleRetryDialogChange}
+      >
+        <AlertDialogContent className="border-[#624725]/60 bg-[#19110b] text-[#fff3df]">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Verify before resending</AlertDialogTitle>
+            <AlertDialogDescription className="text-[#d2c2ad]">
+              This sends the saved inquiry again using its existing submission ID. It will not create another inquiry. Check AVNI/Supabase first; only continue if this submission is not already there.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <label className="flex items-start gap-3 text-sm leading-6 text-[#e7d8c5]">
+            <input
+              type="checkbox"
+              className="mt-1 size-4 shrink-0 accent-amber-400"
+              checked={verifiedNotDelivered}
+              onChange={(event) => setVerifiedNotDelivered(event.target.checked)}
+              data-testid="admin-confirm-not-delivered"
+            />
+            I verified this is the correct lead and confirmed it has not already been received by AVNI/Supabase.
+          </label>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={retryDelivery.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!verifiedNotDelivered || retryDelivery.isPending || retryTargetId === null}
+              onClick={() => {
+                if (verifiedNotDelivered && retryTargetId !== null) {
+                  retryDelivery.mutate({ inquiryId: retryTargetId });
+                }
+              }}
+              data-testid="admin-confirm-retry"
+            >
+              {retryDelivery.isPending ? "Sending…" : "Resend saved inquiry"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

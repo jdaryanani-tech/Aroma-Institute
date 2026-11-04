@@ -182,6 +182,8 @@ export const inquiries = pgTable("inquiries", {
   counsellingDeliveryAttempts: integer("counselling_delivery_attempts").notNull().default(0),
   counsellingDeliveryLastAttemptAt: timestamp("counselling_delivery_last_attempt_at", { withTimezone: true }),
   counsellingDeliveryLastResult: text("counselling_delivery_last_result"),
+  counsellingDeliveryLastVerifiedAt: timestamp("counselling_delivery_last_verified_at", { withTimezone: true }),
+  counsellingDeliveryLastVerifiedBy: integer("counselling_delivery_last_verified_by"),
 });
 
 export const insertInquirySchema = createInsertSchema(inquiries).omit({
@@ -191,6 +193,8 @@ export const insertInquirySchema = createInsertSchema(inquiries).omit({
   counsellingDeliveryAttempts: true,
   counsellingDeliveryLastAttemptAt: true,
   counsellingDeliveryLastResult: true,
+  counsellingDeliveryLastVerifiedAt: true,
+  counsellingDeliveryLastVerifiedBy: true,
 }).extend({
   email: z.string().email("Please enter a valid email address"),
   phone: z.string().min(10, "Please enter a valid phone number"),
