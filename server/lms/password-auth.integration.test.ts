@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomInt } from "node:crypto";
 import { once } from "node:events";
+import { createServer } from "node:http";
 import express from "express";
 import { test } from "node:test";
 import { eq, inArray } from "drizzle-orm";
@@ -46,20 +47,19 @@ test(
     const previousDatabaseUrl = process.env.DATABASE_URL;
     process.env.DATABASE_URL = testDatabaseUrl!;
 
-    const [{ db, pool }, { configureLmsSessions }, { registerLmsRoutes }, { issueLmsPasswordSetupLink }, security] =
+    const [{ db, pool }, { registerRoutes }, { issueLmsPasswordSetupLink }, security] =
       await Promise.all([
         import("../db"),
-        import("./auth"),
-        import("./routes"),
+        import("../routes"),
         import("./password-auth"),
         import("./password-security"),
       ]);
     const app = express();
     app.use(express.json());
-    configureLmsSessions(app);
-    registerLmsRoutes(app);
+    const server = createServer(app);
+    await registerRoutes(server, app);
 
-    const server = app.listen(0, "127.0.0.1");
+    server.listen(0, "127.0.0.1");
     await once(server, "listening");
     const address = server.address();
     assert.ok(address && typeof address !== "string");
@@ -240,6 +240,23 @@ test(
         const sessionResponse = await request("GET", "/api/lms/auth/me", { cookie });
         assert.equal(sessionResponse.status, 200);
         assert.deepEqual((await sessionResponse.json()).roles, [role]);
+        if (role !== "admin") {
+          const deniedListResponse = await request("GET", "/api/admin/inquiries", { cookie });
+          assert.equal(deniedListResponse.status, 403);
+          assert.deepEqual(await deniedListResponse.json(), {
+            message: "You do not have permission to access this resource",
+          });
+
+          const deniedRetryResponse = await request(
+            "POST",
+            "/api/admin/inquiries/1/retry-counselling-delivery",
+            { body: { verifiedNotDelivered: true }, cookie },
+          );
+          assert.equal(deniedRetryResponse.status, 403);
+          assert.deepEqual(await deniedRetryResponse.json(), {
+            message: "You do not have permission to access this resource",
+          });
+        }
         await logout(cookie);
         const afterLogout = await request("GET", "/api/lms/auth/me", { cookie });
         assert.equal(await afterLogout.json(), null);

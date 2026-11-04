@@ -192,11 +192,11 @@ export default function Admin() {
       <div className="min-h-screen bg-[#0e0a07] flex items-center justify-center px-4" data-testid="page-admin-login">
         <div className="w-full max-w-sm text-center">
           <h1 className="text-white font-serif text-2xl font-bold">Leads Dashboard</h1>
-          <p className="text-white/55 text-sm mt-2">
+          <p className="text-white/55 text-sm mt-2" role={session.data && !isAdmin ? "alert" : undefined}>
             {session.isError
               ? "We could not verify your session."
               : session.data
-                ? "Administrator access is required."
+                ? "Access denied. This account does not have Leads Dashboard administrator access."
                 : "Sign in with your Aroma Institute account to continue."}
           </p>
           <a href="/admin/login" className="inline-flex mt-6 h-11 items-center justify-center rounded-lg bg-amber-400 px-5 font-bold text-[#0e0a07]">
