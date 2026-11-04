@@ -8,6 +8,7 @@ import { configureLmsSessions, requireLmsRole, requireLmsUser } from "./lms/auth
 import { registerLmsRoutes } from "./lms/routes";
 import { registerLmsManagementRoutes } from "./lms/management-routes";
 import { registerVslMediaRoutes } from "./vsl-media";
+import { sendCounsellingInquiryToN8n } from "./n8n-counselling";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -34,7 +35,22 @@ export async function registerRoutes(
     try {
       const data = insertCounsellingInquirySchema.parse(req.body);
       const inquiry = await storage.createInquiry(data);
-      res.status(201).json(inquiry);
+      const delivery = await sendCounsellingInquiryToN8n({
+        ...inquiry,
+        counsellingAnswers: data.counsellingAnswers,
+      });
+      if (delivery.status !== "sent") {
+        console.error("[counselling] n8n delivery did not complete", {
+          inquiryId: inquiry.id,
+          status: delivery.status,
+          ...(delivery.status === "failed" ? { reason: delivery.reason, httpStatus: delivery.httpStatus } : {}),
+        });
+      }
+      res.status(201).json({
+        id: inquiry.id,
+        bookingStatus: "pending_availability_check",
+        n8nDelivery: delivery.status,
+      });
     } catch (error) {
       if (error instanceof ZodError) {
         const validationError = fromZodError(error);
