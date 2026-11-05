@@ -11,6 +11,7 @@ import { registerVslMediaRoutes } from "./vsl-media";
 import { registerAdmissionsRoutes, captureLimit, sameOriginCapture } from "./admissions/routes";
 import { registerFollowUpStatusRoute } from "./admissions/follow-up-routes";
 import { registerCrmRoutes } from "./crm/routes";
+import { registerFirstOwnerRoutes } from "./lms/first-owner";
 import {
   sendCounsellingInquiryToN8n,
   summarizeCounsellingDeliveryResult,
@@ -21,6 +22,7 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   configureLmsSessions(app);
+  registerFirstOwnerRoutes(app);
   registerAdmissionsRoutes(app);
   registerFollowUpStatusRoute(app);
   registerCrmRoutes(app);

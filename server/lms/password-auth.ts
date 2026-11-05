@@ -97,10 +97,14 @@ async function loadRoles(userId: number) {
   return assignments.map(({ role }) => role);
 }
 
-export async function issueLmsPasswordSetupLink(userId: number) {
+type PasswordSetupTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// Call only inside the caller's transaction. Bootstrap must not touch other users' tokens.
+export async function issueLmsPasswordSetupLinkInTransaction(
+  tx: PasswordSetupTransaction, userId: number, now = new Date(), cleanExpired = false,
+) {
   const { token, tokenHash } = createPasswordSetupToken();
-  const expiresAt = new Date(Date.now() + SETUP_TOKEN_TTL_MS);
-  await db.transaction(async (tx) => {
+  const expiresAt = new Date(now.getTime() + SETUP_TOKEN_TTL_MS);
     const [user] = await tx
       .select({ id: lmsUsers.id })
       .from(lmsUsers)
@@ -109,12 +113,11 @@ export async function issueLmsPasswordSetupLink(userId: number) {
       .limit(1);
     if (!user) throw new Error("USER_NOT_FOUND");
 
-    await tx
-      .delete(lmsPasswordSetupTokens)
-      .where(lt(lmsPasswordSetupTokens.expiresAt, new Date()));
+    if (cleanExpired) await tx.delete(lmsPasswordSetupTokens)
+      .where(lt(lmsPasswordSetupTokens.expiresAt, now));
     await tx
       .update(lmsPasswordSetupTokens)
-      .set({ consumedAt: new Date() })
+      .set({ consumedAt: now })
       .where(
         and(
           eq(lmsPasswordSetupTokens.userId, userId),
@@ -125,12 +128,16 @@ export async function issueLmsPasswordSetupLink(userId: number) {
       userId,
       tokenHash,
       expiresAt,
+      createdAt: now,
     });
-  });
   return {
     setupPath: `/learn/setup#token=${token}`,
     expiresAt,
   };
+}
+
+export async function issueLmsPasswordSetupLink(userId: number) {
+  return db.transaction(tx => issueLmsPasswordSetupLinkInTransaction(tx, userId, new Date(), true));
 }
 
 export function registerLmsPasswordAuthRoutes(app: Express) {

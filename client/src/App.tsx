@@ -10,6 +10,7 @@ import CounsellingForm from "@/pages/CounsellingForm";
 import Admin from "@/pages/Admin";
 import AdminLogin from "@/pages/AdminLogin";
 import AdminInstallHelp from "@/crm/AdminInstallHelp";
+import FirstOwner from "@/pages/FirstOwner";
 import "@/crm/admin.css";
 import NotFound from "@/pages/not-found";
 import {
@@ -30,6 +31,7 @@ function Router() {
       <Route path="/vsl" component={VSL} />
       <Route path="/vsl-video" component={VSLVideo} />
       <Route path="/counselling" component={CounsellingForm} />
+      <Route path="/admin/first-owner" component={FirstOwner} />
       <Route path="/admin/login" component={AdminLogin} />
       <Route path="/admin" component={Admin} />
       <Route path="/learn" component={LearnLoginPage} />
