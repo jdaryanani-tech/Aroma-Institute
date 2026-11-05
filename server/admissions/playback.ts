@@ -53,6 +53,7 @@ export function observePlayback(state: PlaybackState, sample: PlaybackSample, no
     ) events.push(String(milestone));
   }
   const covered = ranges.reduce((sum, [a, b]) => sum + b - a, 0);
+  const observedPercent = Math.max(0, Math.min(100, Math.floor(covered / duration * 100)));
   if (
     sample.type === "ended" && sample.position >= duration - 0.25 && covered >= duration * 0.95 &&
     ranges.some(([a, b]) => a < duration - 0.25 && b >= duration - 0.25)
@@ -65,6 +66,7 @@ export function observePlayback(state: PlaybackState, sample: PlaybackSample, no
       lastPosition: sample.type === "pause" ? null : sample.position,
     },
     events,
+    observedPercent,
     duplicate: false,
   };
 }

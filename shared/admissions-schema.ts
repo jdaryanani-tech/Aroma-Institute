@@ -13,8 +13,15 @@ export const admissionsLeads = pgTable("admissions_leads", {
   entryHost: text("entry_host"),
   questionnaireStatus: text("questionnaire_status").notNull().default("not_submitted"),
   questionnaireCompletedAt: timestamp("questionnaire_completed_at", { withTimezone: true }),
+  videoObservedPercent: integer("video_observed_percent").notNull().default(0),
+  videoLastMilestone: text("video_last_milestone"),
+  videoLastEventAt: timestamp("video_last_event_at", { withTimezone: true }),
+  videoCompletedAt: timestamp("video_completed_at", { withTimezone: true }),
   legacyMatchStatus: text("legacy_match_status").notNull().default("none"),
-}, (t) => [check("admissions_leads_indian_phone", sql`${t.canonicalPhone} ~ '^91[6-9][0-9]{9}$'`)]);
+}, (t) => [
+  check("admissions_leads_indian_phone", sql`${t.canonicalPhone} ~ '^91[6-9][0-9]{9}$'`),
+  check("admissions_leads_video_observed_percent", sql`${t.videoObservedPercent} BETWEEN 0 AND 100`),
+]);
 
 export const admissionsPlaybacks = pgTable("admissions_vsl_playbacks", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -93,6 +100,10 @@ export type LeadJourneySummaryData = {
   entryHost: string | null;
   questionnaireStatus: string;
   questionnaireCompletedAt: string | null;
+  videoObservedPercent: number;
+  videoLastMilestone: string | null;
+  videoLastEventAt: string | null;
+  videoCompletedAt: string | null;
   legacyMatchStatus: string;
   linkedInquiryIds: number[];
   events: { event: string; occurredAt: string; positionSeconds: number | null; durationSeconds: number | null }[];

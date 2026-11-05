@@ -80,3 +80,42 @@ export async function saveLinkedCounsellingInquiry(data: InsertCounsellingInquir
     return inquiry;
   });
 }
+
+export async function saveExternalCounsellingInquiry(input: {
+  leadId: string;
+  idempotencyKey: string;
+  payloadHash: string;
+  data: InsertCounsellingInquiry;
+}, now = new Date(), database: AdmissionsDatabase = db) {
+  return database.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`avni-counselling:${input.idempotencyKey}`}))`);
+    const [existing] = await tx.select().from(inquiries)
+      .where(eq(inquiries.submissionIdempotencyKey, input.idempotencyKey)).limit(1);
+    if (existing) {
+      if (existing.leadId !== input.leadId || existing.submissionPayloadHash !== input.payloadHash) {
+        throw new Error("idempotency_conflict");
+      }
+      return { inquiry: existing, duplicate: true };
+    }
+
+    const [lead] = await tx.select().from(admissionsLeads).where(eq(admissionsLeads.id, input.leadId)).limit(1);
+    if (!lead) throw new Error("lead_not_found");
+    if (normalizeIndianMobile(input.data.phone) !== lead.canonicalPhone) throw new Error("phone_mismatch");
+
+    const [inquiry] = await tx.insert(inquiries).values({
+      ...input.data,
+      leadId: lead.id,
+      counsellingSubmittedAt: now,
+      counsellingDeliveryStatus: "not_applicable",
+      counsellingDeliveryAttempts: 0,
+      submissionSource: "avni",
+      submissionIdempotencyKey: input.idempotencyKey,
+      submissionPayloadHash: input.payloadHash,
+    }).returning();
+    await tx.update(admissionsLeads).set({
+      questionnaireStatus: "completed",
+      questionnaireCompletedAt: now,
+    }).where(eq(admissionsLeads.id, lead.id));
+    return { inquiry, duplicate: false };
+  });
+}

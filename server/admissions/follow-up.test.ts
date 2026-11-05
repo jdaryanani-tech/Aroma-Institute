@@ -8,13 +8,13 @@ import express from "express";
 import session from "express-session";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq } from "drizzle-orm";
+import { eq, ne } from "drizzle-orm";
 import * as core from "@shared/schema";
 import * as lms from "@shared/lms-schema";
-import { admissionsLeads, admissionsLeadContactPreferences as preferences, admissionsRegistrationOutbox as outbox } from "@shared/admissions-schema";
+import { admissionsLeads, admissionsLeadContactPreferences as preferences, admissionsRegistrationOutbox as outbox, admissionsVideoEvents } from "@shared/admissions-schema";
 import { VSL_WHATSAPP_CONSENT_TEXT, VSL_WHATSAPP_CONSENT_VERSION } from "@shared/vsl-consent";
 import { registerVslLead, saveLinkedCounsellingInquiry } from "./identity";
-import { followUpSchemaReady, readLeadFollowUpStatus, recordWhatsAppOptOut } from "./follow-up";
+import { admissionsIntegrationSchemaReady, followUpSchemaReady, readLeadFollowUpByPhone, readLeadFollowUpStatus, recordWhatsAppOptOut } from "./follow-up";
 import { registerAdmissionsRoutes } from "./routes";
 import { registerFollowUpStatusRoute } from "./follow-up-routes";
 import { dispatchVslRegistrationOnce, isTrustedVslWebhookUrl, vslRetryDelayMs } from "./outbox-dispatcher";
@@ -58,6 +58,9 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     const migration=await readFile("migrations/0008_admissions_follow_up.sql","utf8");
     await pool.query(migration);await pool.query(migration);
     assert.equal(await followUpSchemaReady(database),true);
+    const avniMigration=await readFile("migrations/0009_avni_tracking.sql","utf8");
+    await pool.query(avniMigration);await pool.query(avniMigration);
+    assert.equal(await admissionsIntegrationSchemaReady(database),true);
     assert.equal((await database.select().from(outbox)).length,0,"no replay/backfill of pre-migration registrations");
 
     let time=new Date("2026-11-05T10:00:00Z");
@@ -138,8 +141,9 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     const response=await fetch(endpoint,{headers});
     assert.equal(response.status,200);assert.match(response.headers.get("cache-control")!,/no-store/);
     const body=await response.json();
-    assert.deepEqual(Object.keys(body).sort(),["consent","leadId","name","phone","questionnaire","registeredAt"]);
-    assert.equal(JSON.stringify(body).includes("counsellingAnswers"),false);
+    assert.deepEqual(Object.keys(body).sort(),["consent","leadId","name","phone","questionnaire","registeredAt","video"]);
+    assert.equal(body.questionnaire.latestSubmission.answers.fullName,answers.fullName);
+    assert.equal(body.video.observedPercent,0);
     assert.equal(JSON.stringify((await database.select().from(outbox))),before);
     assert.equal((await fetch(`${origin}/api/integrations/n8n/leads/not-a-uuid/status`,{headers})).status,400);
     assert.equal((await fetch(`${origin}/api/integrations/n8n/leads/${randomUUID()}/status`,{headers})).status,404);
@@ -158,10 +162,74 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
       body:JSON.stringify({name:"Synthetic no-consent viewer",phone:"9000000003",entryPath:"/vsl"}),
     });
     assert.equal(post.status,201,"VSL does not require opt-in");
-    await database.update(outbox).set({state:"acknowledged"}).where(eq(outbox.leadId,(await registerVslLead({
+    const registrationLead=(await registerVslLead({
       name:"Synthetic no-consent viewer",phone:"9000000003",entryHost:"test.invalid",entryPath:"/vsl",
-    },time,database)).id));
+    },time,database)).id;
+    await database.update(outbox).set({state:"acknowledged"}).where(eq(outbox.leadId,registrationLead));
+    const sessionCookie=post.headers.get("set-cookie")!.split(";")[0];
+    const sessionPost=(path:string,body:unknown)=>fetch(`${origin}${path}`,{
+      method:"POST",headers:{"Content-Type":"application/json",Origin:origin,Cookie:sessionCookie},
+      body:JSON.stringify(body),
+    });
+    const playbackResponse=await sessionPost("/api/vsl/playbacks",{});
+    assert.equal(playbackResponse.status,201);
+    const {playbackId}=await playbackResponse.json();
+    const play={playbackId,sequence:1,type:"play",position:0,duration:100};
+    assert.equal((await sessionPost("/api/vsl/events",play)).status,200);
+    for(let position=4;position<=100;position+=4) {
+      await database.update(core.admissionsPlaybacks).set({lastObservedAt:new Date(Date.now()-4000)})
+        .where(eq(core.admissionsPlaybacks.id,playbackId));
+      assert.equal((await sessionPost("/api/vsl/events",{...play,sequence:position/4+1,type:"sample",position})).status,200);
+    }
+    assert.equal((await sessionPost("/api/vsl/events",{...play,sequence:27,type:"ended",position:100})).status,200);
+    const persistedMilestones=await database.select().from(admissionsVideoEvents)
+      .where(eq(admissionsVideoEvents.leadId,registrationLead));
+    assert.deepEqual(persistedMilestones.map(e=>e.event).sort(),["25","50","75","90","completed","started"]);
+    const progressOutbox=(await database.select().from(outbox).where(eq(outbox.leadId,registrationLead)))
+      .filter(e=>e.eventType==="vsl.progress");
+    assert.equal(progressOutbox.length,6);
+    const completedPayload=progressOutbox.find(e=>e.payload.milestone==="completed")!.payload;
+    assert.equal(completedPayload.observedPercent,100);
+    assert.ok(typeof completedPayload.completedAt==="string");
 
+    const lookup=await fetch(`${origin}/api/integrations/n8n/leads/lookup`,{
+      method:"POST",headers:{"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key"},
+      body:JSON.stringify({phone:"+91 90000 00001"}),
+    });
+    assert.equal(lookup.status,200);
+    const lookupBody=await lookup.json();
+    assert.equal(lookupBody.leadId,lead.id);
+    assert.equal(lookupBody.questionnaire.latestSubmission.answers.fullName,answers.fullName);
+    assert.equal((await fetch(`${origin}/api/integrations/n8n/leads/lookup`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({phone:"+91 90000 00001"}),
+    })).status,401);
+    assert.equal((await fetch(`${origin}/api/integrations/n8n/leads/lookup`,{
+      method:"POST",headers:{"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key"},
+      body:JSON.stringify({phone:"not-a-phone"}),
+    })).status,400);
+    const assistedAnswers={...answers,fullName:"Synthetic AVNI completion"};
+    const assistedLead=await registerVslLead({name:"Synthetic AVNI completion",phone:"9000000001",entryHost:"test.invalid",entryPath:"/vsl"},time,database);
+    const assistedUrl=`${origin}/api/integrations/n8n/leads/${assistedLead.id}/counselling`;
+    const assistedHeaders={"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key","Idempotency-Key":"avni-test-001"};
+    const assistedBody=JSON.stringify({answers:assistedAnswers});
+    const assisted=await fetch(assistedUrl,{method:"POST",headers:assistedHeaders,body:assistedBody});
+    assert.equal(assisted.status,201);
+    const assistedResult=await assisted.json();
+    assert.equal(assistedResult.saved,true);
+    assert.equal(assistedResult.duplicate,false);
+    const duplicate=await fetch(assistedUrl,{method:"POST",headers:assistedHeaders,body:assistedBody});
+    assert.equal(duplicate.status,200);
+    assert.equal((await duplicate.json()).duplicate,true);
+    assert.equal((await database.select().from(core.inquiries).where(eq(core.inquiries.submissionIdempotencyKey,"avni-test-001"))).length,1);
+    assert.equal((await fetch(assistedUrl,{method:"POST",headers:assistedHeaders,body:JSON.stringify({answers:{...assistedAnswers,topQuestions:"changed"}})})).status,409);
+    const mismatched=await registerVslLead({name:"Mismatch",phone:"9000000008",entryHost:"test.invalid",entryPath:"/vsl"},time,database);
+    assert.equal((await fetch(`${origin}/api/integrations/n8n/leads/${mismatched.id}/counselling`,{
+      method:"POST",headers:{...assistedHeaders,"Idempotency-Key":"avni-test-mismatch"},body:assistedBody,
+    })).status,409);
+
+    // Keep the dispatcher assertion scoped to the registration row under test.
+    await database.update(outbox).set({state:"acknowledged"}).where(ne(outbox.id,event.id));
     let requests=0;
     const configuration={url:"https://n8n.aromacafeinstitute.in/webhook/vsl-registration",secret:"  synthetic-integration-key  "};
     const transport:typeof fetch=async(_url,init)=>{

@@ -191,7 +191,15 @@ export const inquiries = pgTable("inquiries", {
   counsellingDeliveryLastResult: text("counselling_delivery_last_result"),
   counsellingDeliveryLastVerifiedAt: timestamp("counselling_delivery_last_verified_at", { withTimezone: true }),
   counsellingDeliveryLastVerifiedBy: integer("counselling_delivery_last_verified_by"),
-}, (t) => [index("inquiries_lead_id_idx").on(t.leadId)]);
+  submissionSource: text("submission_source").notNull().default("public_form"),
+  submissionIdempotencyKey: text("submission_idempotency_key"),
+  submissionPayloadHash: text("submission_payload_hash"),
+}, (t) => [
+  index("inquiries_lead_id_idx").on(t.leadId),
+  uniqueIndex("inquiries_submission_idempotency_unique")
+    .on(t.submissionIdempotencyKey)
+    .where(sql`${t.submissionIdempotencyKey} IS NOT NULL`),
+]);
 
 export const counsellingDeliveryAttemptRecords = pgTable(
   "counselling_delivery_attempts",

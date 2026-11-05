@@ -5,6 +5,7 @@ import { followUpSchemaReady, readLeadFollowUpStatus, type FollowUpDatabase } fr
 import { VSL_WEBHOOK_HEADER, VSL_WEBHOOK_SECRET_ENV } from "./follow-up-routes";
 
 export const VSL_WEBHOOK_URL_ENV="N8N_VSL_REGISTRATION_WEBHOOK_URL";
+export const VSL_DISPATCH_ENABLED_ENV="N8N_VSL_DISPATCH_ENABLED";
 export const VSL_DISPATCH_DEFAULT_ENABLED=false;
 export const VSL_MAX_ATTEMPTS=8;
 export const VSL_LEASE_MS=60_000;
@@ -20,6 +21,12 @@ export function isTrustedVslWebhookUrl(value:string) {
       && !["/webhook/counselling-submission","/webhook/aroma-whatsapp"].includes(u.pathname);
   } catch {return false;}
 }
+export function isVslDispatchEnabled() {
+  const url=process.env[VSL_WEBHOOK_URL_ENV] ?? "";
+  const secret=process.env[VSL_WEBHOOK_SECRET_ENV] ?? "";
+  return process.env.NODE_ENV==="production" && process.env[VSL_DISPATCH_ENABLED_ENV]==="true"
+    && isTrustedVslWebhookUrl(url) && !!secret.trim();
+}
 
 /** One explicitly invoked batch item, NOT a startup worker or scheduled workflow.
  * The default native transport is blocked outside production. Tests inject fake
@@ -29,7 +36,7 @@ export async function dispatchVslRegistrationOnce(options:{
   enabled?:boolean;database?:FollowUpDatabase;transport?:typeof fetch;now?:()=>Date;
   configuration?:{url:string;secret:string};
 }={}) {
-  if(!(options.enabled ?? VSL_DISPATCH_DEFAULT_ENABLED)) return {state:"disabled" as const};
+  if(!(options.enabled ?? isVslDispatchEnabled())) return {state:"disabled" as const};
   if(process.env.NODE_ENV!=="production" && !options.transport)
     return {state:"disabled" as const,reason:"Development network delivery is disabled."};
   const config=options.configuration ?? {
@@ -91,4 +98,29 @@ export async function dispatchVslRegistrationOnce(options:{
     WHERE id=${row.id}::uuid AND lock_token=${token}::uuid RETURNING id`);
   return {state:result.rows.length ? state : "lease_lost",eventId:row.idempotency_key,
     httpStatus,attemptCount:row.attempt_count,error};
+}
+
+let workerStarted=false;
+let workerInFlight=false;
+export function startVslOutboxWorker() {
+  if(workerStarted || !isVslDispatchEnabled()) return false;
+  workerStarted=true;
+  const timer=setInterval(()=>{
+    if(workerInFlight || !isVslDispatchEnabled()) return;
+    workerInFlight=true;
+    void dispatchVslRegistrationOnce({enabled:true})
+      .catch(()=>undefined)
+      .finally(()=>{workerInFlight=false;});
+  },15_000);
+  timer.unref();
+  return true;
+}
+
+/** Best-effort immediate send after the durable transaction; the worker retries failures. */
+export function kickVslOutbox() {
+  if(!isVslDispatchEnabled() || workerInFlight) return;
+  workerInFlight=true;
+  void dispatchVslRegistrationOnce({enabled:true})
+    .catch(()=>undefined)
+    .finally(()=>{workerInFlight=false;});
 }

@@ -35,6 +35,9 @@ test("isolated PostgreSQL: identity, legacy safety, questionnaire linkage, event
     const migration = await readFile("migrations/0006_admissions_stage_one.sql", "utf8");
     await client.query(migration);
     await client.query(migration); // migration itself is safely repeatable
+    const avniMigration = await readFile("migrations/0009_avni_tracking.sql", "utf8");
+    await client.query(avniMigration);
+    await client.query(avniMigration); // additive AVNI columns/indexes are safely repeatable
     const database = drizzle(client, { schema: { ...siteSchema, ...lmsSchema } });
     const { inquiries, admissionsLeads, admissionsPlaybacks, admissionsVideoEvents } = siteSchema;
     const register = (phone: string) => registerVslLead({

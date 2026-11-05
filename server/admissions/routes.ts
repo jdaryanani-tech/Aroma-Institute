@@ -3,12 +3,13 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db";
-import { admissionsCaptureLimits, admissionsPlaybacks, admissionsVideoEvents } from "@shared/admissions-schema";
+import { admissionsCaptureLimits, admissionsLeads, admissionsPlaybacks, admissionsRegistrationOutbox, admissionsVideoEvents } from "@shared/admissions-schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
 import { registerVslLead, type AdmissionsDatabase } from "./identity";
 import { observePlayback } from "./playback";
 import { getVslDuration } from "../vsl-media";
 import { followUpSchemaReady } from "./follow-up";
+import { kickVslOutbox, startVslOutboxWorker } from "./outbox-dispatcher";
 import { VSL_WHATSAPP_CONSENT_VERSION } from "@shared/vsl-consent";
 
 declare module "express-session" {
@@ -64,6 +65,7 @@ const eventSchema = z.object({
 }).strict();
 
 export function registerAdmissionsRoutes(app: Express, database: AdmissionsDatabase = db, mediaDuration = getVslDuration) {
+  startVslOutboxWorker();
   app.get("/api/vsl/registration-options",async (_req,res)=>{
     res.setHeader("Cache-Control","no-store");
     try {return res.json({whatsappConsentAvailable:await followUpSchemaReady(database),consentVersion:VSL_WHATSAPP_CONSENT_VERSION});}
@@ -79,6 +81,7 @@ export function registerAdmissionsRoutes(app: Express, database: AdmissionsDatab
       req.session.admissionsLeadId = lead.id;
       await new Promise<void>((resolve, reject) => req.session.save(e => e ? reject(e) : resolve()));
       // Identity is carried in an HttpOnly session. No public lead details returned.
+      kickVslOutbox();
       return res.status(201).json({ registered: true });
     } catch { return res.status(503).json({ message: "Unable to save registration. Please try again." }); }
   });
@@ -100,24 +103,54 @@ export function registerAdmissionsRoutes(app: Express, database: AdmissionsDatab
     if (!parsed.success) return res.status(400).json({ message: "Invalid video observation." });
     try {
       const sample = parsed.data;
-      const accepted = await database.transaction(async (tx) => {
+      const result = await database.transaction(async (tx) => {
         const [playback] = await tx.select().from(admissionsPlaybacks).where(and(
           eq(admissionsPlaybacks.id, sample.playbackId), eq(admissionsPlaybacks.leadId, leadId),
           eq(admissionsPlaybacks.sessionHash, hash(req.sessionID)),
         )).for("update");
-        if (!playback) return false;
-        if (Date.now() - playback.createdAt.getTime() > 24 * 60 * 60 * 1000) return false;
+        if (!playback) return { accepted:false, changed:false };
+        if (Date.now() - playback.createdAt.getTime() > 24 * 60 * 60 * 1000) return { accepted:false, changed:false };
         const now = new Date();
         const result = observePlayback(playback, sample, now);
         if (!result.duplicate) {
           await tx.update(admissionsPlaybacks).set(result.state).where(eq(admissionsPlaybacks.id, playback.id));
-          if (result.events.length) await tx.insert(admissionsVideoEvents).values(result.events.map(event => ({
-            leadId, event, occurredAt: now, positionSeconds: sample.position, durationSeconds: playback.duration,
-          }))).onConflictDoNothing();
+          const [lead] = await tx.select().from(admissionsLeads).where(eq(admissionsLeads.id,leadId)).limit(1);
+          if (!lead) return { accepted:false, changed:false };
+          await tx.update(admissionsLeads).set({
+            videoObservedPercent: sql`greatest(${admissionsLeads.videoObservedPercent}, ${result.observedPercent})`,
+            ...(result.events.length ? {
+              videoLastMilestone:result.events.at(-1),
+              videoLastEventAt:now,
+            } : {}),
+            ...(result.events.includes("completed") ? {
+              videoCompletedAt:sql`coalesce(${admissionsLeads.videoCompletedAt}, ${now})`,
+            } : {}),
+          }).where(eq(admissionsLeads.id,leadId));
+          if (result.events.length) {
+            await tx.insert(admissionsVideoEvents).values(result.events.map(event => ({
+              leadId, event, occurredAt: now, positionSeconds: sample.position, durationSeconds: playback.duration,
+            }))).onConflictDoNothing();
+            if(await followUpSchemaReady(tx)) {
+              await tx.insert(admissionsRegistrationOutbox).values(result.events.map(event=>{
+                const eventId=`vsl-progress:${leadId}:${event}`;
+                return {
+                  leadId,eventType:"vsl.progress",idempotencyKey:eventId,
+                  payload:{
+                    schemaVersion:1,event:"vsl.progress",eventId,leadId,phone:lead.canonicalPhone,
+                    milestone:event,observedPercent:result.observedPercent,
+                    positionSeconds:sample.position,durationSeconds:playback.duration,
+                    occurredAt:now.toISOString(),completedAt:event==="completed" ? now.toISOString() : lead.videoCompletedAt?.toISOString() ?? null,
+                  },
+                };
+              })).onConflictDoNothing();
+            }
+          }
+          return { accepted:true, changed:result.events.length>0 };
         }
-        return true;
+        return { accepted:true, changed:false };
       });
-      if (!accepted) return res.status(403).json({ message: "Video observation is not associated with this registration." });
+      if (!result.accepted) return res.status(403).json({ message: "Video observation is not associated with this registration." });
+      if (result.changed) kickVslOutbox();
       return res.json({ saved: true });
     } catch (error) {
       if (error instanceof Error && ["out_of_order", "invalid_media_duration", "too_many_discontinuities"].includes(error.message)) {

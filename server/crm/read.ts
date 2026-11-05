@@ -130,7 +130,10 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     if(l) {
       journey = {leadId:l.id,registeredAt:iso(l.registered_at),lastRegisteredAt:iso(l.last_registered_at),
         entrySource:l.entry_source,entryPath:l.entry_path,entryHost:l.entry_host,questionnaireStatus:l.questionnaire_status,
-        questionnaireCompletedAt:iso(l.questionnaire_completed_at),legacyMatchStatus:l.legacy_match_status,
+        questionnaireCompletedAt:iso(l.questionnaire_completed_at),
+        videoObservedPercent:l.video_observed_percent ?? 0,videoLastMilestone:l.video_last_milestone ?? null,
+        videoLastEventAt:iso(l.video_last_event_at),videoCompletedAt:iso(l.video_completed_at),
+        legacyMatchStatus:l.legacy_match_status,
         linkedInquiryIds:ids,events:events.map(e=>({event:e.event,occurredAt:iso(e.occurred_at)!,positionSeconds:e.position_seconds,durationSeconds:e.duration_seconds}))};
       if(l.registered_at) timeline.push({id:`registration:${l.id}`,type:"registration",title:"VSL registration saved",
         at:iso(l.registered_at),actorId:null,actorName:null,source:"verified_system",body:l.entry_source,data:{entryPath:l.entry_path}});

@@ -17,6 +17,9 @@ export async function loadJourneySummaries(leadIds: string[]) {
     entrySource: lead.entrySource, entryPath: lead.entryPath, entryHost: lead.entryHost,
     questionnaireStatus: lead.questionnaireStatus,
     questionnaireCompletedAt: lead.questionnaireCompletedAt?.toISOString() ?? null,
+    videoObservedPercent:lead.videoObservedPercent,videoLastMilestone:lead.videoLastMilestone,
+    videoLastEventAt:lead.videoLastEventAt?.toISOString() ?? null,
+    videoCompletedAt:lead.videoCompletedAt?.toISOString() ?? null,
     legacyMatchStatus: lead.legacyMatchStatus,
     linkedInquiryIds: links.filter(link => link.leadId === lead.id).map(link => link.id),
     events: events.filter(event => event.leadId === lead.id)

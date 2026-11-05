@@ -64,6 +64,13 @@
       "when": 1793864177848,
       "tag": "0008_admissions_follow_up",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793909093043,
+      "tag": "0009_avni_tracking",
+      "breakpoints": true
     }
   ]
 }

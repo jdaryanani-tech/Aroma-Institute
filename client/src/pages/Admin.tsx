@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, Clock3, Coffee, LogOut, Mail, MessageCircleOff, Phone, Search, ShieldCheck, SlidersHorizontal, Users, VideoOff, X } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
@@ -9,6 +9,11 @@ import { CrmHttpError, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } fr
 import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, formatDate, toLocalInput } from "@/crm/format";
 
 type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; owner: string; sort: string; page: number; pageSize: number };
+type AvniHealth = {
+  schema: Record<string,boolean> & {ready:boolean};
+  webhook: {urlPresent:boolean;urlValid:boolean;secretPresent:boolean;dispatchRequested:boolean;dispatcherActive:boolean};
+  outbox: Record<string,number> | null;
+};
 const defaultFilters: Filters = { q: "", stage: "", program: "", source: "", dateFrom: "", dateTo: "", followUp: "", owner: "", sort: "recent", page: 1, pageSize: 12 };
 const stages = Object.keys(CRM_STAGES) as CrmStage[];
 const stageHelp = "Rates describe funnel records; they do not establish that one step caused another.";
@@ -51,6 +56,17 @@ export default function Admin() {
   const [retryError, setRetryError] = useState("");
   const leadsQuery = useCrmLeads(filters, isAdmin && !accessCheckBlocked);
   const detailQuery = useCrmDetail(selectedId, isAdmin && !accessCheckBlocked);
+  const avniHealthQuery=useQuery<AvniHealth>({
+    queryKey:["admin-crm","avni-health"],
+    enabled:isAdmin&&!accessCheckBlocked,
+    retry:false,
+    staleTime:15_000,
+    queryFn:async()=>{
+      const response=await fetch("/api/admin/crm/avni-health",{credentials:"same-origin",cache:"no-store"});
+      if(!response.ok) throw new Error("Integration readiness could not be loaded.");
+      return response.json();
+    },
+  });
   const update = useCrmUpdate();
   const retry = useCrmRetry();
   const leads = leadsQuery.data?.items ?? [];
@@ -170,6 +186,19 @@ export default function Admin() {
       <div className="crm-wrap crm-main">
         <section className="crm-heading-row"><div><p className="crm-eyebrow">Admissions workspace</p><h1 className="crm-heading">People, not just enquiries.</h1><p className="crm-subheading">Keep the next conversation clear, grounded, and easy to pick up. Counts cover all records, independent of filters.</p></div><span className="crm-connection-tag"><CalendarClock size={13} /> Calendar not connected</span></section>
         {logout.isError && <div className="crm-error" role="alert">Sign out did not complete. Your administrator session may still be active; try again before leaving this device.</div>}
+        <section className="crm-counts" aria-labelledby="avni-health-title" data-testid="avni-integration-health">
+          <div className="crm-count" style={{gridColumn:"1 / -1"}}>
+            <span className="crm-count-label">AVNI integration</span>
+            <strong id="avni-health-title" className="crm-count-value" style={{fontSize:"1.25rem"}}>
+              {avniHealthQuery.isLoading?"Checking readiness":avniHealthQuery.isError?"Status unavailable":avniHealthQuery.data?.schema.ready&&avniHealthQuery.data?.webhook.dispatcherActive?"Ready to dispatch":"Needs setup"}
+            </strong>
+            {avniHealthQuery.data&&<span className="crm-count-note">
+              Schema {avniHealthQuery.data.schema.ready?"ready":"needs migration"} · n8n URL {avniHealthQuery.data.webhook.urlValid?"valid":"missing or invalid"} · shared secret {avniHealthQuery.data.webhook.secretPresent?"present":"missing"} · dispatcher {avniHealthQuery.data.webhook.dispatcherActive?"enabled":"disabled"}
+              {avniHealthQuery.data.outbox&&` · Queue: ${avniHealthQuery.data.outbox.pending??0} pending, ${avniHealthQuery.data.outbox.failed??0} failed, ${avniHealthQuery.data.outbox.acknowledged??0} acknowledged`}
+            </span>}
+            {avniHealthQuery.isError&&<span className="crm-count-note">Refresh the dashboard or check the production integration settings. No secret values are displayed here.</span>}
+          </div>
+        </section>
         {leadsQuery.isError && <div className="crm-error" role="alert"><strong>Admissions records did not load.</strong> {errorText(leadsQuery.error, "Check your connection and administrator access.")}<button className="crm-text-button" type="button" onClick={() => void leadsQuery.refetch()}>Try again</button></div>}
         {overview && <section className="crm-counts" aria-label="Global admissions overview">
           <div className="crm-count"><span className="crm-count-label">Identified people</span><strong className="crm-count-value">{overview.identifiedPeople.toLocaleString()}</strong><span className="crm-count-note">{overview.unresolvedRecords.toLocaleString()} ambiguous or unmatchable records excluded</span></div>

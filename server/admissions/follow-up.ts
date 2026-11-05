@@ -2,8 +2,9 @@ import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { db } from "../db";
 import { inquiries } from "@shared/schema";
 import { admissionsLeads, admissionsLeadContactPreferences as preferences,
-  admissionsRegistrationOutbox as outbox } from "@shared/admissions-schema";
+  admissionsRegistrationOutbox as outbox, admissionsVideoEvents } from "@shared/admissions-schema";
 import { VSL_WHATSAPP_CONSENT_TEXT, VSL_WHATSAPP_CONSENT_VERSION } from "@shared/vsl-consent";
+import { normalizeIndianMobile } from "@shared/indian-mobile";
 
 export type FollowUpDatabase = Pick<typeof db,"execute"|"select"|"insert"|"update"|"transaction">;
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -13,6 +14,19 @@ export async function followUpSchemaReady(database: Pick<FollowUpDatabase,"execu
     to_regclass('admissions_lead_contact_preferences') IS NOT NULL AND
     to_regclass('admissions_registration_outbox') IS NOT NULL AS ready`);
   return result.rows[0]?.ready === true;
+}
+export async function admissionsIntegrationSchemaReady(database: Pick<FollowUpDatabase,"execute"> = db) {
+  const result=await database.execute<{ready:boolean}>(sql`SELECT
+    to_regclass('admissions_leads') IS NOT NULL AND
+    to_regclass('admissions_vsl_playbacks') IS NOT NULL AND
+    to_regclass('admissions_vsl_events') IS NOT NULL AND
+    to_regclass('admissions_lead_contact_preferences') IS NOT NULL AND
+    to_regclass('admissions_registration_outbox') IS NOT NULL AND
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+      AND table_name='admissions_leads' AND column_name='video_observed_percent') AND
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+      AND table_name='inquiries' AND column_name='submission_idempotency_key') AS ready`);
+  return result.rows[0]?.ready===true;
 }
 
 export function consentView(row?: typeof preferences.$inferSelect) {
@@ -76,18 +90,44 @@ export async function recordWhatsAppOptOut(leadId:string,source:"admin"|"n8n"|"p
 export async function readLeadFollowUpStatus(leadId:string,database:FollowUpDatabase=db) {
   const [lead]=await database.select().from(admissionsLeads).where(eq(admissionsLeads.id,leadId));
   if(!lead) return null;
-  const [receipt]=await database.select().from(preferences).where(eq(preferences.leadId,leadId));
+  return buildLeadStatus(lead,database);
+}
+
+export async function readLeadFollowUpByPhone(phone:string,database:FollowUpDatabase=db) {
+  const canonicalPhone=normalizeIndianMobile(phone);
+  if(!canonicalPhone) return null;
+  const [lead]=await database.select().from(admissionsLeads).where(eq(admissionsLeads.canonicalPhone,canonicalPhone));
+  if(!lead) return null;
+  return buildLeadStatus(lead,database);
+}
+
+async function buildLeadStatus(lead:Lead,database:FollowUpDatabase) {
+  const [receipt]=await database.select().from(preferences).where(eq(preferences.leadId,lead.id));
   const [form]=await database.select({
     id:inquiries.id,at:inquiries.counsellingSubmittedAt,
     consent:sql<unknown>`${inquiries.counsellingAnswers}->'consentToContact'`,
-  }).from(inquiries).where(and(eq(inquiries.leadId,leadId),isNotNull(inquiries.counsellingAnswers)))
+    answers:inquiries.counsellingAnswers,
+  }).from(inquiries).where(and(eq(inquiries.leadId,lead.id),isNotNull(inquiries.counsellingAnswers)))
     .orderBy(sql`${inquiries.counsellingSubmittedAt} DESC NULLS LAST`,desc(inquiries.id)).limit(1);
+  const events=await database.select().from(admissionsVideoEvents)
+    .where(eq(admissionsVideoEvents.leadId,lead.id)).orderBy(admissionsVideoEvents.occurredAt);
   const consent=consentView(receipt);
   const question29=form?.consent===true ? true : form?.consent===false ? false : null;
   return {
     leadId:lead.id,phone:lead.canonicalPhone,name:lead.name,
     registeredAt:lead.registeredAt?.toISOString() ?? null,
-    questionnaire:{status:lead.questionnaireStatus,completedAt:lead.questionnaireCompletedAt?.toISOString() ?? null},
+    video:{
+      observedPercent:lead.videoObservedPercent,
+      lastMilestone:lead.videoLastMilestone,
+      lastEventAt:lead.videoLastEventAt?.toISOString() ?? null,
+      completedAt:lead.videoCompletedAt?.toISOString() ?? null,
+      milestones:events.map(e=>({event:e.event,occurredAt:e.occurredAt.toISOString(),
+        positionSeconds:e.positionSeconds,durationSeconds:e.durationSeconds})),
+    },
+    questionnaire:{
+      status:lead.questionnaireStatus,completedAt:lead.questionnaireCompletedAt?.toISOString() ?? null,
+      latestSubmission:form ? {submissionId:form.id,submittedAt:form.at?.toISOString() ?? null,answers:form.answers} : null,
+    },
     consent:{
       whatsappAdmissions:consent,
       counsellingQuestion29:{
