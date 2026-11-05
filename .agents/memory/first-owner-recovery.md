@@ -13,4 +13,7 @@ including when a setup link is lost or an admin role is later removed.
 
 **How to apply:** Do not delete audit evidence, relax the zero-admin guard or rerun
 bootstrap to resolve later access problems. Explain the recovery blocker and seek
-approval for a separately verified, audited recovery action.
+approval for a separately verified, audited recovery action. The owner confirmed
+that republishing after adding the production bootstrap secret enabled setup and
+sign-in; verify the published app has received secret changes before troubleshooting
+the first-owner page as a code failure.
