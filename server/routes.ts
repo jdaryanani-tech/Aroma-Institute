@@ -12,6 +12,7 @@ import { registerAdmissionsRoutes, captureLimit, sameOriginCapture } from "./adm
 import { registerFollowUpStatusRoute } from "./admissions/follow-up-routes";
 import { registerCrmRoutes } from "./crm/routes";
 import { registerFirstOwnerRoutes } from "./lms/first-owner";
+import { registerCalendarRoutes } from "./calendar/routes";
 import {
   sendCounsellingInquiryToN8n,
   summarizeCounsellingDeliveryResult,
@@ -26,6 +27,7 @@ export async function registerRoutes(
   registerAdmissionsRoutes(app);
   registerFollowUpStatusRoute(app);
   registerCrmRoutes(app);
+  registerCalendarRoutes(app);
 
   app.post("/api/inquiries", async (req, res) => {
     try {

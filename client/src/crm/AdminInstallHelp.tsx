@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Download, X } from "lucide-react";
+import { useLmsSession } from "@/hooks/use-lms";
 
 type PromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 const DISMISS_KEY = "aroma-admin-install-dismissed";
@@ -9,12 +10,17 @@ const isApple = () => /iphone|ipad|ipod/i.test(navigator.userAgent) ||
   (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
 export default function AdminInstallHelp() {
+  const { data: session } = useLmsSession();
   const [visible, setVisible] = useState(false);
   const [instructions, setInstructions] = useState(false);
   const [prompt, setPrompt] = useState<PromptEvent | null>(null);
   const apple = isApple();
+  const canUseAdminPwa = Boolean(session?.roles.some(role =>
+    ["admin", "admissions", "academic_coordinator", "operations"].includes(role),
+  ));
 
   useEffect(() => {
+    if (!canUseAdminPwa) return;
     const manifest = document.createElement("link");
     manifest.rel = "manifest";
     manifest.href = "/admin.webmanifest";
@@ -68,7 +74,9 @@ export default function AdminInstallHelp() {
         else { meta.content = old; delete meta.dataset.adminPwa; }
       });
     };
-  }, []);
+  }, [canUseAdminPwa]);
+
+  if (!canUseAdminPwa) return null;
 
   if (!visible || isStandalone()) return null;
   const install = async () => {

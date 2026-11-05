@@ -1171,7 +1171,7 @@ export function registerLmsManagementRoutes(app: Express) {
         .object({
           phoneE164: z.string().trim().min(1).max(32),
           displayName: z.string().trim().min(2).max(180),
-          role: z.enum(["student", "trainer"]),
+          role: z.enum(["student", "trainer", "admissions", "academic_coordinator", "operations"]),
         })
         .safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ message: "Enter a valid phone, name, and role." });

@@ -5,7 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { lmsUserRoles, lmsUsers } from "@shared/lms-schema";
 import { db, pool } from "../db";
 
-export type LmsRole = "student" | "trainer" | "admin";
+export type LmsRole = "student" | "trainer" | "admin" | "admissions" | "academic_coordinator" | "operations";
 
 declare module "express-session" {
   interface SessionData {

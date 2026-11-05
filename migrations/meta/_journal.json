@@ -71,6 +71,20 @@
       "when": 1793909093043,
       "tag": "0009_avni_tracking",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793911719707,
+      "tag": "0010_0010_aichm_calendar_push",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793913073285,
+      "tag": "0011_0011_calendar_reminder_event_version",
+      "breakpoints": true
     }
   ]
 }

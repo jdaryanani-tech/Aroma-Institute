@@ -19,7 +19,7 @@ const lmsResourceBytes = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => "bytea",
 });
 
-export const lmsRoleEnum = pgEnum("lms_role", ["student", "trainer", "admin"]);
+export const lmsRoleEnum = pgEnum("lms_role", ["student", "trainer", "admin", "admissions", "academic_coordinator", "operations"]);
 export const contentStatusEnum = pgEnum("lms_content_status", ["draft", "published", "archived"]);
 export const enrollmentStatusEnum = pgEnum("lms_enrollment_status", ["active", "completed", "suspended", "withdrawn"]);
 export const invitationStatusEnum = pgEnum("lms_invitation_status", ["active", "revoked"]);
@@ -412,6 +412,10 @@ export const lmsNotifications = pgTable(
     title: text("title").notNull(),
     body: text("body").notNull(),
     category: text("category").notNull(),
+    priority: text("priority").notNull().default("normal"),
+    link: text("link"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    idempotencyKey: text("idempotency_key").unique(),
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

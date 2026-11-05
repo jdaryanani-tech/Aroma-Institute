@@ -10,3 +10,4 @@
 - [Admissions consent scope](admissions-consent-scope.md) — VSL follow-up consent and question 29 are independent; explicit opt-outs override both.
 - [Isolated authentication testing](isolated-auth-testing.md) — A missing separate test database need not block real auth checks; try a disposable local PostgreSQL cluster.
 - [First-owner recovery boundary](first-owner-recovery.md) — First-owner creation is not an existing-account reset; never reopen it by deleting audit evidence.
+- [AVNI questionnaire session state](avni-questionnaire-session-state.md) — Keep unfinished WhatsApp answers in n8n state; persist only complete validated submissions in the existing inquiry flow.

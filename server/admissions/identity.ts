@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "../db";
 import { admissionsLeads, inquiries, type InsertCounsellingInquiry } from "@shared/schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
@@ -6,6 +6,16 @@ import { recordRegistrationFollowUp } from "./follow-up";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type AdmissionsDatabase = Pick<typeof db, "transaction" | "select" | "insert" | "update" | "execute">;
+
+async function latestCounsellingInquiryForPhone(tx:Transaction,canonicalPhone:string) {
+  const normalized=sql<string>`regexp_replace(${inquiries.phone}, '[^0-9]', '', 'g')`;
+  const [inquiry]=await tx.select().from(inquiries).where(and(
+    isNotNull(inquiries.counsellingAnswers),
+    sql`btrim(${inquiries.phone}) ~ '^\\+?[0-9[:space:]().-]+$'`,
+    sql`${normalized} IN (${canonicalPhone}, ${canonicalPhone.slice(2)}, ${`0${canonicalPhone.slice(2)}`})`,
+  )).orderBy(sql`${inquiries.counsellingSubmittedAt} DESC NULLS LAST`,desc(inquiries.id)).limit(1);
+  return inquiry;
+}
 
 /** Never rewrites historical answers or merges ambiguous historical rows. */
 async function resolveLead(tx: Transaction, phone: string, name: string) {
@@ -95,12 +105,15 @@ export async function saveExternalCounsellingInquiry(input: {
       if (existing.leadId !== input.leadId || existing.submissionPayloadHash !== input.payloadHash) {
         throw new Error("idempotency_conflict");
       }
-      return { inquiry: existing, duplicate: true };
+      return { inquiry: existing, duplicate: true,alreadySubmitted:true };
     }
 
     const [lead] = await tx.select().from(admissionsLeads).where(eq(admissionsLeads.id, input.leadId)).limit(1);
     if (!lead) throw new Error("lead_not_found");
     if (normalizeIndianMobile(input.data.phone) !== lead.canonicalPhone) throw new Error("phone_mismatch");
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`admissions:${lead.canonicalPhone}`}))`);
+    const existingSubmission=await latestCounsellingInquiryForPhone(tx,lead.canonicalPhone);
+    if(existingSubmission) return {inquiry:existingSubmission,duplicate:true,alreadySubmitted:true};
 
     const [inquiry] = await tx.insert(inquiries).values({
       ...input.data,
@@ -108,7 +121,7 @@ export async function saveExternalCounsellingInquiry(input: {
       counsellingSubmittedAt: now,
       counsellingDeliveryStatus: "not_applicable",
       counsellingDeliveryAttempts: 0,
-      submissionSource: "avni",
+      submissionSource: "avni_whatsapp",
       submissionIdempotencyKey: input.idempotencyKey,
       submissionPayloadHash: input.payloadHash,
     }).returning();
@@ -116,6 +129,43 @@ export async function saveExternalCounsellingInquiry(input: {
       questionnaireStatus: "completed",
       questionnaireCompletedAt: now,
     }).where(eq(admissionsLeads.id, lead.id));
-    return { inquiry, duplicate: false };
+    return { inquiry, duplicate: false,alreadySubmitted:false };
+  });
+}
+
+export async function saveExternalCounsellingInquiryByPhone(input:{
+  phone:string;
+  idempotencyKey:string;
+  payloadHash:string;
+  data:InsertCounsellingInquiry;
+},now=new Date(),database:AdmissionsDatabase=db) {
+  return database.transaction(async tx=>{
+    const canonicalPhone=normalizeIndianMobile(input.phone);
+    if(!canonicalPhone||normalizeIndianMobile(input.data.phone)!==canonicalPhone) throw new Error("phone_mismatch");
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`avni-counselling:${input.idempotencyKey}`}))`);
+    const [existing]=await tx.select().from(inquiries)
+      .where(eq(inquiries.submissionIdempotencyKey,input.idempotencyKey)).limit(1);
+    if(existing) {
+      if(existing.submissionPayloadHash!==input.payloadHash) throw new Error("idempotency_conflict");
+      return {inquiry:existing,duplicate:true,alreadySubmitted:true};
+    }
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`admissions:${canonicalPhone}`}))`);
+    const existingSubmission=await latestCounsellingInquiryForPhone(tx,canonicalPhone);
+    if(existingSubmission) return {inquiry:existingSubmission,duplicate:true,alreadySubmitted:true};
+    const lead=await resolveLead(tx,canonicalPhone,input.data.name);
+    const [inquiry]=await tx.insert(inquiries).values({
+      ...input.data,
+      leadId:lead.id,
+      counsellingSubmittedAt:now,
+      counsellingDeliveryStatus:"not_applicable",
+      counsellingDeliveryAttempts:0,
+      submissionSource:"avni_whatsapp",
+      submissionIdempotencyKey:input.idempotencyKey,
+      submissionPayloadHash:input.payloadHash,
+    }).returning();
+    await tx.update(admissionsLeads).set({
+      questionnaireStatus:"completed",questionnaireCompletedAt:now,
+    }).where(eq(admissionsLeads.id,lead.id));
+    return {inquiry,duplicate:false,alreadySubmitted:false};
   });
 }

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 
-export type LmsRole = "student" | "trainer" | "admin";
+export type LmsRole = "student" | "trainer" | "admin" | "admissions" | "academic_coordinator" | "operations";
 
 export interface LmsUser {
   id: number;
@@ -597,8 +597,8 @@ export function useAdminUsers(enabled = true) {
 export function useCreateLmsUser() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { phoneE164: string; displayName: string; role: "student" | "trainer" }) =>
-      requestJson<{ id: number; phoneE164: string; displayName: string; role: "student" | "trainer" }>(
+    mutationFn: (input: { phoneE164: string; displayName: string; role: LmsRole }) =>
+      requestJson<{ id: number; phoneE164: string; displayName: string; role: LmsRole }>(
         "POST",
         "/api/lms/admin/users",
         input,

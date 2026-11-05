@@ -21,7 +21,7 @@ const stageHelp = "Rates describe funnel records; they do not establish that one
 function clearPrivateCache(client: ReturnType<typeof useQueryClient>) {
   client.removeQueries({ predicate: (query) => {
     const key = query.queryKey[0];
-    return key === "admin-crm" || key === "/api/admin/inquiries" || (typeof key === "string" && key.startsWith("/api/admin/inquiries?"));
+    return key === "admin-crm" || key === "aichm-calendar" || key === "/api/admin/inquiries" || (typeof key === "string" && key.startsWith("/api/admin/inquiries?"));
   } });
 }
 function errorText(error: unknown, fallback: string) { return error instanceof Error ? error.message : fallback; }
@@ -179,12 +179,12 @@ export default function Admin() {
     <main className="crm-app" data-testid="page-admin-dashboard">
       <header className="crm-topbar"><div className="crm-wrap crm-topbar-inner">
         <div className="crm-brand"><span className="crm-brand-mark" aria-hidden="true">A.</span><div className="crm-brand-copy"><strong>AICHM Admissions</strong><span>Prospect desk · Aroma Institute</span></div></div>
-        <div className="crm-top-actions"><span className="crm-connection-tag"><MessageCircleOff size={13} /> Chat not connected</span>
+        <div className="crm-top-actions"><a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a><span className="crm-connection-tag"><MessageCircleOff size={13} /> Chat not connected</span>
           <button className="crm-button crm-button-quiet" type="button" onClick={signOut} disabled={logout.isPending} data-testid="admin-button-logout"><LogOut size={16} />{logout.isPending ? "Signing out" : "Sign out"}</button>
         </div>
       </div></header>
       <div className="crm-wrap crm-main">
-        <section className="crm-heading-row"><div><p className="crm-eyebrow">Admissions workspace</p><h1 className="crm-heading">People, not just enquiries.</h1><p className="crm-subheading">Keep the next conversation clear, grounded, and easy to pick up. Counts cover all records, independent of filters.</p></div><span className="crm-connection-tag"><CalendarClock size={13} /> Calendar not connected</span></section>
+        <section className="crm-heading-row"><div><p className="crm-eyebrow">Admissions workspace</p><h1 className="crm-heading">People, not just enquiries.</h1><p className="crm-subheading">Keep the next conversation clear, grounded, and easy to pick up. Counts cover all records, independent of filters.</p></div><a className="crm-connection-tag" href="/admin/calendar"><CalendarClock size={13} /> Open internal calendar</a></section>
         {logout.isError && <div className="crm-error" role="alert">Sign out did not complete. Your administrator session may still be active; try again before leaving this device.</div>}
         <section className="crm-counts" aria-labelledby="avni-health-title" data-testid="avni-integration-health">
           <div className="crm-count" style={{gridColumn:"1 / -1"}}>

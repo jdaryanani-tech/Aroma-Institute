@@ -200,6 +200,24 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     const lookupBody=await lookup.json();
     assert.equal(lookupBody.leadId,lead.id);
     assert.equal(lookupBody.questionnaire.latestSubmission.answers.fullName,answers.fullName);
+    assert.equal(lookupBody.questionnaire.status,"completed");
+    const questionsResponse=await fetch(`${origin}/api/integrations/n8n/counselling/questions`,{
+      headers:{"x-aichm-webhook-secret":"synthetic-integration-key"},
+    });
+    assert.equal(questionsResponse.status,200);
+    const questionsBody=await questionsResponse.json();
+    assert.equal(questionsBody.questionCount,29);
+    assert.deepEqual(questionsBody.questions.map((question:{key:string})=>question.key),Object.keys(core.counsellingAnswersSchema.shape));
+    assert.equal((await fetch(`${origin}/api/integrations/n8n/counselling/questions`)).status,401);
+    const validSingle=await fetch(`${origin}/api/integrations/n8n/counselling/validate-answer`,{
+      method:"POST",headers:{"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key"},
+      body:JSON.stringify({questionKey:"ageRange",value:"21to24"}),
+    });
+    assert.deepEqual(await validSingle.json(),{valid:true,value:"21to24"});
+    assert.equal((await fetch(`${origin}/api/integrations/n8n/counselling/validate-answer`,{
+      method:"POST",headers:{"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key"},
+      body:JSON.stringify({questionKey:"ageRange",value:"not-an-option"}),
+    })).status,400);
     assert.equal((await fetch(`${origin}/api/integrations/n8n/leads/lookup`,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({phone:"+91 90000 00001"}),
@@ -208,8 +226,8 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
       method:"POST",headers:{"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key"},
       body:JSON.stringify({phone:"not-a-phone"}),
     })).status,400);
-    const assistedAnswers={...answers,fullName:"Synthetic AVNI completion"};
-    const assistedLead=await registerVslLead({name:"Synthetic AVNI completion",phone:"9000000001",entryHost:"test.invalid",entryPath:"/vsl"},time,database);
+    const assistedAnswers={...answers,fullName:"Synthetic AVNI completion",mobileWhatsapp:"9000000007"};
+    const assistedLead=await registerVslLead({name:"Synthetic AVNI completion",phone:"9000000007",entryHost:"test.invalid",entryPath:"/vsl"},time,database);
     const assistedUrl=`${origin}/api/integrations/n8n/leads/${assistedLead.id}/counselling`;
     const assistedHeaders={"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key","Idempotency-Key":"avni-test-001"};
     const assistedBody=JSON.stringify({answers:assistedAnswers});
@@ -218,15 +236,52 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     const assistedResult=await assisted.json();
     assert.equal(assistedResult.saved,true);
     assert.equal(assistedResult.duplicate,false);
+    assert.equal(assistedResult.alreadySubmitted,false);
     const duplicate=await fetch(assistedUrl,{method:"POST",headers:assistedHeaders,body:assistedBody});
     assert.equal(duplicate.status,200);
-    assert.equal((await duplicate.json()).duplicate,true);
+    const duplicateResult=await duplicate.json();
+    assert.equal(duplicateResult.duplicate,true);
+    assert.equal(duplicateResult.alreadySubmitted,true);
     assert.equal((await database.select().from(core.inquiries).where(eq(core.inquiries.submissionIdempotencyKey,"avni-test-001"))).length,1);
+    assert.equal((await database.select().from(core.inquiries).where(eq(core.inquiries.submissionIdempotencyKey,"avni-test-001")))[0].submissionSource,"avni_whatsapp");
     assert.equal((await fetch(assistedUrl,{method:"POST",headers:assistedHeaders,body:JSON.stringify({answers:{...assistedAnswers,topQuestions:"changed"}})})).status,409);
     const mismatched=await registerVslLead({name:"Mismatch",phone:"9000000008",entryHost:"test.invalid",entryPath:"/vsl"},time,database);
     assert.equal((await fetch(`${origin}/api/integrations/n8n/leads/${mismatched.id}/counselling`,{
       method:"POST",headers:{...assistedHeaders,"Idempotency-Key":"avni-test-mismatch"},body:assistedBody,
     })).status,409);
+    const phoneAssistedAnswers={...answers,mobileWhatsapp:"9000000009"};
+    const phoneAssistedBody={phone:"+91 90000 00009",answers:phoneAssistedAnswers};
+    const notSubmittedLookup=await fetch(`${origin}/api/integrations/n8n/leads/lookup`,{
+      method:"POST",headers:{"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key"},
+      body:JSON.stringify({phone:"9000000009"}),
+    });
+    assert.equal((await notSubmittedLookup.json()).questionnaire.status,"not_submitted");
+    const phoneAssisted=await fetch(`${origin}/api/integrations/n8n/counselling/submit`,{
+      method:"POST",headers:{...assistedHeaders,"Idempotency-Key":"avni-phone-test-001"},body:JSON.stringify(phoneAssistedBody),
+    });
+    assert.equal(phoneAssisted.status,201);
+    const phoneAssistedResult=await phoneAssisted.json();
+    assert.equal(phoneAssistedResult.saved,true);
+    assert.equal(phoneAssistedResult.alreadySubmitted,false);
+    const phoneAssistedSubmission=(await database.select().from(core.inquiries)
+      .where(eq(core.inquiries.submissionIdempotencyKey,"avni-phone-test-001")))[0];
+    assert.equal(phoneAssistedSubmission.submissionSource,"avni_whatsapp");
+    const phoneLookup=await fetch(`${origin}/api/integrations/n8n/leads/lookup`,{
+      method:"POST",headers:{"Content-Type":"application/json","x-aichm-webhook-secret":"synthetic-integration-key"},
+      body:JSON.stringify({phone:"9000000009"}),
+    });
+    const phoneLookupBody=await phoneLookup.json();
+    assert.equal(phoneLookupBody.questionnaire.status,"completed");
+    assert.deepEqual(phoneLookupBody.questionnaire.latestSubmission.answers,phoneAssistedAnswers);
+    const doNotDuplicate=await fetch(`${origin}/api/integrations/n8n/counselling/submit`,{
+      method:"POST",headers:{...assistedHeaders,"Idempotency-Key":"avni-phone-test-002"},body:JSON.stringify(phoneAssistedBody),
+    });
+    assert.equal(doNotDuplicate.status,200);
+    const doNotDuplicateResult=await doNotDuplicate.json();
+    assert.equal(doNotDuplicateResult.alreadySubmitted,true);
+    assert.equal(doNotDuplicateResult.submissionId,phoneAssistedSubmission.id);
+    assert.equal((await database.select().from(core.inquiries)
+      .where(eq(core.inquiries.phone,"9000000009"))).length,1);
 
     // Keep the dispatcher assertion scoped to the registration row under test.
     await database.update(outbox).set({state:"acknowledged"}).where(ne(outbox.id,event.id));

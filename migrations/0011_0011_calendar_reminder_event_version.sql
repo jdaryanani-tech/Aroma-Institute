@@ -1,0 +1,1 @@
+ALTER TABLE "calendar_reminder_jobs" ADD COLUMN IF NOT EXISTS "event_version" integer;

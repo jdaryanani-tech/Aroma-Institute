@@ -1,5 +1,6 @@
 import "./lms.css";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useParams } from "wouter";
 import {
   ArrowDownRight, ArrowLeft, ArrowRight, Bell, BookOpen, CalendarDays, Check, CheckCircle2, ChevronDown,
@@ -52,8 +53,12 @@ function EmptyState({ icon = BookOpen, title, detail, action }: { icon?: IconCom
 }
 function useLogoutAction() {
   const logout = useLmsLogout();
+  const queryClient = useQueryClient();
   const [, setLocation] = useLocation();
-  return () => logout.mutate(undefined, { onSuccess: () => setLocation("/learn") });
+  return () => logout.mutate(undefined, { onSuccess: () => {
+    queryClient.removeQueries({ predicate: query => query.queryKey[0] === "aichm-calendar" });
+    setLocation("/learn");
+  } });
 }
 function formatDate(value: string, withTime = false) {
   const date = new Date(value);
@@ -286,7 +291,7 @@ function StudentDashboardContent({ user }: { user: LmsUser }) {
           </form>
         </div>}
       </section>
-      <aside className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">On the calendar</div><h2>Upcoming sessions</h2></div><Icon icon={CalendarDays} /></div>
+       <aside className="lms-panel"><div className="lms-panel-head"><div><div className="lms-eyebrow">On the calendar</div><h2>Upcoming sessions</h2></div><Link className="lms-course-link" href="/learn/calendar">Full timetable <Icon icon={ArrowRight} size={14} /></Link></div>
         {sessions.length ? sessions.map(session => {
           const dt = new Date(session.startsAt);
           return <article className="lms-session" key={session.id}><div className="lms-date-block"><b>{Number.isNaN(dt.getTime()) ? "—" : dt.getDate()}</b><span>{Number.isNaN(dt.getTime()) ? "TBC" : new Intl.DateTimeFormat(undefined, { month: "short" }).format(dt)}</span></div><div><div className="lms-session-title">{session.title}</div><div className="lms-session-detail">{session.topic} · {formatDate(session.startsAt, true)}</div><div className="lms-session-detail">{session.courseTitle}</div>{session.meetUrl && <a className="lms-course-link" href={session.meetUrl} target="_blank" rel="noreferrer" style={{ marginTop: 7 }}>Open session <Icon icon={ArrowDownRight} size={13} /></a>}</div></article>;
@@ -498,7 +503,7 @@ function TrainerContent({ user }: { user: LmsUser }) {
     });
   };
   return <PageFrame user={user} onLogout={logout}>
-    <div className="lms-page-head"><div><div className="lms-eyebrow">Trainer workspace</div><h1>Teaching, with intention.</h1><p className="lms-subtitle">Review learner progress and schedule sessions for your assigned courses.</p></div><span className="lms-tag">Trainer</span></div>
+    <div className="lms-page-head"><div><div className="lms-eyebrow">Trainer workspace</div><h1>Teaching, with intention.</h1><p className="lms-subtitle">Review learner progress and schedule sessions for your assigned courses.</p></div><Link className="lms-tag" href="/learn/calendar">Open my calendar</Link></div>
     {courses.isError ? <ErrorState message={niceError(courses.error, "Assigned courses could not be loaded.")} retry={() => void courses.refetch()} /> :
       courses.data?.length ? <div className="lms-grid lms-grid-courses">{courses.data.map(course => <TrainerCourseCard key={course.id} course={course} />)}</div> :
       <EmptyState icon={GraduationCap} title="No courses assigned yet" detail="When the institute assigns a course to you, it will appear here." />}
@@ -667,7 +672,7 @@ function AdminContent({ user }: { user: LmsUser }) {
   const [setupLink, setSetupLink] = useState<{ setupPath: string; expiresAt: string; userName: string } | null>(null);
   const [accountName, setAccountName] = useState("");
   const [accountPhone, setAccountPhone] = useState("");
-  const [accountRole, setAccountRole] = useState<"student" | "trainer">("student");
+  const [accountRole, setAccountRole] = useState<"student" | "trainer" | "admissions" | "academic_coordinator" | "operations">("student");
   const [curriculumImportBusy, setCurriculumImportBusy] = useState(false);
   const [curriculumImportMessage, setCurriculumImportMessage] = useState("");
   const [curriculumImportError, setCurriculumImportError] = useState("");
@@ -782,7 +787,7 @@ function AdminContent({ user }: { user: LmsUser }) {
       <form onSubmit={submitAccount} className="lms-grid lms-grid-2">
         <div className="lms-field"><label htmlFor="account-name">Name</label><input id="account-name" className="lms-input" value={accountName} onChange={event => setAccountName(event.target.value)} minLength={2} maxLength={180} required /></div>
         <div className="lms-field"><label htmlFor="account-phone">Phone number</label><input id="account-phone" className="lms-input" type="tel" autoComplete="off" placeholder="+91 98765 43210 or 10-digit Indian mobile" value={accountPhone} onChange={event => setAccountPhone(event.target.value)} required /></div>
-        <div className="lms-field"><label htmlFor="account-role">Account type</label><select id="account-role" className="lms-select" value={accountRole} onChange={event => setAccountRole(event.target.value as "student" | "trainer")}><option value="student">Student</option><option value="trainer">Trainer</option></select></div>
+        <div className="lms-field"><label htmlFor="account-role">Account type</label><select id="account-role" className="lms-select" value={accountRole} onChange={event => setAccountRole(event.target.value as typeof accountRole)}><option value="student">Student</option><option value="trainer">Trainer</option><option value="admissions">Admissions</option><option value="academic_coordinator">Academic coordinator</option><option value="operations">Operations</option></select></div>
         <div className="lms-row" style={{ alignItems: "end" }}><button className="lms-button" type="submit" disabled={createUser.isPending}>{createUser.isPending ? "Saving account…" : "Save account"}</button></div>
       </form>
       {accountMessage && <div className="lms-alert lms-alert-success" role="status" style={{ marginTop: 12 }}>{accountMessage}</div>}

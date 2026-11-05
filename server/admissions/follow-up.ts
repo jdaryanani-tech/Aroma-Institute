@@ -40,6 +40,19 @@ export function consentView(row?: typeof preferences.$inferSelect) {
   };
 }
 
+async function counsellingFormsByPhone(canonicalPhone:string,database:FollowUpDatabase) {
+  const normalized=sql<string>`regexp_replace(${inquiries.phone}, '[^0-9]', '', 'g')`;
+  return database.select({
+    id:inquiries.id,leadId:inquiries.leadId,name:inquiries.name,
+    submittedAt:inquiries.counsellingSubmittedAt,answers:inquiries.counsellingAnswers,
+    source:inquiries.submissionSource,
+  }).from(inquiries).where(and(
+    isNotNull(inquiries.counsellingAnswers),
+    sql`btrim(${inquiries.phone}) ~ '^\\+?[0-9[:space:]().-]+$'`,
+    sql`${normalized} IN (${canonicalPhone}, ${canonicalPhone.slice(2)}, ${`0${canonicalPhone.slice(2)}`})`,
+  )).orderBy(sql`${inquiries.counsellingSubmittedAt} DESC NULLS LAST`,desc(inquiries.id)).limit(2);
+}
+
 /** Called within the identity transaction, under its canonical-phone advisory lock. */
 export async function recordRegistrationFollowUp(tx:Transaction,lead:Lead,firstRegistration:boolean,optIn:boolean,now:Date) {
   if(!await followUpSchemaReady(tx)) return false; // Stage 1 stays available pending migration.
@@ -97,8 +110,56 @@ export async function readLeadFollowUpByPhone(phone:string,database:FollowUpData
   const canonicalPhone=normalizeIndianMobile(phone);
   if(!canonicalPhone) return null;
   const [lead]=await database.select().from(admissionsLeads).where(eq(admissionsLeads.canonicalPhone,canonicalPhone));
-  if(!lead) return null;
-  return buildLeadStatus(lead,database);
+  if(lead) {
+    const status=await buildLeadStatus(lead,database);
+    const hasSavedForm=!!status.questionnaire.latestSubmission;
+    const phoneForms=hasSavedForm?[]:await counsellingFormsByPhone(canonicalPhone,database);
+    if(!hasSavedForm&&phoneForms.length===1&&(!phoneForms[0].leadId||phoneForms[0].leadId===lead.id)) {
+      const form=phoneForms[0];
+      const q29=form.answers?.consentToContact===true?true:form.answers?.consentToContact===false?false:null;
+      return {
+        ...status,
+        questionnaire:{status:"completed",completedAt:form.submittedAt?.toISOString()??null,
+          latestSubmission:{submissionId:form.id,submittedAt:form.submittedAt?.toISOString()??null,answers:form.answers,source:form.source}},
+        consent:{...status.consent,counsellingQuestion29:{
+          consentToContact:q29,recordedAt:form.submittedAt?.toISOString()??null,inquiryId:form.id,
+          source:"counselling_question_29",allowed:q29===true&&!status.consent.optedOut,
+        }},
+      };
+    }
+    return {
+      ...status,
+      questionnaire:{
+        ...status.questionnaire,
+        status:hasSavedForm?"completed":phoneForms.length?"review_required":"not_submitted",
+        completedAt:hasSavedForm?status.questionnaire.completedAt:null,
+      },
+    };
+  }
+  const legacy=await counsellingFormsByPhone(canonicalPhone,database);
+  if(legacy.length>1) return {
+    leadId:null,phone:canonicalPhone,name:null,registeredAt:null,
+    video:{observedPercent:0,lastMilestone:null,lastEventAt:null,completedAt:null,milestones:[]},
+    questionnaire:{status:"review_required",completedAt:null,latestSubmission:null},
+    consent:{whatsappAdmissions:consentView(),counsellingQuestion29:{consentToContact:null,recordedAt:null,inquiryId:null,source:null,allowed:false},optedOut:false,optedOutAt:null},
+  };
+  if(!legacy[0]) return {
+    leadId:null,phone:canonicalPhone,name:null,registeredAt:null,
+    video:{observedPercent:0,lastMilestone:null,lastEventAt:null,completedAt:null,milestones:[]},
+    questionnaire:{status:"not_submitted",completedAt:null,latestSubmission:null},
+    consent:{whatsappAdmissions:consentView(),counsellingQuestion29:{consentToContact:null,recordedAt:null,inquiryId:null,source:null,allowed:false},optedOut:false,optedOutAt:null},
+  };
+  const form=legacy[0];
+  const question29=form.answers?.consentToContact===true?true:form.answers?.consentToContact===false?false:null;
+  return {
+    leadId:form.leadId,phone:canonicalPhone,name:form.name,registeredAt:null,
+    video:{observedPercent:0,lastMilestone:null,lastEventAt:null,completedAt:null,milestones:[]},
+    questionnaire:{status:"completed",completedAt:form.submittedAt?.toISOString()??null,
+      latestSubmission:{submissionId:form.id,submittedAt:form.submittedAt?.toISOString()??null,answers:form.answers,source:form.source}},
+    consent:{whatsappAdmissions:consentView(),counsellingQuestion29:{consentToContact:question29,
+      recordedAt:form.submittedAt?.toISOString()??null,inquiryId:form.id,source:"counselling_question_29",
+      allowed:question29===true},optedOut:false,optedOutAt:null},
+  };
 }
 
 async function buildLeadStatus(lead:Lead,database:FollowUpDatabase) {
@@ -106,7 +167,7 @@ async function buildLeadStatus(lead:Lead,database:FollowUpDatabase) {
   const [form]=await database.select({
     id:inquiries.id,at:inquiries.counsellingSubmittedAt,
     consent:sql<unknown>`${inquiries.counsellingAnswers}->'consentToContact'`,
-    answers:inquiries.counsellingAnswers,
+    answers:inquiries.counsellingAnswers,source:inquiries.submissionSource,
   }).from(inquiries).where(and(eq(inquiries.leadId,lead.id),isNotNull(inquiries.counsellingAnswers)))
     .orderBy(sql`${inquiries.counsellingSubmittedAt} DESC NULLS LAST`,desc(inquiries.id)).limit(1);
   const events=await database.select().from(admissionsVideoEvents)
@@ -126,7 +187,7 @@ async function buildLeadStatus(lead:Lead,database:FollowUpDatabase) {
     },
     questionnaire:{
       status:lead.questionnaireStatus,completedAt:lead.questionnaireCompletedAt?.toISOString() ?? null,
-      latestSubmission:form ? {submissionId:form.id,submittedAt:form.at?.toISOString() ?? null,answers:form.answers} : null,
+      latestSubmission:form ? {submissionId:form.id,submittedAt:form.at?.toISOString() ?? null,answers:form.answers,source:form.source} : null,
     },
     consent:{
       whatsappAdmissions:consent,

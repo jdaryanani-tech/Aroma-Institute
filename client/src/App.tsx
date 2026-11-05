@@ -23,6 +23,7 @@ import {
   TrainerPage,
 } from "@/lms-ui";
 import { PwaInstallPrompt } from "@/lms-ui/PwaInstallPrompt";
+import CalendarPage from "@/calendar/CalendarPage";
 
 function Router() {
   return (
@@ -33,11 +34,13 @@ function Router() {
       <Route path="/counselling" component={CounsellingForm} />
       <Route path="/admin/first-owner" component={FirstOwner} />
       <Route path="/admin/login" component={AdminLogin} />
+      <Route path="/admin/calendar" component={() => <CalendarPage surface="admin" />} />
       <Route path="/admin" component={Admin} />
       <Route path="/learn" component={LearnLoginPage} />
       <Route path="/learn/" component={LearnLoginPage} />
       <Route path="/learn/setup" component={PasswordSetupPage} />
       <Route path="/learn/dashboard" component={StudentDashboardPage} />
+      <Route path="/learn/calendar" component={() => <CalendarPage surface="learn" />} />
       <Route path="/learn/courses/:courseId" component={LmsCoursePage} />
       <Route path="/manage/courses/:courseId" component={CourseManagerPage} />
       <Route path="/trainer" component={TrainerPage} />
@@ -57,7 +60,7 @@ function RootLanding() {
 function App() {
   const [location] = useLocation();
   const isLearnPortal = location === "/learn" || location.startsWith("/learn/");
-  const isAdminPortal = location === "/admin" || location === "/admin/login";
+  const isAdminPortal = location === "/admin" || location.startsWith("/admin/");
 
   return (
     <QueryClientProvider client={queryClient}>
