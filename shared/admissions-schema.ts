@@ -46,6 +46,44 @@ export const admissionsCaptureLimits = pgTable("admissions_capture_limits", {
   attempts: integer("attempts").notNull(),
 });
 
+// Separate one-to-one preferences keep Stage 1 usable before the additive Stage 2
+// migration is applied. This is consent metadata, not a second lead identity.
+export const admissionsLeadContactPreferences = pgTable("admissions_lead_contact_preferences", {
+  leadId: uuid("lead_id").primaryKey().references(() => admissionsLeads.id),
+  consentStatus: text("consent_status").notNull().default("not_provided"),
+  consentRecordedAt: timestamp("consent_recorded_at", { withTimezone: true }),
+  consentSource: text("consent_source"),
+  consentText: text("consent_text"),
+  consentVersion: text("consent_version"),
+  statusUpdatedAt: timestamp("status_updated_at", { withTimezone: true }).defaultNow().notNull(),
+  optedOutAt: timestamp("opted_out_at", { withTimezone: true }),
+  optOutSource: text("opt_out_source"),
+}, t => [check("admissions_contact_consent_status", sql`${t.consentStatus} IN ('not_provided','granted','opted_out')`)]);
+
+export const admissionsRegistrationOutbox = pgTable("admissions_registration_outbox", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  leadId: uuid("lead_id").notNull().references(() => admissionsLeads.id),
+  eventType: text("event_type").notNull().default("vsl.registered"),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  state: text("state").notNull().default("pending"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  availableAt: timestamp("available_at", { withTimezone: true }).defaultNow().notNull(),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+  responseAt: timestamp("response_at", { withTimezone: true }),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+  lastHttpStatus: integer("last_http_status"),
+  lastError: text("last_error"),
+  lockedAt: timestamp("locked_at", { withTimezone: true }),
+  lockToken: uuid("lock_token"),
+}, t => [
+  index("admissions_registration_outbox_due_idx").on(t.state,t.availableAt),
+  index("admissions_registration_outbox_lead_idx").on(t.leadId),
+  check("admissions_registration_outbox_state",sql`${t.state} IN ('pending','sending','acknowledged','failed')`),
+  check("admissions_registration_outbox_attempts",sql`${t.attemptCount} >= 0`),
+]);
+
 export type LeadJourneySummaryData = {
   leadId: string;
   registeredAt: string | null;

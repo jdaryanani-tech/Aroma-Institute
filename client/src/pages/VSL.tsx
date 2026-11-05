@@ -3,14 +3,48 @@ import { X } from "lucide-react";
 import { useLocation } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
+import {
+  VSL_WHATSAPP_CONSENT_TEXT,
+  VSL_WHATSAPP_CONSENT_VERSION,
+} from "@shared/vsl-consent";
 
 export default function VSL() {
   const [, setLocation] = useLocation();
   const [isGateOpen, setIsGateOpen] = useState(false);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [whatsappAdmissionsConsent, setWhatsappAdmissionsConsent] = useState(false);
+  const [whatsappConsentAvailable, setWhatsappConsentAvailable] = useState(false);
+  const [consentVersion, setConsentVersion] = useState(VSL_WHATSAPP_CONSENT_VERSION);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState("");
+
+  useEffect(() => {
+    let isCurrent = true;
+    fetch("/api/vsl/registration-options", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error("Registration options unavailable");
+        return response.json();
+      })
+      .then((options: { whatsappConsentAvailable?: boolean; consentVersion?: string }) => {
+        if (!isCurrent) return;
+        if (typeof options.consentVersion === "string" && options.consentVersion.length > 0) {
+          setConsentVersion(options.consentVersion);
+        }
+        setWhatsappConsentAvailable(options.whatsappConsentAvailable === true);
+      })
+      .catch(() => {
+        if (isCurrent) setWhatsappConsentAvailable(false);
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isGateOpen) return;
@@ -47,6 +81,8 @@ export default function VSL() {
         name: name.trim(),
         phone: phone.trim(),
         entryPath: window.location.pathname === "/" ? "/" : "/vsl",
+        whatsappAdmissionsConsent: whatsappConsentAvailable && whatsappAdmissionsConsent,
+        consentVersion,
       });
       setLocation("/vsl-video");
     } catch {
@@ -109,7 +145,7 @@ export default function VSL() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="lead-form-title"
-            className="relative w-full max-w-md rounded-2xl border border-white/15 bg-[#1a1109] p-6 shadow-2xl sm:p-8"
+            className="relative max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-[#1a1109] p-6 shadow-2xl sm:p-8"
             onClick={(event) => event.stopPropagation()}
           >
             <button
@@ -168,6 +204,29 @@ export default function VSL() {
                   placeholder="+91 98765 43210"
                   data-testid="gate-input-phone"
                 />
+              </div>
+              <div>
+                <label
+                  htmlFor="lead-whatsapp-consent"
+                  className="flex min-h-11 cursor-pointer items-start gap-3 rounded-lg py-2 text-left text-sm leading-relaxed text-white/80"
+                >
+                  <input
+                    id="lead-whatsapp-consent"
+                    name="whatsappAdmissionsConsent"
+                    type="checkbox"
+                    disabled={!whatsappConsentAvailable}
+                    checked={whatsappAdmissionsConsent}
+                    onChange={(event) => setWhatsappAdmissionsConsent(event.target.checked)}
+                    className="mt-0.5 h-5 w-5 shrink-0 accent-amber-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 disabled:cursor-not-allowed disabled:opacity-45"
+                    data-testid="gate-checkbox-whatsapp-consent"
+                  />
+                  <span>{VSL_WHATSAPP_CONSENT_TEXT}</span>
+                </label>
+                <p className="ml-8 text-xs leading-relaxed text-white/55">
+                  {whatsappConsentAvailable
+                    ? "Optional. You can watch the free training whether or not you select this."
+                    : "Optional. Consent saving is not enabled yet; you can still watch the free training."}
+                </p>
               </div>
               {submissionError && (
                 <p className="text-sm text-red-300" role="alert" data-testid="gate-error">

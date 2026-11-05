@@ -57,6 +57,13 @@
       "when": 1793861205132,
       "tag": "0007_admissions_crm",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793864177848,
+      "tag": "0008_admissions_follow_up",
+      "breakpoints": true
     }
   ]
 }

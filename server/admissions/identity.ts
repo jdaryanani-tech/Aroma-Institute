@@ -2,9 +2,10 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../db";
 import { admissionsLeads, inquiries, type InsertCounsellingInquiry } from "@shared/schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
+import { recordRegistrationFollowUp } from "./follow-up";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
-export type AdmissionsDatabase = Pick<typeof db, "transaction" | "select" | "insert" | "update">;
+export type AdmissionsDatabase = Pick<typeof db, "transaction" | "select" | "insert" | "update" | "execute">;
 
 /** Never rewrites historical answers or merges ambiguous historical rows. */
 async function resolveLead(tx: Transaction, phone: string, name: string) {
@@ -43,7 +44,7 @@ async function resolveLead(tx: Transaction, phone: string, name: string) {
   return lead;
 }
 
-export async function registerVslLead(input: { phone: string; name: string; entryPath: string; entryHost: string }, now = new Date(), database: AdmissionsDatabase = db) {
+export async function registerVslLead(input: { phone: string; name: string; entryPath: string; entryHost: string; whatsappAdmissionsConsent?:boolean }, now = new Date(), database: AdmissionsDatabase = db) {
   return database.transaction(async (tx) => {
     const lead = await resolveLead(tx, input.phone, input.name);
     const [updated] = await tx.update(admissionsLeads).set({
@@ -61,6 +62,7 @@ export async function registerVslLead(input: { phone: string; name: string; entr
       email: "watch@aromainstitute.in", programInterest: "Aroma LEAP",
       message: "Requested free Aroma LEAP training from the VSL landing page",
     });
+    await recordRegistrationFollowUp(tx,updated,!lead.registeredAt,input.whatsappAdmissionsConsent===true,now);
     return updated;
   });
 }

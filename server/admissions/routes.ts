@@ -8,6 +8,8 @@ import { normalizeIndianMobile } from "@shared/indian-mobile";
 import { registerVslLead, type AdmissionsDatabase } from "./identity";
 import { observePlayback } from "./playback";
 import { getVslDuration } from "../vsl-media";
+import { followUpSchemaReady } from "./follow-up";
+import { VSL_WHATSAPP_CONSENT_VERSION } from "@shared/vsl-consent";
 
 declare module "express-session" {
   interface SessionData { admissionsLeadId?: string }
@@ -51,7 +53,9 @@ const mobile = z.string().trim().max(32).refine(v => normalizeIndianMobile(v) !=
 const registrationSchema = z.object({
   name: z.string().trim().min(2).max(120), phone: mobile,
   entryPath: z.enum(["/", "/vsl"]).default("/vsl"),
-}).strict();
+  whatsappAdmissionsConsent:z.boolean().default(false),
+  consentVersion:z.literal(VSL_WHATSAPP_CONSENT_VERSION).optional(),
+}).strict().refine(v=>!v.whatsappAdmissionsConsent || !!v.consentVersion);
 const eventSchema = z.object({
   playbackId: z.string().uuid(), sequence: z.number().int().min(1).max(100000),
   type: z.enum(["play", "sample", "pause", "seek", "ended"]),
@@ -60,10 +64,17 @@ const eventSchema = z.object({
 }).strict();
 
 export function registerAdmissionsRoutes(app: Express, database: AdmissionsDatabase = db, mediaDuration = getVslDuration) {
+  app.get("/api/vsl/registration-options",async (_req,res)=>{
+    res.setHeader("Cache-Control","no-store");
+    try {return res.json({whatsappConsentAvailable:await followUpSchemaReady(database),consentVersion:VSL_WHATSAPP_CONSENT_VERSION});}
+    catch {return res.json({whatsappConsentAvailable:false,consentVersion:VSL_WHATSAPP_CONSENT_VERSION});}
+  });
   app.post("/api/vsl/registrations", sameOriginCapture, captureLimit("register", 20, database), async (req, res) => {
     const parsed = registrationSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: "Enter your name and a valid Indian mobile number." });
     try {
+      if(parsed.data.whatsappAdmissionsConsent && !await followUpSchemaReady(database))
+        return res.status(503).json({message:"Optional consent saving is not enabled yet. You can still watch without selecting it."});
       const lead = await registerVslLead({ ...parsed.data, entryHost: req.hostname.slice(0, 253) }, new Date(), database);
       req.session.admissionsLeadId = lead.id;
       await new Promise<void>((resolve, reject) => req.session.save(e => e ? reject(e) : resolve()));

@@ -63,6 +63,7 @@ test("unlocks the VSL and plays/seeks Hls.js media in Chromium", async ({ page }
     inquiryRequests += 1;
     expect(route.request().postDataJSON()).toEqual({
       name: "Browser Test", phone: "9876543210", entryPath: "/vsl",
+      whatsappAdmissionsConsent: false, consentVersion: "whatsapp-admissions-v1",
     });
     await route.fulfill({
       status: 201,

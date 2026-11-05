@@ -74,6 +74,7 @@ export function buildCounsellingWebhookPayload(
     event: "counselling.inquiry.submitted",
     source: "aroma-leap-counselling-form",
     submissionId: `counselling-inquiry-${inquiry.id}`,
+    leadId: inquiry.leadId ?? null,
     submittedAt: submittedAt.toISOString(),
     lead: {
       id: inquiry.id,
