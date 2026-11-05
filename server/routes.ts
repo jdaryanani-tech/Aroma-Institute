@@ -8,6 +8,7 @@ import { configureLmsSessions, requireLmsRole, requireLmsUser } from "./lms/auth
 import { registerLmsRoutes } from "./lms/routes";
 import { registerLmsManagementRoutes } from "./lms/management-routes";
 import { registerVslMediaRoutes } from "./vsl-media";
+import { registerAdmissionsRoutes, captureLimit, sameOriginCapture } from "./admissions/routes";
 import {
   sendCounsellingInquiryToN8n,
   summarizeCounsellingDeliveryResult,
@@ -18,6 +19,7 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   configureLmsSessions(app);
+  registerAdmissionsRoutes(app);
 
   app.post("/api/inquiries", async (req, res) => {
     try {
@@ -34,7 +36,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/counselling-inquiries", async (req, res) => {
+  app.post("/api/counselling-inquiries", sameOriginCapture, captureLimit("counselling", 12), async (req, res) => {
     try {
       const data = insertCounsellingInquirySchema.parse(req.body);
       const submittedAt = new Date();
@@ -181,6 +183,7 @@ export async function registerRoutes(
     requireLmsRole("admin"),
     async (_req, res) => {
       try {
+        res.setHeader("Cache-Control", "private, no-store");
         const data = await storage.getInquiries();
         res.json(data);
       } catch {

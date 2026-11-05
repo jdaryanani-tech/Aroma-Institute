@@ -3,6 +3,7 @@ import { Maximize2, Minimize2, Pause, Play } from "lucide-react";
 import type Hls from "hls.js";
 import vslThumbnail from "@assets/Barista_Career_in_Three_Months_1793184531131.png";
 import { createVslPlaybackTracker } from "@/lib/analytics";
+import { createDurableVslTracker } from "@/lib/vsl-capture";
 
 const VSL_PLAYLIST_URL = "/api/vsl/media/index.m3u8";
 const MEDIA_ERROR_MESSAGE = "Video load nahi ho saka. Kripya page refresh karke dobara koshish karein.";
@@ -31,6 +32,9 @@ export default function VSLVideo() {
   const [showCounsellingCta, setShowCounsellingCta] = useState(true);
   const [videoError, setVideoError] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [captureStatus, setCaptureStatus] = useState("initial");
+  const durableTrackerRef = useRef<ReturnType<typeof createDurableVslTracker> | null>(null);
+  if (!durableTrackerRef.current) durableTrackerRef.current = createDurableVslTracker(setCaptureStatus);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -192,8 +196,12 @@ export default function VSLVideo() {
           onPlay={(event) => {
             setIsPlaying(true);
             playbackTrackerRef.current?.onPlay(event.currentTarget.currentTime);
+            durableTrackerRef.current?.observe("play", event.currentTarget.currentTime, event.currentTarget.duration);
           }}
-          onPause={() => setIsPlaying(false)}
+          onPause={(event) => {
+            setIsPlaying(false);
+            durableTrackerRef.current?.observe("pause", event.currentTarget.currentTime, event.currentTarget.duration);
+          }}
           onTimeUpdate={(event) => {
             updateProgress(event.currentTarget);
             playbackTrackerRef.current?.onTimeUpdate(
@@ -201,12 +209,16 @@ export default function VSLVideo() {
               event.currentTarget.duration,
               event.currentTarget.seeking,
             );
+            durableTrackerRef.current?.observe("sample", event.currentTarget.currentTime, event.currentTarget.duration, event.currentTarget.seeking);
           }}
+          onSeeking={(event) => durableTrackerRef.current?.observe("seek", event.currentTarget.currentTime, event.currentTarget.duration)}
+          onSeeked={(event) => durableTrackerRef.current?.observe("seek", event.currentTarget.currentTime, event.currentTarget.duration)}
           onDurationChange={(event) => updateProgress(event.currentTarget)}
-          onEnded={() => {
+          onEnded={(event) => {
             setIsPlaying(false);
             setProgress(1);
             playbackTrackerRef.current?.onEnded();
+            durableTrackerRef.current?.observe("ended", event.currentTarget.currentTime, event.currentTarget.duration);
           }}
           onError={(event) => {
             const errorCode = event.currentTarget.error?.code;
@@ -289,6 +301,16 @@ export default function VSLVideo() {
           </p>
         )}
       </div>
+      {captureStatus === "error" && (
+        <p className="max-w-3xl text-center text-xs text-amber-200/80" role="status">
+          Video activity save nahi ho saki. Video dekhna jaari rakh sakte hain; activity link karne ke liye page refresh karein.
+        </p>
+      )}
+      {captureStatus === "unlinked" && (
+        <p className="max-w-3xl text-center text-xs text-white/60" role="status">
+          Video activity apni enquiry se link karne ke liye <a className="underline" href="/vsl">registration karein</a>.
+        </p>
+      )}
       {showCounsellingCta && !isMaximized && (
         <a
           href="/counselling"

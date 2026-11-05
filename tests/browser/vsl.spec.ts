@@ -7,11 +7,11 @@ const playlist = await readFile(join(fixtureDirectory, "index.m3u8"), "utf8");
 const segment = await readFile(join(fixtureDirectory, "segment-00000.ts"));
 
 async function stubInquirySubmission(page: import("@playwright/test").Page) {
-  await page.route("**/api/inquiries", async (route) => {
+  await page.route("**/api/vsl/registrations", async (route) => {
     await route.fulfill({
       status: 201,
       contentType: "application/json",
-      body: JSON.stringify({ id: "browser-test-inquiry" }),
+      body: JSON.stringify({ registered: true }),
     });
   });
 }
@@ -46,17 +46,28 @@ async function setNativeHlsSupport(page: import("@playwright/test").Page) {
 test.beforeEach(async ({ page }) => {
   await stubInquirySubmission(page);
   await serveTestHlsMedia(page);
+  // Browser fixtures never write to the normal development database.
+  await page.route("**/api/vsl/playbacks", route => route.fulfill({
+    status: 201, contentType: "application/json",
+    body: JSON.stringify({ playbackId: "11111111-1111-4111-8111-111111111111" }),
+  }));
+  await page.route("**/api/vsl/events", route => route.fulfill({
+    status: 200, contentType: "application/json", body: JSON.stringify({ saved: true }),
+  }));
 });
 
 test("unlocks the VSL and plays/seeks Hls.js media in Chromium", async ({ page }) => {
   let inquiryRequests = 0;
-  await page.unroute("**/api/inquiries");
-  await page.route("**/api/inquiries", async (route) => {
+  await page.unroute("**/api/vsl/registrations");
+  await page.route("**/api/vsl/registrations", async (route) => {
     inquiryRequests += 1;
+    expect(route.request().postDataJSON()).toEqual({
+      name: "Browser Test", phone: "9876543210", entryPath: "/vsl",
+    });
     await route.fulfill({
       status: 201,
       contentType: "application/json",
-      body: JSON.stringify({ id: "browser-test-inquiry" }),
+      body: JSON.stringify({ registered: true }),
     });
   });
 

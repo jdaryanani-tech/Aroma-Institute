@@ -11,6 +11,18 @@ function getStorageClient() {
   return (storageClient ??= new Client());
 }
 
+let cachedDuration: { seconds: number; expiresAt: number } | undefined;
+export async function getVslDuration() {
+  if (cachedDuration && cachedDuration.expiresAt > Date.now()) return cachedDuration.seconds;
+  const result = await getStorageClient().downloadAsText(`${VSL_OBJECT_PREFIX}${PLAYLIST_NAME}`);
+  if (!result.ok || !result.value.includes("#EXT-X-ENDLIST")) throw new Error("VSL manifest unavailable");
+  const durations = Array.from(result.value.matchAll(/#EXTINF:([\d.]+)/g)).map(match => Number(match[1]));
+  const seconds = durations.reduce((sum, duration) => sum + duration, 0);
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 14400) throw new Error("Invalid VSL duration");
+  cachedDuration = { seconds, expiresAt: Date.now() + 5 * 60 * 1000 };
+  return seconds;
+}
+
 export function registerVslMediaRoutes(app: Express) {
   app.get("/api/vsl/media/:assetName", async (req, res) => {
     const assetName = req.params.assetName;

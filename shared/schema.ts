@@ -1,5 +1,8 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, serial, jsonb, integer, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, jsonb, integer, timestamp, uniqueIndex, uuid, index } from "drizzle-orm/pg-core";
+import { admissionsLeads } from "./admissions-schema";
+import { normalizeIndianMobile } from "./indian-mobile";
+export * from "./admissions-schema";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -115,10 +118,7 @@ const preferredVisitDateSchema = z
   );
 
 const counsellingPhoneSchema = z.string().trim().refine(
-  (value) => {
-    const digits = value.replace(/\D/g, "");
-    return digits.length >= 10 && digits.length <= 15;
-  },
+  (value) => normalizeIndianMobile(value) !== null,
   "Please enter a valid mobile or WhatsApp number.",
 );
 
@@ -173,6 +173,7 @@ export type CounsellingAttemptState = (typeof counsellingAttemptStates)[number];
 
 export const inquiries = pgTable("inquiries", {
   id: serial("id").primaryKey(),
+  leadId: uuid("lead_id").references(() => admissionsLeads.id),
   name: text("name").notNull(),
   email: text("email").notNull(),
   phone: text("phone").notNull(),
@@ -189,7 +190,7 @@ export const inquiries = pgTable("inquiries", {
   counsellingDeliveryLastResult: text("counselling_delivery_last_result"),
   counsellingDeliveryLastVerifiedAt: timestamp("counselling_delivery_last_verified_at", { withTimezone: true }),
   counsellingDeliveryLastVerifiedBy: integer("counselling_delivery_last_verified_by"),
-});
+}, (t) => [index("inquiries_lead_id_idx").on(t.leadId)]);
 
 export const counsellingDeliveryAttemptRecords = pgTable(
   "counselling_delivery_attempts",
@@ -214,6 +215,7 @@ export type CounsellingDeliveryAttemptRecord = typeof counsellingDeliveryAttempt
 
 export const insertInquirySchema = createInsertSchema(inquiries).omit({
   id: true,
+  leadId: true,
   counsellingSubmittedAt: true,
   counsellingDeliveryStatus: true,
   counsellingDeliveryAttempts: true,

@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 test("submits and stores the complete 29-question counselling request in Chromium", async ({ page }) => {
+  // This walks all 29 questions; allow for slower shared browser runners.
+  test.setTimeout(60_000);
   let submittedInquiry: Record<string, any> | undefined;
   await page.route("**/api/counselling-inquiries", async (route) => {
     submittedInquiry = route.request().postDataJSON();

@@ -42,6 +42,7 @@ const answerSet = {
 
 const inquiry = {
   id: 42,
+  leadId: null,
   name: "Test Student",
   email: "",
   phone: "9876543210",

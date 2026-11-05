@@ -9,9 +9,13 @@ import {
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNotNull, lt, or, sql } from "drizzle-orm";
 import type { InsertCounsellingInquiry } from "@shared/schema";
+import { saveLinkedCounsellingInquiry } from "./admissions/identity";
+import { loadJourneySummaries } from "./admissions/summary";
+import type { LeadJourneySummaryData } from "@shared/admissions-schema";
 
 export type InquiryWithDeliveryAttemptHistory = Inquiry & {
   deliveryAttemptHistory: CounsellingDeliveryAttemptRecord[];
+  journey: LeadJourneySummaryData | null;
 };
 
 export type CounsellingDeliveryAttemptResult = {
@@ -47,15 +51,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createCounsellingInquiry(inquiry: InsertCounsellingInquiry, submittedAt: Date): Promise<Inquiry> {
-    const [result] = await db.insert(inquiries).values({
-      ...inquiry,
-      counsellingSubmittedAt: submittedAt,
-      counsellingDeliveryStatus: "pending",
-      counsellingDeliveryAttempts: 0,
-      counsellingDeliveryLastAttemptAt: null,
-      counsellingDeliveryLastResult: null,
-    }).returning();
-    return result;
+    return saveLinkedCounsellingInquiry(inquiry, submittedAt);
   }
 
   async startCounsellingDeliveryAttempt(id: number, attemptedAt: Date): Promise<Inquiry | undefined> {
@@ -93,8 +89,10 @@ export class DatabaseStorage implements IStorage {
       history.push(attempt);
       attemptsByInquiry.set(attempt.inquiryId, history);
     }
+    const journeys = await loadJourneySummaries(Array.from(new Set(records.flatMap(record => record.leadId ? [record.leadId] : []))));
     return records.map((record) => ({
       ...record,
+      journey: record.leadId ? journeys.get(record.leadId) ?? null : null,
       deliveryAttemptHistory: attemptsByInquiry.get(record.id) ?? [],
     }));
   }

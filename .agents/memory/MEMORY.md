@@ -4,3 +4,4 @@
 - [Inquiry schema history](inquiry-schema-history.md) — The live development schema contains counselling fields absent from older migration history; verify before replaying migrations.
 - [Legacy counselling delivery](legacy-counselling-delivery.md) — For older inquiries with unknown delivery outcomes, ask leads to resubmit rather than replaying old records.
 - [Counselling webhook acknowledgement](counselling-webhook-acknowledgement.md) — Count delivery as acknowledged only for a 2xx JSON response with `received: true` and the matching submission ID.
+- [Admissions identity trust](lead-identity-trust.md) — Phone matching is association, not authentication; ambiguous historical records require review.

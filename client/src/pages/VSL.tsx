@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { useLocation } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
+import { normalizeIndianMobile } from "@shared/indian-mobile";
 
 export default function VSL() {
   const [, setLocation] = useLocation();
@@ -35,19 +36,17 @@ export default function VSL() {
       setSubmissionError("Apna poora naam darj karein.");
       return;
     }
-    if (phone.replace(/\D/g, "").length < 10) {
+    if (!normalizeIndianMobile(phone)) {
       setSubmissionError("Sahi phone number darj karein.");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await apiRequest("POST", "/api/inquiries", {
+      await apiRequest("POST", "/api/vsl/registrations", {
         name: name.trim(),
-        email: "watch@aromainstitute.in",
         phone: phone.trim(),
-        programInterest: "Aroma LEAP",
-        message: "Requested free Aroma LEAP training from the VSL landing page",
+        entryPath: window.location.pathname === "/" ? "/" : "/vsl",
       });
       setLocation("/vsl-video");
     } catch {

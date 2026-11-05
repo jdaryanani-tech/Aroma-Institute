@@ -16,6 +16,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { counsellingQuestions } from "./counsellingQuestions";
+import LeadJourneySummary from "@/components/LeadJourneySummary";
+import type { LeadJourneySummaryData } from "@shared/admissions-schema";
 
 const counsellingFieldLabels: Record<string, string> = {
   ...Object.fromEntries(
@@ -68,6 +70,7 @@ const counsellingValueLabels: Record<string, string> = {
 
 type AdminInquiry = Inquiry & {
   deliveryAttemptHistory: CounsellingDeliveryAttemptRecord[];
+  journey?: LeadJourneySummaryData | null;
 };
 
 function formatCounsellingAnswer(key: string, value: unknown): string {
@@ -329,6 +332,7 @@ export default function Admin() {
                       </td>
                       <td className="px-5 py-4 text-white/50 max-w-sm whitespace-normal">
                         <p>{lead.message || <span className="text-white/20 italic">—</span>}</p>
+                        <LeadJourneySummary journey={lead.journey} />
                         {lead.counsellingAnswers && (
                           <details className="mt-2">
                             <summary
