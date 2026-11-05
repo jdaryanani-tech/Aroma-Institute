@@ -75,11 +75,21 @@ The Home page (`client/src/pages/Home.tsx`) is composed of these sections in ord
 - `npm run build` — production build
 - `npm start` — production server
 - `npm run check` — TypeScript type checking
-- `npm test` — LMS assessment scoring tests
+- `npm test` — LMS/server unit tests; database and browser integration cases are opt-in
+- `npm run test:lms-admin` — builds the app and verifies admin login, reload, logout, and password auth against a disposable local PostgreSQL cluster
 - `npm run db:generate` — generate a Drizzle migration from both schemas
 - `npm run db:migrate` — replay tracked migrations only on a database with verified matching migration history; existing development databases use schema push instead
 - `npm run db:push` — push Drizzle schema to database
 - `npm run lms:bootstrap-admin` — create the first admin account interactively
+
+For isolated admin browser verification, PostgreSQL server/client tools must be installed. Install Chromium and run with the same browser cache path:
+
+```sh
+PLAYWRIGHT_BROWSERS_PATH="$PWD/generated-artifacts/ms-playwright" npx playwright install chromium --only-shell
+PLAYWRIGHT_BROWSERS_PATH="$PWD/generated-artifacts/ms-playwright" npm run test:lms-admin
+```
+
+The runner creates a socket-only test database, applies the current schema there, and removes the cluster afterward. It never writes test fixtures to the app's configured database.
 
 ## LMS implementation status
 
@@ -89,6 +99,7 @@ The Home page (`client/src/pages/Home.tsx`) is composed of these sections in ord
 - Course modules, chapters, lessons, and assessments are stored in PostgreSQL. Resource metadata is modeled, but persistent resource upload/download storage is not connected.
 - Approved certificates can be rendered as a branded PDF and are protected by the student/admin authorization check.
 - The leads dashboard at `/admin` now requires an LMS administrator session; the previous hard-coded password fallback and browser `sessionStorage` password are removed.
+- The dedicated Leads login at `/admin/login` opens `/admin`, not the LEAP admin workspace. Existing LEAP administrator sessions are reused. Leads logout destroys the shared session and returns to `/admin/login`.
 - Create the first admin account with `npm run lms:bootstrap-admin` after applying migrations. The command prompts for the admin password without echoing it. An administrator can create student/trainer accounts and issue one-time password setup links from `/lms-admin`.
 
 ## External Dependencies

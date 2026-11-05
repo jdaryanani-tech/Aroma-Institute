@@ -12,6 +12,7 @@
     "test:admissions": "NODE_ENV=test tsx --test server/admissions/*.test.ts",
     "test:browser": "playwright test",
     "test:lms-auth": "NODE_ENV=test tsx --test server/lms/password-auth.integration.test.ts",
+    "test:lms-admin": "bash script/test-admin-session.sh",
     "vsl:upload": "NODE_ENV=development tsx script/upload-vsl-hls.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",

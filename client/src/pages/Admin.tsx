@@ -173,7 +173,7 @@ export default function Admin() {
   });
 
   const handleLogout = () => {
-    logout.mutate(undefined, { onSuccess: () => setLocation("/learn") });
+    logout.mutate(undefined, { onSuccess: () => setLocation("/admin/login") });
   };
 
   const handleRetryDialogChange = (open: boolean) => {
