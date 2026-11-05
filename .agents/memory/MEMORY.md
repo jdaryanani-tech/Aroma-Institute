@@ -6,4 +6,5 @@
 - [Counselling webhook acknowledgement](counselling-webhook-acknowledgement.md) — Count delivery as acknowledged only for a 2xx JSON response with `received: true` and the matching submission ID.
 - [Admissions identity trust](lead-identity-trust.md) — Phone matching is association, not authentication; ambiguous historical records require review.
 - [CRM entry point](admin-crm-entry.md) — Keep the lifecycle CRM at /admin; do not introduce /crm without a new user decision.
+- [Admissions evidence rules](crm-lifecycle-evidence.md) — Lifecycle stages must reflect recorded evidence, not inferred delivery, clicks or appointments.
 - [Isolated authentication testing](isolated-auth-testing.md) — A missing separate test database need not block real auth checks; try a disposable local PostgreSQL cluster.

@@ -1,504 +1,389 @@
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type CounsellingDeliveryAttemptRecord, type Inquiry } from "@shared/schema";
-import { LogOut, Download, Users, Mail, Phone, BookOpen, MessageSquare } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, Clock3, Coffee, LogOut, Mail, MessageCircleOff, Phone, Search, ShieldCheck, SlidersHorizontal, Users, VideoOff, X } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
-import { apiRequest } from "@/lib/queryClient";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { counsellingQuestions } from "./counsellingQuestions";
-import LeadJourneySummary from "@/components/LeadJourneySummary";
-import type { LeadJourneySummaryData } from "@shared/admissions-schema";
+import type { CrmCapabilities, CrmDetail, CrmLead, CrmStage, CrmUpdate } from "@shared/crm";
+import { CRM_STAGES } from "@shared/crm";
+import { CrmHttpError, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } from "@/crm/api";
+import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, formatDate, toLocalInput } from "@/crm/format";
 
-const counsellingFieldLabels: Record<string, string> = {
-  ...Object.fromEntries(
-    counsellingQuestions.map((question) => [
-      question.key,
-      `${question.number}. ${question.prompt}`,
-    ]),
-  ),
-  currentSituation: "Current situation",
-  coffeeExperience: "Coffee or café experience",
-  careerGoal: "Career goal",
-  scheduleReadiness: "Program and schedule readiness",
-  counsellingTopics: "Topics to discuss",
-  guardianInvolvement: "Parent or guardian involvement",
-  additionalQuestion: "Note for the counsellor",
-};
+type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; owner: string; sort: string; page: number; pageSize: number };
+const defaultFilters: Filters = { q: "", stage: "", program: "", source: "", dateFrom: "", dateTo: "", followUp: "", owner: "", sort: "recent", page: 1, pageSize: 12 };
+const stages = Object.keys(CRM_STAGES) as CrmStage[];
+const stageHelp = "Rates describe funnel records; they do not establish that one step caused another.";
 
-const counsellingValueLabels: Record<string, string> = {
-  under18: "Under 18",
-  "18to20": "18–20",
-  "21to24": "21–24",
-  "25plus": "25 or older",
-  completed12th: "Completed 12th standard",
-  college: "Studying in college",
-  graduated: "Graduated",
-  workingOther: "Working in another field",
-  other: "Other",
-  none: "No prior experience",
-  personal: "Personal or hobby experience",
-  internship: "Café internship experience",
-  professional: "Professional café experience",
-  firstCafeJob: "First café job",
-  careerChange: "Career change",
-  buildSkills: "Build barista skills",
-  openCafe: "Explore opening a café",
-  explore: "Explore the career",
-  ready: "Ready to discuss the program",
-  needDetails: "Would like schedule details",
-  unsure: "Not sure yet",
-  programSchedule: "Program schedule",
-  internshipTerms: "Internship and stipend terms",
-  skillsCertification: "Skills and certification",
-  careerPreparation: "Career preparation and placement assistance",
-  feesScholarshipPayment: "Fees, scholarship, and payment options",
-  parentGuardian: "Parent or guardian participation",
-  yes: "Yes",
-  maybe: "Maybe",
-  no: "No",
-};
-
-type AdminInquiry = Inquiry & {
-  deliveryAttemptHistory: CounsellingDeliveryAttemptRecord[];
-  journey?: LeadJourneySummaryData | null;
-};
-
-function formatCounsellingAnswer(key: string, value: unknown): string {
-  const question = counsellingQuestions.find((item) => item.key === key);
-  if (Array.isArray(value)) {
-    return value.map((entry) => {
-      const token = String(entry);
-      return question?.choices?.find((choice) => choice.value === token)?.label
-        ?? counsellingValueLabels[token]
-        ?? token;
-    }).join(", ");
-  }
-  if (typeof value === "boolean") return value ? "Haan" : "Nahi";
-  if (typeof value !== "string" || !value) return "—";
-  return question?.choices?.find((choice) => choice.value === value)?.label
-    ?? counsellingValueLabels[value]
-    ?? value;
+function clearPrivateCache(client: ReturnType<typeof useQueryClient>) {
+  client.removeQueries({ predicate: (query) => {
+    const key = query.queryKey[0];
+    return key === "admin-crm" || key === "/api/admin/inquiries" || (typeof key === "string" && key.startsWith("/api/admin/inquiries?"));
+  } });
 }
-
-async function fetchInquiries(): Promise<AdminInquiry[]> {
-  const res = await fetch("/api/admin/inquiries", { credentials: "include" });
-  if (!res.ok) throw new Error(res.status === 403 ? "Administrator access required." : "Unable to load inquiries.");
-  return res.json();
+function errorText(error: unknown, fallback: string) { return error instanceof Error ? error.message : fallback; }
+function identityText(status: CrmLead["identityStatus"]) {
+  return status === "linked" ? "Linked identity" : status === "unique_phone" ? "Unique phone" : status === "ambiguous" ? "Ambiguous match" : "Unmatched record";
 }
-
-function deliveryStatusLabel(
-  status: Inquiry["counsellingDeliveryStatus"],
-  hasCounsellingAnswers: boolean,
-) {
-  if (status === "not_applicable" && hasCounsellingAnswers) {
-    return "Not tracked (older inquiry)";
-  }
-  switch (status) {
-    case "not_applicable": return "Not a counselling inquiry";
-    case "untracked": return "Not tracked (older inquiry)";
-    case "pending": return "Pending";
-    case "sending":
-    case "retrying": return "Sending";
-    case "acknowledged": return "Acknowledged";
-    case "sent": return "Earlier 2xx (ack not verified)";
-    case "failed": return "Failed";
-  }
-}
-
-function formatDeliveryTimestamp(value: Inquiry["counsellingDeliveryLastAttemptAt"]) {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toLocaleString();
-}
-
-function exportCSV(data: Inquiry[]) {
-  const headers = ["ID", "Name", "Email", "Phone", "Program Interest", "Message", "Counselling Answers"];
-  const rows = data.map((r) => [
-    r.id,
-    r.name,
-    r.email,
-    r.phone,
-    r.programInterest,
-    r.message ?? "",
-    r.counsellingAnswers ? JSON.stringify(r.counsellingAnswers) : "",
-  ]);
-  const csv = [headers, ...rows]
-    .map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
-    .join("\n");
-  const blob = new Blob([csv], { type: "text/csv" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `aroma-leads-${new Date().toISOString().split("T")[0]}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+function stageOrigin(lead: CrmLead) {
+  if (lead.stageSource === "verified_video") return "Verified video";
+  if (lead.stageSource === "verified_form") return "Verified form";
+  if (lead.stageSource === "admin" && (lead.stageEvidence?.selfReported === true || lead.stageEvidence?.kind === "prospect_confirmation")) return "Self-reported";
+  if (lead.stageSource === "admin") return "Staff updated";
+  return "New record";
 }
 
 export default function Admin() {
   const session = useLmsSession();
   const logout = useLmsLogout();
-  const queryClient = useQueryClient();
+  const client = useQueryClient();
   const [, setLocation] = useLocation();
-  const [retryTargetId, setRetryTargetId] = useState<number | null>(null);
-  const [verifiedNotDelivered, setVerifiedNotDelivered] = useState(false);
   const isAdmin = Boolean(session.data?.roles.includes("admin"));
-  const { data, isLoading, isError } = useQuery<AdminInquiry[]>({
-    queryKey: ["/api/admin/inquiries"],
-    queryFn: fetchInquiries,
-    enabled: isAdmin,
-    retry: false,
-  });
-  const retryDelivery = useMutation({
-    mutationFn: async ({ inquiryId }: { inquiryId: number }) => {
-      const response = await apiRequest(
-        "POST",
-        `/api/admin/inquiries/${inquiryId}/retry-counselling-delivery`,
-        { verifiedNotDelivered: true },
-      );
-      return response.json();
-    },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["/api/admin/inquiries"] });
-    },
-  });
-
-  const handleLogout = () => {
-    logout.mutate(undefined, { onSuccess: () => setLocation("/admin/login") });
-  };
-
-  const handleRetryDialogChange = (open: boolean) => {
-    if (!open) {
-      setRetryTargetId(null);
-      setVerifiedNotDelivered(false);
-    }
-  };
-
-  if (session.isLoading) {
-    return (
-      <div className="min-h-screen bg-[#0e0a07] flex items-center justify-center px-4" data-testid="page-admin-login">
-        <p className="text-white/60">Checking administrator access…</p>
-      </div>
-    );
-  }
-  if (session.isError || !session.data || !isAdmin) {
-    return (
-      <div className="min-h-screen bg-[#0e0a07] flex items-center justify-center px-4" data-testid="page-admin-login">
-        <div className="w-full max-w-sm text-center">
-          <h1 className="text-white font-serif text-2xl font-bold">Leads Dashboard</h1>
-          <p className="text-white/55 text-sm mt-2" role={session.data && !isAdmin ? "alert" : undefined}>
-            {session.isError
-              ? "We could not verify your session."
-              : session.data
-                ? "Access denied. This account does not have Leads Dashboard administrator access."
-                : "Sign in with your Aroma Institute account to continue."}
-          </p>
-          <a href="/admin/login" className="inline-flex mt-6 h-11 items-center justify-center rounded-lg bg-amber-400 px-5 font-bold text-[#0e0a07]">
-            Continue to sign in
-          </a>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-[#0f0f0f] text-white" data-testid="page-admin-dashboard">
-      {/* Top bar */}
-      <div className="border-b border-white/10 bg-[#0e0a07]">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="font-serif font-bold text-lg text-white leading-none">Leads Dashboard</h1>
-            <p className="text-white/40 text-xs mt-0.5">Aroma Institute of Cafe & Hospitality Management</p>
-          </div>
-          <div className="flex items-center gap-3">
-            {data && data.length > 0 && (
-              <button
-                onClick={() => exportCSV(data)}
-                className="flex items-center gap-2 bg-white/8 hover:bg-white/12 border border-white/15 text-white/80 text-sm px-4 py-2 rounded-lg transition-colors"
-                data-testid="admin-button-export"
-              >
-                <Download className="h-4 w-4" />
-                Export CSV
-              </button>
-            )}
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-2 text-white/50 hover:text-white/80 text-sm px-3 py-2 rounded-lg transition-colors"
-              data-testid="admin-button-logout"
-            >
-              <LogOut className="h-4 w-4" />
-              Logout
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="max-w-6xl mx-auto px-4 py-8">
-        {isError && (
-          <div className="mb-5 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300" role="alert">
-            Unable to load the leads dashboard. Check your administrator session and try again.
-          </div>
-        )}
-        {/* Stats */}
-        {data && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
-            {[
-              { icon: Users, label: "Total Leads", value: data.length },
-              {
-                icon: BookOpen,
-                label: "Programs",
-                value: new Set(data.map((d) => d.programInterest)).size,
-              },
-              {
-                icon: MessageSquare,
-                label: "With Message",
-                value: data.filter((d) => d.message).length,
-              },
-              {
-                icon: Mail,
-                label: "Latest Lead",
-                value: data[0]?.name?.split(" ")[0] ?? "—",
-              },
-            ].map(({ icon: Icon, label, value }) => (
-              <div key={label} className="bg-white/5 border border-white/10 rounded-xl p-4" data-testid={`stat-${label.toLowerCase().replace(/ /g, "-")}`}>
-                <div className="flex items-center gap-2 mb-2">
-                  <Icon className="h-4 w-4 text-amber-400" />
-                  <span className="text-white/50 text-xs uppercase tracking-wide">{label}</span>
-                </div>
-                <p className="text-white font-bold text-xl">{value}</p>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Table */}
-        {isLoading ? (
-          <div className="text-center py-20 text-white/40">Loading leads...</div>
-        ) : data && data.length === 0 ? (
-          <div className="text-center py-20 text-white/40">No leads yet.</div>
-        ) : data ? (
-          <div className="bg-white/5 border border-white/10 rounded-2xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm" data-testid="admin-leads-table">
-                <thead>
-                  <tr className="border-b border-white/10 bg-white/5">
-                    <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">#</th>
-                    <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Name</th>
-                    <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Email</th>
-                    <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Phone</th>
-                    <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Program</th>
-                    <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Message</th>
-                    <th className="text-left px-5 py-3.5 text-white/50 font-medium text-xs uppercase tracking-wide">Webhook delivery</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.map((lead, i) => (
-                    <tr
-                      key={lead.id}
-                      className={`border-b border-white/5 last:border-0 hover:bg-white/5 transition-colors`}
-                      data-testid={`lead-row-${lead.id}`}
-                    >
-                      <td className="px-5 py-4 text-white/30 text-xs">{lead.id}</td>
-                      <td className="px-5 py-4 font-medium text-white">{lead.name}</td>
-                      <td className="px-5 py-4">
-                        {lead.email ? (
-                          <a href={`mailto:${lead.email}`} className="text-amber-400/80 hover:text-amber-400 transition-colors flex items-center gap-1.5">
-                            <Mail className="h-3 w-3 shrink-0" />
-                            {lead.email}
-                          </a>
-                        ) : (
-                          <span className="text-white/30">—</span>
-                        )}
-                      </td>
-                      <td className="px-5 py-4">
-                        <a href={`tel:${lead.phone}`} className="text-white/70 hover:text-white transition-colors flex items-center gap-1.5">
-                          <Phone className="h-3 w-3 shrink-0" />
-                          {lead.phone}
-                        </a>
-                      </td>
-                      <td className="px-5 py-4">
-                        <span className="inline-block bg-amber-400/10 border border-amber-400/20 text-amber-400 text-xs px-2.5 py-1 rounded-full whitespace-nowrap">
-                          {lead.programInterest}
-                        </span>
-                      </td>
-                      <td className="px-5 py-4 text-white/50 max-w-sm whitespace-normal">
-                        <p>{lead.message || <span className="text-white/20 italic">—</span>}</p>
-                        <LeadJourneySummary journey={lead.journey} />
-                        {lead.counsellingAnswers && (
-                          <details className="mt-2">
-                            <summary
-                              className="cursor-pointer text-xs font-semibold text-amber-400 hover:text-amber-300"
-                              data-testid={`lead-questionnaire-${lead.id}`}
-                            >
-                              View counselling answers
-                            </summary>
-                            <dl className="mt-3 space-y-2 text-xs">
-                              {Object.entries(lead.counsellingAnswers)
-                                .filter(([, value]) => value !== undefined && value !== "")
-                                .map(([key, value]) => (
-                                  <div key={key}>
-                                    <dt className="font-semibold text-white/70">
-                                      {counsellingFieldLabels[key] ?? key}
-                                    </dt>
-                                    <dd className="mt-0.5 break-words text-white/50">
-                                      {formatCounsellingAnswer(key, value)}
-                                    </dd>
-                                  </div>
-                                ))}
-                            </dl>
-                          </details>
-                        )}
-                      </td>
-                      <td className="px-5 py-4 min-w-56">
-                        {lead.counsellingAnswers ? (
-                          <div className="space-y-1.5">
-                            <p className={`font-semibold ${
-                              lead.counsellingDeliveryStatus === "failed"
-                                ? "text-red-300"
-                                : lead.counsellingDeliveryStatus === "acknowledged"
-                                  ? "text-emerald-300"
-                                  : lead.counsellingDeliveryStatus === "pending"
-                                    ? "text-amber-200"
-                                    : "text-white/70"
-                            }`}>
-                              {deliveryStatusLabel(
-                                lead.counsellingDeliveryStatus,
-                                Boolean(lead.counsellingAnswers),
-                              )}
-                            </p>
-                            {lead.counsellingDeliveryAttempts > 0 && (
-                              <p className="text-xs text-white/45">
-                                Attempts: {lead.counsellingDeliveryAttempts}
-                              </p>
-                            )}
-                            {formatDeliveryTimestamp(lead.counsellingDeliveryLastAttemptAt) && (
-                              <p className="text-xs text-white/45">
-                                Last attempt: {formatDeliveryTimestamp(lead.counsellingDeliveryLastAttemptAt)}
-                              </p>
-                            )}
-                            {lead.counsellingDeliveryLastResult && (
-                              <p className="text-xs text-white/55">
-                                Latest result: {lead.counsellingDeliveryLastResult}
-                              </p>
-                            )}
-                            {lead.deliveryAttemptHistory.length > 0 && (
-                              <details className="mt-2">
-                                <summary className="cursor-pointer text-xs font-semibold text-white/55 hover:text-white/80">
-                                  Delivery attempt history ({lead.deliveryAttemptHistory.length})
-                                </summary>
-                                <ol className="mt-2 space-y-2 text-xs text-white/55">
-                                  {lead.deliveryAttemptHistory.map((attempt) => (
-                                    <li key={attempt.id} className="rounded-md border border-white/10 p-2">
-                                      <p className="font-semibold text-white/75">
-                                        Attempt {attempt.attemptNumber}: {deliveryStatusLabel(
-                                          attempt.deliveryState,
-                                          true,
-                                        )}
-                                      </p>
-                                      <p>Started: {formatDeliveryTimestamp(attempt.attemptedAt) ?? "—"}</p>
-                                      <p>Response: {formatDeliveryTimestamp(attempt.responseAt) ?? "No HTTP response"}</p>
-                                      {attempt.httpStatus !== null && <p>HTTP status: {attempt.httpStatus}</p>}
-                                      {attempt.errorSummary && <p>Error: {attempt.errorSummary}</p>}
-                                    </li>
-                                  ))}
-                                </ol>
-                              </details>
-                            )}
-                            {formatDeliveryTimestamp(lead.counsellingDeliveryLastVerifiedAt) && (
-                              <p className="text-xs text-white/45">
-                                Admin verification: {formatDeliveryTimestamp(lead.counsellingDeliveryLastVerifiedAt)}
-                              </p>
-                            )}
-                            {(lead.counsellingDeliveryStatus === "untracked"
-                              || lead.counsellingDeliveryStatus === "not_applicable") && (
-                              <p className="text-xs text-white/40">
-                                Delivery outcome was not recorded. Do not resend; ask the lead to submit the form again.
-                              </p>
-                            )}
-                            {lead.counsellingDeliveryStatus === "failed" && (
-                              <button
-                                type="button"
-                                className="mt-1 rounded-md border border-amber-400/40 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-400/10 disabled:cursor-not-allowed disabled:opacity-50"
-                                disabled={retryDelivery.isPending && retryDelivery.variables?.inquiryId === lead.id}
-                                onClick={() => {
-                                  setRetryTargetId(lead.id);
-                                  setVerifiedNotDelivered(false);
-                                }}
-                                data-testid={`admin-retry-counselling-${lead.id}`}
-                              >
-                                {retryDelivery.isPending && retryDelivery.variables?.inquiryId === lead.id
-                                  ? "Retrying…"
-                                  : "Review & retry"}
-                              </button>
-                            )}
-                            {retryDelivery.isError && retryDelivery.variables?.inquiryId === lead.id && (
-                              <p className="text-xs text-red-300" role="alert">
-                                {retryDelivery.error instanceof Error
-                                  ? retryDelivery.error.message
-                                  : "Retry could not be started."}
-                              </p>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-white/30">Not applicable</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        ) : null}
-      </div>
-      <AlertDialog
-        open={retryTargetId !== null}
-        onOpenChange={handleRetryDialogChange}
-      >
-        <AlertDialogContent className="border-[#624725]/60 bg-[#19110b] text-[#fff3df]">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Verify before resending</AlertDialogTitle>
-            <AlertDialogDescription className="text-[#d2c2ad]">
-              This sends the saved inquiry again using its existing submission ID. It will not create another inquiry. Check AVNI/Supabase first; only continue if this submission is not already there.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <label className="flex items-start gap-3 text-sm leading-6 text-[#e7d8c5]">
-            <input
-              type="checkbox"
-              className="mt-1 size-4 shrink-0 accent-amber-400"
-              checked={verifiedNotDelivered}
-              onChange={(event) => setVerifiedNotDelivered(event.target.checked)}
-              data-testid="admin-confirm-not-delivered"
-            />
-            I verified this is the correct lead and confirmed it has not already been received by AVNI/Supabase.
-          </label>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={retryDelivery.isPending}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              disabled={!verifiedNotDelivered || retryDelivery.isPending || retryTargetId === null}
-              onClick={() => {
-                if (verifiedNotDelivered && retryTargetId !== null) {
-                  retryDelivery.mutate({ inquiryId: retryTargetId });
-                }
-              }}
-              data-testid="admin-confirm-retry"
-            >
-              {retryDelivery.isPending ? "Sending…" : "Resend saved inquiry"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </div>
+  const hadAdmin = useRef(false);
+  const retryDialogRef = useRef<HTMLElement | null>(null);
+  const detailReturnFocus = useRef<HTMLButtonElement | null>(null);
+  const detailDialogOpen = useRef(false);
+  const [filters, setFilters] = useState<Filters>(defaultFilters);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mobileDetail, setMobileDetail] = useState(false);
+  const [accessCheckBlocked, setAccessCheckBlocked] = useState(false);
+  const [retryTarget, setRetryTarget] = useState<number | null>(null);
+  const [retryConfirmed, setRetryConfirmed] = useState(false);
+  const [retryPersonConfirmed, setRetryPersonConfirmed] = useState(false);
+  const [retryError, setRetryError] = useState("");
+  const leadsQuery = useCrmLeads(filters, isAdmin && !accessCheckBlocked);
+  const detailQuery = useCrmDetail(selectedId, isAdmin && !accessCheckBlocked);
+  const update = useCrmUpdate();
+  const retry = useCrmRetry();
+  const leads = leadsQuery.data?.items ?? [];
+  const lead = detailQuery.data?.lead;
+  const crmForbidden = [leadsQuery.error, detailQuery.error].some(
+    (error) => error instanceof CrmHttpError && (error.status === 401 || error.status === 403),
   );
+
+  useEffect(() => {
+    if (isAdmin) { hadAdmin.current = true; return; }
+    if (hadAdmin.current) {
+      clearPrivateCache(client);
+      setSelectedId(null);
+      setMobileDetail(false);
+      hadAdmin.current = false;
+    }
+  }, [isAdmin, client]);
+  useEffect(() => {
+    if (!selectedId && leads.length) setSelectedId(leads[0].id);
+    else if (selectedId && leads.length && !leads.some((item) => item.id === selectedId) && !detailQuery.isLoading) setSelectedId(leads[0].id);
+  }, [leads, selectedId, detailQuery.isLoading]);
+  useEffect(() => {
+    if (!isAdmin || !crmForbidden || accessCheckBlocked) return;
+    setAccessCheckBlocked(true);
+    clearPrivateCache(client);
+    setSelectedId(null);
+    setMobileDetail(false);
+    void session.refetch();
+  }, [isAdmin, crmForbidden, accessCheckBlocked, client, session.refetch]);
+  useEffect(() => {
+    if (retryTarget === null) return;
+    const dialog = retryDialogRef.current;
+    dialog?.querySelector<HTMLInputElement>('input[type="checkbox"]')?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !retry.isPending) {
+        event.preventDefault();
+        setRetryTarget(null);
+      }
+      if (event.key === "Tab" && dialog) {
+        const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)'));
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [retryTarget, retry.isPending]);
+  useEffect(() => {
+    if (!mobileDetail) {
+      if (detailDialogOpen.current) detailReturnFocus.current?.focus();
+      detailDialogOpen.current = false;
+      return;
+    }
+    detailDialogOpen.current = true;
+    if (retryTarget !== null) return;
+    const panel = document.querySelector<HTMLElement>('[data-testid="crm-detail"]');
+    const close = panel?.querySelector<HTMLElement>(".crm-mobile-close");
+    (close ?? panel)?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMobileDetail(false);
+      }
+      if (event.key === "Tab" && panel) {
+        const focusable = Array.from(panel.querySelectorAll<HTMLElement>('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]'));
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [mobileDetail, selectedId, detailQuery.isLoading, retryTarget]);
+
+  const setFilter = (key: keyof Filters, value: string) => setFilters((current) => ({ ...current, [key]: value, page: 1 }));
+  const reset = () => setFilters(defaultFilters);
+  const signOut = () => logout.mutate(undefined, { onSuccess: () => { clearPrivateCache(client); setLocation("/admin/login"); } });
+  const selectLead = (id: string, trigger: HTMLButtonElement) => {
+    detailReturnFocus.current = trigger;
+    setSelectedId(id);
+    setMobileDetail(window.matchMedia("(max-width: 800px)").matches);
+  };
+  if (session.isLoading) return <main className="crm-app"><div className="crm-empty" aria-live="polite"><div className="crm-skeleton" /><strong>Checking admissions access</strong><p>Keeping prospect information private.</p></div></main>;
+  if (session.isError || !session.data || !isAdmin) return (
+    <main className="crm-app" data-testid="page-admin-login"><section className="crm-empty" style={{ minHeight: "100dvh", justifyContent: "center" }}>
+      <span className="crm-brand-mark">A.</span><p className="crm-eyebrow" style={{ marginTop: 18 }}>Aroma Institute</p><strong>Admissions access</strong>
+      <p role={session.data && !isAdmin ? "alert" : undefined}>{session.isError ? "We could not verify your session." : session.data ? "Access denied. This account does not have Leads Dashboard administrator access." : "Sign in with your Aroma Institute administrator account to continue."}</p>
+      <a className="crm-button crm-button-primary" href="/admin/login" style={{ marginTop: 14, textDecoration: "none" }}>Continue to sign in</a>
+    </section></main>
+  );
+  if (accessCheckBlocked || crmForbidden) return (
+    <main className="crm-app" data-testid="page-admin-access-refresh">
+      <section className="crm-empty" style={{ minHeight: "100dvh", justifyContent: "center" }} role="alert">
+        <ShieldCheck size={27} />
+        <strong>Admissions access needs to be checked again.</strong>
+        <p>Applicant details have been hidden and removed from this page. Your administrator session is being refreshed. Sign in again to continue.</p>
+        <a className="crm-button crm-button-primary" href="/admin/login" style={{ marginTop: 12, textDecoration: "none" }}>Continue to sign in</a>
+      </section>
+    </main>
+  );
+
+  const overview = leadsQuery.data?.overview;
+  const caps = leadsQuery.data?.capabilities;
+  const canWrite = Boolean(caps?.crmPersistence);
+  const totalPages = Math.max(1, leadsQuery.data?.totalPages ?? 1);
+  return (
+    <main className="crm-app" data-testid="page-admin-dashboard">
+      <header className="crm-topbar"><div className="crm-wrap crm-topbar-inner">
+        <div className="crm-brand"><span className="crm-brand-mark" aria-hidden="true">A.</span><div className="crm-brand-copy"><strong>AICHM Admissions</strong><span>Prospect desk · Aroma Institute</span></div></div>
+        <div className="crm-top-actions"><span className="crm-connection-tag"><MessageCircleOff size={13} /> Chat not connected</span>
+          <button className="crm-button crm-button-quiet" type="button" onClick={signOut} disabled={logout.isPending} data-testid="admin-button-logout"><LogOut size={16} />{logout.isPending ? "Signing out" : "Sign out"}</button>
+        </div>
+      </div></header>
+      <div className="crm-wrap crm-main">
+        <section className="crm-heading-row"><div><p className="crm-eyebrow">Admissions workspace</p><h1 className="crm-heading">People, not just enquiries.</h1><p className="crm-subheading">Keep the next conversation clear, grounded, and easy to pick up. Counts cover all records, independent of filters.</p></div><span className="crm-connection-tag"><CalendarClock size={13} /> Calendar not connected</span></section>
+        {logout.isError && <div className="crm-error" role="alert">Sign out did not complete. Your administrator session may still be active; try again before leaving this device.</div>}
+        {leadsQuery.isError && <div className="crm-error" role="alert"><strong>Admissions records did not load.</strong> {errorText(leadsQuery.error, "Check your connection and administrator access.")}<button className="crm-text-button" type="button" onClick={() => void leadsQuery.refetch()}>Try again</button></div>}
+        {overview && <section className="crm-counts" aria-label="Global admissions overview">
+          <div className="crm-count"><span className="crm-count-label">Identified people</span><strong className="crm-count-value">{overview.identifiedPeople.toLocaleString()}</strong><span className="crm-count-note">{overview.unresolvedRecords.toLocaleString()} ambiguous or unmatchable records excluded</span></div>
+          <div className="crm-count"><span className="crm-count-label">Total enquiries</span><strong className="crm-count-value">{overview.totalEnquiries.toLocaleString()}</strong><span className="crm-count-note">All recorded submissions</span></div>
+          <div className="crm-count"><span className="crm-count-label">Video watched</span><strong className="crm-count-value">{overview.videoWatched.toLocaleString()}</strong><span className="crm-count-note">Observed playback milestones; not a stage label</span></div>
+          <div className="crm-count"><span className="crm-count-label">Verified forms</span><strong className="crm-count-value">{overview.verifiedForms.toLocaleString()}</strong><span className="crm-count-note">{overview.registeredWithoutForm.toLocaleString()} registered; form not yet recorded</span></div>
+          <div className="crm-count"><span className="crm-count-label">Enrolled stage</span><strong className="crm-count-value">{overview.stageCounts.enrolled.toLocaleString()}</strong><span className="crm-count-note crm-rate">{overview.enrolledPercent === null ? "Rate unavailable" : `${overview.enrolledPercent.toFixed(1)}% descriptive rate`}</span></div>
+        </section>}
+        {overview && <p className="crm-results-caption" style={{ margin: "-12px 0 18px" }}>{stageHelp}{overview.registeredToFormPercent !== null && <> Registered-to-form: {overview.registeredToFormPercent.toFixed(1)}% descriptive rate.</>}</p>}
+        {(leadsQuery.data?.warnings ?? []).map((warning, index) => <div className="crm-warning" role="status" key={`${index}-${warning}`}><AlertTriangle size={16} /><span>{warning}</span></div>)}
+        {caps && (!caps.identityTracking || !caps.videoTracking || !caps.crmPersistence || !caps.calendarBookingVerification) && <div className="crm-warning" role="status"><ShieldCheck size={16} /><span>{[
+          !caps.identityTracking && "Identity linking is unavailable; similar submissions may remain unresolved.",
+          !caps.videoTracking && "VSL milestones are not connected; video-watch transitions require the prospect's exact confirmation.",
+          !caps.crmPersistence && "CRM persistence is unavailable. Profile writes are disabled.",
+          !caps.calendarBookingVerification && "Counselling booking cannot be verified. Do not mark a booking based on an unverified calendar.",
+        ].filter(Boolean).join(" ")}</span></div>}
+        <div className="crm-workspace">
+          <section className="crm-list-panel" aria-label="Admissions leads">
+            <div className="crm-filterbar">
+              <div className="crm-search-wrap"><Search size={17} aria-hidden="true" /><input className="crm-input crm-search" type="search" placeholder="Name, phone, email…" value={filters.q} onChange={(event) => setFilter("q", event.target.value)} aria-label="Search leads" data-testid="crm-search" /></div>
+              <details className="crm-filter-drawer">
+                <summary><SlidersHorizontal size={14} /> Filters <ChevronDown size={13} /></summary>
+                <div className="crm-filter-drawer-body">
+                  <div className="crm-filter-grid">
+                    <select className="crm-select" aria-label="Filter by stage" value={filters.stage} onChange={(event) => setFilter("stage", event.target.value)} data-testid="crm-filter-stage"><option value="">Every stage</option>{stages.map((item) => <option key={item} value={item}>{CRM_STAGE_LABELS[item]}</option>)}</select>
+                    <select className="crm-select" aria-label="Filter by program" value={filters.program} onChange={(event) => setFilter("program", event.target.value)}><option value="">Every program</option>{(leadsQuery.data?.options.programs ?? []).map((item) => <option value={item} key={item}>{item}</option>)}</select>
+                    <select className="crm-select" aria-label="Filter by source" value={filters.source} onChange={(event) => setFilter("source", event.target.value)}><option value="">Every source</option>{(leadsQuery.data?.options.sources ?? []).map((item) => <option value={item} key={item}>{item}</option>)}</select>
+                    <select className="crm-select" aria-label="Follow-up status" value={filters.followUp} onChange={(event) => setFilter("followUp", event.target.value)} data-testid="crm-followup"><option value="">Any follow-up</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="upcoming">Upcoming</option><option value="none">No follow-up</option></select>
+                    <select className="crm-select" aria-label="Filter by owner" value={filters.owner} onChange={(event) => setFilter("owner", event.target.value)} data-testid="crm-owner"><option value="">Every owner</option><option value="unassigned">Unassigned</option>{(leadsQuery.data?.options.owners ?? []).map((item) => <option value={String(item.id)} key={item.id}>{item.name}</option>)}</select>
+                    <select className="crm-select" aria-label="Sort leads" value={filters.sort} onChange={(event) => setFilter("sort", event.target.value)}><option value="recent">Recently active</option><option value="oldest">Oldest first</option><option value="name">Name A–Z</option><option value="followup">Follow-up soonest</option></select>
+                  </div>
+                  <details style={{ marginTop: 8 }}><summary className="crm-text-button" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}><SlidersHorizontal size={14} /> Date range <ChevronDown size={13} /></summary>
+                    <div className="crm-filter-grid" style={{ marginTop: 7 }}><label className="crm-field"><span className="crm-field-label">From</span><input className="crm-input" type="date" value={filters.dateFrom} onChange={(event) => setFilter("dateFrom", event.target.value)} /></label><label className="crm-field"><span className="crm-field-label">To</span><input className="crm-input" type="date" value={filters.dateTo} onChange={(event) => setFilter("dateTo", event.target.value)} /></label></div>
+                  </details>
+                </div>
+              </details>
+              <div className="crm-filter-actions"><span className="crm-results-caption">{leadsQuery.data ? `${leadsQuery.data.total.toLocaleString()} matches` : "Loading matches"}</span><button className="crm-text-button" type="button" onClick={reset}>Clear filters</button></div>
+            </div>
+            <div className="crm-lead-list" aria-live="polite">
+              {leadsQuery.isLoading ? <><div className="crm-skeleton" /><div className="crm-skeleton" /><div className="crm-skeleton" /></> : leadsQuery.data && !leads.length ? <div className="crm-empty"><Users size={23} /><strong>No people match these filters</strong><p>Try another stage, owner, or search. New enquiries appear here when recorded.</p><button type="button" className="crm-button" onClick={reset}>Show all records</button></div> : leads.map((item) => (
+                <button className="crm-lead-card" type="button" key={item.id} onClick={(event) => selectLead(item.id, event.currentTarget)} aria-current={item.id === selectedId} data-testid="crm-lead-card">
+                  <span className="crm-lead-card-head"><span><span className="crm-lead-name">{item.name || "Name not recorded"}</span><span className="crm-lead-meta">{item.phone || item.email || "No contact details"}{item.phone && item.email ? ` · ${item.email}` : ""}</span></span>{item.followUpAt && <span className="crm-follow-flag"><Clock3 size={13} />{formatDate(item.followUpAt)}</span>}</span>
+                  <span className="crm-lead-foot"><span className="crm-stage-pill" data-stage={item.stage}>{CRM_STAGE_LABELS[item.stage]}</span><span className="crm-stage-source">{stageOrigin(item)}</span><span className="crm-card-program">{item.programs[0] || "Program not recorded"} · {item.ownerName || "Unassigned"}</span></span>
+                </button>
+              ))}
+            </div>
+            <div className="crm-list-footer"><span className="crm-results-caption">{leadsQuery.data ? `Page ${leadsQuery.data.page} of ${totalPages}` : ""}</span><div className="crm-page-controls">
+              <button className="crm-page-button" type="button" aria-label="Previous page" disabled={filters.page <= 1 || leadsQuery.isFetching} onClick={() => setFilters((current) => ({ ...current, page: current.page - 1 }))}><ArrowLeft size={16} /></button><span className="crm-page-number">{leadsQuery.data ? `${leadsQuery.data.page} / ${totalPages}` : "—"}</span>
+              <button className="crm-page-button" type="button" aria-label="Next page" data-testid="crm-next-page" disabled={filters.page >= totalPages || leadsQuery.isFetching} onClick={() => setFilters((current) => ({ ...current, page: current.page + 1 }))}><ArrowRight size={16} /></button>
+            </div></div>
+          </section>
+          <section
+            className={`crm-detail-panel ${mobileDetail ? "crm-detail-open" : ""}`}
+            role={mobileDetail && retryTarget === null ? "dialog" : undefined}
+            aria-modal={mobileDetail && retryTarget === null ? true : undefined}
+            aria-labelledby={mobileDetail && retryTarget === null && lead ? "crm-detail-title" : undefined}
+            aria-hidden={retryTarget !== null ? true : undefined}
+            tabIndex={mobileDetail ? -1 : undefined}
+            aria-label={mobileDetail ? (lead?.name ? `${lead.name} details` : "Loading prospect details") : "Selected person"}
+            data-testid="crm-detail"
+          >
+            {detailQuery.isLoading ? <div className="crm-empty"><button className="crm-button crm-mobile-close" type="button" onClick={() => setMobileDetail(false)}><X size={16} /> Close prospect detail</button><div className="crm-skeleton" /><strong>Opening prospect record</strong></div> : detailQuery.isError ? <div className="crm-empty"><button className="crm-button crm-mobile-close" type="button" onClick={() => setMobileDetail(false)}><X size={16} /> Close prospect detail</button><AlertTriangle size={22} /><strong>Could not open this record</strong><p>{errorText(detailQuery.error, "Try loading it again.")}</p><button className="crm-button" type="button" onClick={() => void detailQuery.refetch()}>Try again</button></div> : lead && detailQuery.data ? <LeadDetail
+              lead={lead} detail={detailQuery.data} owners={leadsQuery.data?.options.owners ?? []} capabilities={detailQuery.data.capabilities} canWrite={canWrite && detailQuery.data.capabilities.crmPersistence}
+              pending={update.isPending} updateError={update.isError ? errorText(update.error, "The profile could not be saved.") : ""}
+              onSave={(patch) => update.mutate({ id: lead.id, update: patch })}
+              onRetry={(id) => { setRetryTarget(id); setRetryConfirmed(false); setRetryPersonConfirmed(false); setRetryError(""); }}
+              retryPending={retry.isPending} retryError={retryError || (retry.isError ? errorText(retry.error, "Retry could not be started.") : "")}
+              retryId={retry.variables} onClose={() => setMobileDetail(false)}
+            /> : <div className="crm-empty"><Coffee size={24} /><strong>Select a person</strong><p>Choose a lead to see contact history, verified journey, and next actions.</p></div>}
+          </section>
+        </div>
+      </div>
+      {retryTarget !== null && <div className="crm-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !retry.isPending) setRetryTarget(null); }}>
+        <section ref={retryDialogRef} className="crm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="retry-title" aria-describedby="retry-copy">
+          <h2 id="retry-title">Verify before resending</h2><p id="retry-copy">This resends the saved counselling inquiry using its existing submission ID; it will not create another inquiry. Check AVNI/Supabase first. Continue only if the correct prospect’s submission has not already arrived.</p>
+          <label className="crm-checkline"><input type="checkbox" checked={retryPersonConfirmed} onChange={(event) => setRetryPersonConfirmed(event.target.checked)} /><span>I confirmed this is the correct prospect and inquiry.</span></label>
+          <label className="crm-checkline"><input type="checkbox" checked={retryConfirmed} onChange={(event) => setRetryConfirmed(event.target.checked)} /><span>I checked downstream and verified this submission has not been received by AVNI/Supabase.</span></label>
+          {retryError && <div className="crm-error" role="alert">{retryError}</div>}
+          <div className="crm-dialog-actions"><button className="crm-button" type="button" disabled={retry.isPending} onClick={() => setRetryTarget(null)}>Cancel</button><button className="crm-button crm-button-primary" type="button" disabled={!retryConfirmed || !retryPersonConfirmed || retry.isPending} data-testid="admin-confirm-retry" onClick={() => {
+            if (retryTarget !== null && retryConfirmed && retryPersonConfirmed) retry.mutate(retryTarget, { onSuccess: () => { setRetryError("Retry submitted. Status refreshes from the server."); setRetryTarget(null); } });
+          }}>{retry.isPending ? "Resending" : "Resend saved inquiry"}</button></div>
+        </section>
+      </div>}
+    </main>
+  );
+}
+
+function LeadDetail(props: {
+  lead: CrmLead; detail: CrmDetail; owners: { id: number; name: string }[]; capabilities: CrmCapabilities; canWrite: boolean; pending: boolean; updateError: string;
+  onSave: (patch: CrmUpdate) => void; onRetry: (id: number) => void; retryPending: boolean; retryError: string; retryId: number | undefined; onClose: () => void;
+}) {
+  const { lead, detail } = props;
+  const [stage, setStage] = useState<CrmStage>(lead.stage);
+  const [owner, setOwner] = useState(lead.ownerId === null ? "" : String(lead.ownerId));
+  const [followUp, setFollowUp] = useState(toLocalInput(lead.followUpAt));
+  const [note, setNote] = useState("");
+  const [reason, setReason] = useState("");
+  const [evidenceKind, setEvidenceKind] = useState<"tracked_video" | "prospect_confirmation">(props.capabilities.videoTracking ? "tracked_video" : "prospect_confirmation");
+  const [reference, setReference] = useState("");
+  const [occurredAt, setOccurredAt] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [saveMessage, setSaveMessage] = useState("");
+  const [savingVersion, setSavingVersion] = useState<number | null>(null);
+  useEffect(() => {
+    setStage(lead.stage); setOwner(lead.ownerId === null ? "" : String(lead.ownerId)); setFollowUp(toLocalInput(lead.followUpAt));
+    setNote(""); setReason(""); setEvidenceKind(props.capabilities.videoTracking ? "tracked_video" : "prospect_confirmation"); setReference(""); setOccurredAt(""); setConfirmed(false); setSaveMessage(""); setSavingVersion(null);
+  }, [lead.id, lead.version, props.capabilities.videoTracking]);
+  useEffect(() => {
+    if (savingVersion !== null && lead.version !== savingVersion) { setSaveMessage("Saved and recorded in the activity log."); setNote(""); setReason(""); setSavingVersion(null); }
+  }, [lead.version, savingVersion]);
+  const stageChanged = stage !== lead.stage;
+  const ownerChanged = owner !== (lead.ownerId === null ? "" : String(lead.ownerId));
+  const followChanged = followUp !== toLocalInput(lead.followUpAt);
+  const dirty = stageChanged || ownerChanged || followChanged || Boolean(note.trim());
+  const blocked = !props.canWrite || (stage === "counselling_booked" && stageChanged) || (stage === "form_submitted" && stageChanged && !lead.hasVerifiedForm);
+  let evidenceError = "";
+  if (stageChanged && reason.trim().length < 3) evidenceError = "Add a reason of at least 3 characters for this stage change.";
+  if (stageChanged && stage === "vsl_shared" && (!confirmed || reference.trim().length < 3 || !occurredAt)) evidenceError = "Confirm the link was actually sent, add an external message reference of at least 3 characters, and record when it happened.";
+  if (stageChanged && stage === "vsl_watched" && evidenceKind === "tracked_video" && !reference.trim()) evidenceError = "Add the tracked video record reference. The server verifies the viewing milestone.";
+  if (stageChanged && stage === "vsl_watched" && evidenceKind === "prospect_confirmation" && (reference.trim().length < 10 || !occurredAt)) evidenceError = "Record the prospect’s clear self-reported quote (at least 10 characters) and when they said it.";
+  if (stageChanged && (stage === "counselling_attended" || stage === "enrolled") && (!confirmed || reference.trim().length < 10 || !occurredAt)) evidenceError = "Confirm the staff record and provide a reference of at least 10 characters and occurrence time.";
+  const save = (event: FormEvent) => {
+    event.preventDefault();
+    if (!dirty || blocked || evidenceError) return;
+    const patch: CrmUpdate = { expectedVersion: lead.version };
+    if (stageChanged) patch.stage = stage;
+    if (ownerChanged) patch.ownerId = owner ? Number(owner) : null;
+    if (followChanged) patch.followUpAt = followUp ? new Date(followUp).toISOString() : null;
+    if (note.trim()) patch.note = note.trim();
+    if (stageChanged) {
+      patch.reason = reason.trim();
+      if (stage === "vsl_shared") patch.evidence = { kind: "link_sent", reference: reference.trim(), occurredAt: new Date(occurredAt).toISOString(), confirmed: true };
+      else if (stage === "vsl_watched") patch.evidence = evidenceKind === "tracked_video"
+        ? { kind: "tracked_video", reference: reference.trim() }
+        : { kind: "prospect_confirmation", reference: reference.trim(), occurredAt: new Date(occurredAt).toISOString(), confirmed: true };
+      else if (stage === "counselling_attended" || stage === "enrolled") patch.evidence = { kind: "staff_record", reference: reference.trim(), occurredAt: new Date(occurredAt).toISOString(), confirmed: true };
+    }
+    props.onSave(patch); setSavingVersion(lead.version); setSaveMessage("Saving changes…");
+  };
+  const deliveryLabel = (status: string) => ({ acknowledged: "Acknowledged", sent: "Sent (acknowledgement not verified)", failed: "Failed", pending: "Pending", untracked: "Not tracked", not_applicable: "Not applicable", sending: "Sending", retrying: "Retrying" }[status] || status);
+  return <>
+      <div className="crm-detail-top"><div className="crm-detail-toprow"><div><p className="crm-eyebrow">Prospect record · {lead.inquiryCount} {lead.inquiryCount === 1 ? "enquiry" : "enquiries"}</p><h2 className="crm-detail-name" id="crm-detail-title" tabIndex={-1}>{lead.name || "Name not recorded"}</h2><div className="crm-detail-contact">{lead.phone && <a href={`tel:${lead.phone}`}><Phone size={13} /> {lead.phone}</a>}{lead.email && <a href={`mailto:${lead.email}`}><Mail size={13} /> {lead.email}</a>}<span>{lead.ownerName || "Unassigned"}</span></div></div>
+      <div style={{ display: "flex", gap: 7, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "flex-end" }}><span className="crm-identity" data-identity={lead.identityStatus}>{identityText(lead.identityStatus)}</span><span className="crm-stage-source crm-stage-source-detail">{stageOrigin(lead)}</span><button className="crm-icon-button crm-mobile-close" type="button" aria-label="Close prospect detail" onClick={props.onClose}><X size={18} /></button></div>
+    </div></div>
+    <div className="crm-detail-content">
+      {detail.warnings.map((warning) => <div className="crm-warning" role="status" key={warning}><AlertTriangle size={15} /><span>{warning}</span></div>)}
+      {!props.canWrite && <div className="crm-error" role="alert">Server CRM persistence is unavailable. Editing is disabled to avoid an unrecorded change.</div>}
+      <JourneyPanel journey={detail.journey} />
+      <form onSubmit={save}><div className="crm-detail-grid">
+        <label className="crm-field"><span className="crm-field-label">Current stage</span><select className="crm-select" value={stage} onChange={(event) => { setStage(event.target.value as CrmStage); setSaveMessage(""); }} data-testid="crm-stage">{stages.map((item) => <option key={item} value={item} disabled={item === "counselling_booked" && lead.stage !== item}>{CRM_STAGE_LABELS[item]}{item === "counselling_booked" ? " · unavailable" : ""}</option>)}</select></label>
+        <label className="crm-field"><span className="crm-field-label">Owner</span><select className="crm-select" value={owner} onChange={(event) => setOwner(event.target.value)} data-testid="crm-owner"><option value="">Unassigned</option>{props.owners.map((person) => <option key={person.id} value={String(person.id)}>{person.name}</option>)}</select></label>
+        <label className="crm-field"><span className="crm-field-label">Follow-up</span><input className="crm-input" type="datetime-local" value={followUp} onChange={(event) => setFollowUp(event.target.value)} /></label>
+        <div className="crm-field"><span className="crm-field-label">Next context</span><div className="crm-info" style={{ margin: 0 }}>Last activity {formatDate(lead.lastActivityAt, true)} · {lead.programs[0] || "Program not recorded"}</div></div>
+        {stageChanged && stage === "vsl_shared" && <>
+          <label className="crm-field crm-field-wide"><span className="crm-field-label">External message reference</span><input className="crm-input" minLength={3} value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Message or activity reference (at least 3 characters)" /></label>
+          <label className="crm-field"><span className="crm-field-label">Sent at</span><input className="crm-input" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></label>
+          <label className="crm-checkline crm-field-wide"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>I confirm the VSL link was actually sent to this prospect.</span></label>
+        </>}
+        {stageChanged && stage === "vsl_watched" && <>
+          <label className="crm-field"><span className="crm-field-label">Evidence source</span><select className="crm-select" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as typeof evidenceKind)}><option value="tracked_video" disabled={!props.capabilities.videoTracking}>Tracked video record{props.capabilities.videoTracking ? "" : " · unavailable"}</option><option value="prospect_confirmation">Prospect confirmation</option></select></label>
+          <label className="crm-field"><span className="crm-field-label">{evidenceKind === "tracked_video" ? "Video record reference" : "Clear quote from prospect"}</span><input className="crm-input" minLength={evidenceKind === "prospect_confirmation" ? 10 : undefined} value={reference} onChange={(event) => setReference(event.target.value)} placeholder={evidenceKind === "tracked_video" ? "Tracked milestone reference" : "Exact self-reported quote (at least 10 characters)"} /></label>
+          {evidenceKind === "prospect_confirmation" ? <label className="crm-field"><span className="crm-field-label">Confirmed at</span><input className="crm-input" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></label> : <p className="crm-info crm-field-wide">The server verifies the tracked record reached the required viewing milestone. A reference alone does not establish completion.</p>}
+        </>}
+        {stageChanged && stage === "form_submitted" && <div className={lead.hasVerifiedForm ? "crm-info crm-field-wide" : "crm-error crm-field-wide"}>{lead.hasVerifiedForm ? `Verified timestamped form record is present${lead.questionnaireCompletedAt ? ` (${formatDate(lead.questionnaireCompletedAt, true)})` : ""}.` : "Cannot mark form submitted: this person has no stored, timestamped verified form record."}</div>}
+        {stageChanged && stage === "counselling_booked" && <div className="crm-error crm-field-wide">Booking status is locked. There is no connected, verified Cal.com booking path, so do not record a booking here.</div>}
+        {stageChanged && (stage === "counselling_attended" || stage === "enrolled") && <>
+          <label className="crm-field crm-field-wide"><span className="crm-field-label">Staff record reference</span><input className="crm-input" minLength={10} value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Confirmed attendance or enrollment record (at least 10 characters)" /></label>
+          <label className="crm-field"><span className="crm-field-label">Occurred at</span><input className="crm-input" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></label>
+          <label className="crm-checkline"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>I confirmed this in a staff record.</span></label>
+        </>}
+        {stageChanged && <label className="crm-field crm-field-wide"><span className="crm-field-label">Why is this stage changing?</span><input className="crm-input" minLength={3} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Short, factual reason (at least 3 characters)" /></label>}
+        <label className="crm-field crm-field-wide"><span className="crm-field-label">Private staff note · audited</span><textarea className="crm-textarea" value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add context for the next admissions conversation…" data-testid="crm-note" /></label>
+      </div>
+        {evidenceError && stageChanged && <div className="crm-info" role="status">{evidenceError}</div>}
+        {props.updateError && <div className="crm-error" role="alert">{props.updateError}</div>}
+        <div className="crm-save-row"><span className="crm-save-status" role="status">{saveMessage || (dirty ? "Changes are not saved yet." : `Record version ${lead.version} · nothing pending`)}</span><button className="crm-button crm-button-primary" type="submit" disabled={!dirty || props.pending || blocked || Boolean(evidenceError)} data-testid="crm-save">{props.pending ? "Saving" : <><Check size={15} /> Save changes</>}</button></div>
+      </form>
+      <h3 className="crm-section-heading"><Clock3 size={15} /> Activity timeline</h3>
+      {detail.activities.length ? <ol className="crm-timeline">{detail.activities.map((item) => <li className="crm-timeline-item" key={item.id}><div className="crm-timeline-title">{item.title}</div><div className="crm-timeline-meta">{formatDate(item.at, true)} · {item.actorName || (item.source === "verified_system" ? "Verified system" : "Enquiry record")}</div>{item.body && <div className="crm-timeline-body">{item.body}</div>}</li>)}</ol> : <p className="crm-results-caption">No activity has been recorded for this person yet.</p>}
+      <h3 className="crm-section-heading"><Users size={15} /> Enquiry history</h3>
+      {detail.inquiries.map((inquiry) => <article className="crm-inquiry" key={inquiry.id}>
+        <div className="crm-inquiry-header"><div><h4>{inquiry.programInterest || "Program interest not recorded"}</h4><p>Enquiry {inquiry.id} · submitted {formatDate(inquiry.counsellingSubmittedAt, true)}</p></div>{inquiry.counsellingAnswers && <span className="crm-connection-tag">{deliveryLabel(inquiry.counsellingDeliveryStatus)}</span>}</div>
+        {inquiry.message && <p>{inquiry.message}</p>}
+        {inquiry.counsellingAnswers && <>
+          <p><strong>Form delivery:</strong> {deliveryLabel(inquiry.counsellingDeliveryStatus)} · {inquiry.counsellingDeliveryAttempts} attempt{inquiry.counsellingDeliveryAttempts === 1 ? "" : "s"}</p>
+          {inquiry.counsellingDeliveryLastResult && <p>Latest recorded result: {inquiry.counsellingDeliveryLastResult}</p>}
+          {inquiry.counsellingDeliveryStatus === "failed" && <button type="button" className="crm-button" style={{ marginTop: 9 }} disabled={props.retryPending} onClick={() => props.onRetry(inquiry.id)}>{props.retryPending && props.retryId === inquiry.id ? "Retrying" : "Review & retry delivery"}</button>}
+          {inquiry.counsellingDeliveryStatus === "untracked" && <p>Delivery was not tracked for this older inquiry. Do not resend an untracked submission.</p>}
+          {props.retryError && props.retryId === inquiry.id && <p role="alert" className="crm-error">{props.retryError}</p>}
+          <details style={{ marginTop: 10 }}><summary className="crm-text-button" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>View counselling answers <ChevronDown size={13} /></summary><dl className="crm-answers">{Object.entries(inquiry.counsellingAnswers).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => <div key={key}><dt>{counsellingFieldLabels[key] ?? key}</dt><dd>{formatCounsellingAnswer(key, value)}</dd></div>)}</dl></details>
+        </>}
+      </article>)}
+      <div className="crm-info" style={{ display: "flex", gap: 8, alignItems: "center" }}><VideoOff size={15} /> Video milestones appear only when server tracking verifies them. Chat history and booking are not connected.</div>
+    </div>
+  </>;
+}
+
+function JourneyPanel({ journey }: { journey: CrmDetail["journey"] }) {
+  if (!journey) return <div className="crm-info"><strong>Verified journey unavailable.</strong> No linked video or questionnaire record is available; this does not establish that the steps occurred.</div>;
+  const lastEvent = [...journey.events].sort((left, right) => new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime()).at(-1);
+  const milestoneLabels: Record<string, string> = {
+    started: "Playback started", "25": "25% milestone observed", "50": "50% milestone observed",
+    "75": "75% milestone observed", "90": "90% milestone observed", completed: "Video completed",
+  };
+  const completed = journey.events.some((event) => event.event === "completed");
+  return <section className="crm-journey" aria-label="Verified journey">
+    <h3>Verified journey</h3>
+    <div className="crm-journey-grid">
+      <p><span>VSL registration</span><strong>{formatDate(journey.registeredAt, true)}</strong></p>
+      <p><span>Observed video progress</span><strong>{lastEvent ? milestoneLabels[lastEvent.event] ?? lastEvent.event : "No playback milestone observed"}</strong></p>
+      <p><span>Video completion</span><strong>{completed ? "Completion recorded" : "Completion not recorded"}</strong></p>
+      <p><span>Questionnaire</span><strong>{journey.questionnaireStatus === "completed" ? `Completed · ${formatDate(journey.questionnaireCompletedAt, true)}` : "No linked questionnaire recorded"}</strong></p>
+      <p className="crm-journey-wide"><span>Linked enquiry IDs</span><strong>{journey.linkedInquiryIds.length ? journey.linkedInquiryIds.join(", ") : "None linked"}</strong></p>
+    </div>
+    {journey.legacyMatchStatus.toLowerCase().includes("ambiguous") && <p className="crm-journey-note">Legacy match is ambiguous. Earlier records were not automatically linked or merged.</p>}
+  </section>;
 }

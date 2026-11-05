@@ -9,6 +9,8 @@ import VSLVideo from "@/pages/VSLVideo";
 import CounsellingForm from "@/pages/CounsellingForm";
 import Admin from "@/pages/Admin";
 import AdminLogin from "@/pages/AdminLogin";
+import AdminInstallHelp from "@/crm/AdminInstallHelp";
+import "@/crm/admin.css";
 import NotFound from "@/pages/not-found";
 import {
   AdminPage as LmsAdminPage,
@@ -53,6 +55,7 @@ function RootLanding() {
 function App() {
   const [location] = useLocation();
   const isLearnPortal = location === "/learn" || location.startsWith("/learn/");
+  const isAdminPortal = location === "/admin" || location === "/admin/login";
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -60,6 +63,7 @@ function App() {
         <Toaster />
         <Router />
         {isLearnPortal && <PwaInstallPrompt />}
+        {isAdminPortal && <AdminInstallHelp />}
       </TooltipProvider>
     </QueryClientProvider>
   );

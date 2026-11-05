@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, serial, jsonb, integer, timestamp, uniqueIndex, uuid, index } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, jsonb, integer, timestamp, uniqueIndex, uuid, index, check } from "drizzle-orm/pg-core";
+import { lmsUsers } from "./lms-schema";
 import { admissionsLeads } from "./admissions-schema";
 import { normalizeIndianMobile } from "./indian-mobile";
 export * from "./admissions-schema";
@@ -212,6 +213,32 @@ export const counsellingDeliveryAttemptRecords = pgTable(
   ],
 );
 export type CounsellingDeliveryAttemptRecord = typeof counsellingDeliveryAttemptRecords.$inferSelect;
+
+// CRM metadata is anchored to an existing inquiry. When safe identity links change,
+// all metadata/history remains with its original inquiry and is grouped at read time.
+export const admissionsCrmProfiles = pgTable("admissions_crm_profiles", {
+  inquiryId: integer("inquiry_id").primaryKey().references(() => inquiries.id),
+  stage: text("stage"),
+  stageEvidence: jsonb("stage_evidence").$type<Record<string, unknown>>(),
+  ownerId: integer("owner_id").references(() => lmsUsers.id),
+  followUpAt: timestamp("follow_up_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedBy: integer("updated_by").notNull().references(() => lmsUsers.id),
+  version: integer("version").notNull().default(1),
+}, t => [
+  index("admissions_crm_owner_idx").on(t.ownerId),
+  index("admissions_crm_follow_up_idx").on(t.followUpAt),
+  check("admissions_crm_stage", sql`${t.stage} IN ('new_enquiry','contacted','qualified','vsl_shared','vsl_watched','form_submitted','counselling_pending','counselling_booked','counselling_attended','enrolled','nurture','lost')`),
+]);
+export const admissionsCrmActivities = pgTable("admissions_crm_activities", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  inquiryId: integer("inquiry_id").notNull().references(() => inquiries.id),
+  type: text("type").notNull(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).defaultNow().notNull(),
+  actorId: integer("actor_id").notNull().references(() => lmsUsers.id),
+  body: text("body"),
+  data: jsonb("data").$type<Record<string, unknown>>(),
+}, t => [index("admissions_crm_activity_inquiry_idx").on(t.inquiryId, t.occurredAt)]);
 
 export const insertInquirySchema = createInsertSchema(inquiries).omit({
   id: true,

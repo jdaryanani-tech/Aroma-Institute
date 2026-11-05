@@ -1,0 +1,14 @@
+{
+  "id": "/admin",
+  "name": "AICHM Admissions",
+  "short_name": "Admissions",
+  "start_url": "/admin",
+  "scope": "/admin",
+  "display": "standalone",
+  "background_color": "#f4f0e7",
+  "theme_color": "#23594d",
+  "icons": [
+    { "src": "/admin-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/admin-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

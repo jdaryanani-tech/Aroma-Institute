@@ -1,0 +1,49 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { CrmDetail, CrmFilters, CrmList, CrmUpdate } from "@shared/crm";
+
+export class CrmHttpError extends Error {
+  constructor(public status:number,message:string) {super(message);}
+}
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, { credentials: "include", cache: "no-store", ...init });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new CrmHttpError(response.status,body.message || `CRM request failed (${response.status})`);
+  }
+  return response.json();
+}
+export function useCrmLeads(filters: CrmFilters, enabled: boolean) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== "") query.set(key, String(value));
+  return useQuery<CrmList>({
+    queryKey: ["admin-crm", "leads", filters], queryFn: () => request(`/api/admin/crm/leads?${query}`),
+    enabled, retry: false, staleTime: 0,
+  });
+}
+export function useCrmDetail(id: string | null, enabled: boolean) {
+  return useQuery<CrmDetail>({
+    queryKey: ["admin-crm", "detail", id],
+    queryFn: () => request(`/api/admin/crm/leads/${encodeURIComponent(id!)}`),
+    enabled: enabled && Boolean(id), retry: false, staleTime: 0,
+  });
+}
+export function useCrmUpdate() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, update }: { id: string; update: CrmUpdate }) =>
+      request<CrmDetail>(`/api/admin/crm/leads/${encodeURIComponent(id)}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update),
+      }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["admin-crm"] }),
+  });
+}
+export function useCrmRetry() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (inquiryId: number) => request(`/api/admin/inquiries/${inquiryId}/retry-counselling-delivery`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verifiedNotDelivered: true }),
+    }),
+    onSettled: () => client.invalidateQueries({ queryKey: ["admin-crm"] }),
+  });
+}

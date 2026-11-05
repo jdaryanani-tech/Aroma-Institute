@@ -9,6 +9,7 @@ import { registerLmsRoutes } from "./lms/routes";
 import { registerLmsManagementRoutes } from "./lms/management-routes";
 import { registerVslMediaRoutes } from "./vsl-media";
 import { registerAdmissionsRoutes, captureLimit, sameOriginCapture } from "./admissions/routes";
+import { registerCrmRoutes } from "./crm/routes";
 import {
   sendCounsellingInquiryToN8n,
   summarizeCounsellingDeliveryResult,
@@ -20,6 +21,7 @@ export async function registerRoutes(
 ): Promise<Server> {
   configureLmsSessions(app);
   registerAdmissionsRoutes(app);
+  registerCrmRoutes(app);
 
   app.post("/api/inquiries", async (req, res) => {
     try {

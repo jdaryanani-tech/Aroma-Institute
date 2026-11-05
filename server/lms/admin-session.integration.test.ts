@@ -70,7 +70,9 @@ test(
       assert.ok(address && typeof address !== "string");
       const origin = `http://127.0.0.1:${address.port}`;
 
-      browser = await chromium.launch();
+      browser = await chromium.launch({
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
+      });
       const context = await browser.newContext({
         baseURL: origin,
         extraHTTPHeaders: { "X-Forwarded-For": ip },
@@ -84,7 +86,7 @@ test(
       });
       page.on("pageerror", (error) => pageErrors.push(error.message));
       page.on("request", (request) => {
-        if (new URL(request.url()).pathname === "/api/admin/inquiries") leadsRequests += 1;
+        if (["/api/admin/inquiries","/api/admin/crm/leads"].includes(new URL(request.url()).pathname)) leadsRequests += 1;
       });
 
       // No fabricated session or intercepted auth/lead responses: use the actual API and database.
@@ -93,6 +95,7 @@ test(
       await expect(page.getByTestId("page-admin-dashboard")).toHaveCount(0);
       assert.equal(leadsRequests, 0, "signed-out visitors must not request lead records");
       assert.equal((await context.request.get(`${origin}/api/admin/inquiries`)).status(), 401);
+      assert.equal((await context.request.get(`${origin}/api/admin/crm/leads`)).status(), 401);
 
       await page.getByRole("link", { name: "Continue to sign in" }).click();
       await expect(page).toHaveURL(`${origin}/admin/login`);
@@ -102,13 +105,20 @@ test(
       const loggedIn = page.waitForResponse((response) =>
         response.url() === `${origin}/api/lms/auth/password/login` && response.request().method() === "POST",
       );
-      const leadsLoaded = page.waitForResponse(`${origin}/api/admin/inquiries`);
+      const leadsLoaded = page.waitForResponse(response => new URL(response.url()).pathname === "/api/admin/crm/leads");
       await page.getByRole("button", { name: "Sign in to Leads Dashboard" }).click();
       assert.equal((await loggedIn).status(), 200);
       await expect(page).toHaveURL(`${origin}/admin`);
       assert.equal((await leadsLoaded).status(), 200);
       await expect(page.getByTestId("page-admin-dashboard")).toBeVisible();
-      await expect(page.getByText(leadName, { exact: true })).toBeVisible();
+      await expect(page.getByTestId("crm-lead-card").filter({hasText:leadName})).toBeVisible();
+      // Authorization is re-read, not trusted from an earlier admin login.
+      await db.delete(lmsUserRoles).where(eq(lmsUserRoles.userId, userId));
+      assert.equal((await context.request.get(`${origin}/api/admin/crm/leads`)).status(), 403);
+      assert.equal((await context.request.patch(`${origin}/api/admin/crm/leads/inquiry:${inquiryId}`, {
+        data: {expectedVersion:0,note:"Must not be saved"},
+      })).status(), 403);
+      await db.insert(lmsUserRoles).values({userId,role:"admin"});
       const sessionCookie = (await context.cookies()).find((cookie) => cookie.name === "aroma.sid");
       assert.ok(sessionCookie, "password login must issue the real session cookie");
       assert.equal(sessionCookie.httpOnly, true);
@@ -118,11 +128,11 @@ test(
         .where(sql`${sessions.sess}->>'lmsUserId' = ${String(userId)}`);
       assert.equal(persistedSessions.length, 1, "the session must be saved to PostgreSQL");
 
-      const reloadedLeads = page.waitForResponse(`${origin}/api/admin/inquiries`);
+      const reloadedLeads = page.waitForResponse(response => new URL(response.url()).pathname === "/api/admin/crm/leads");
       await page.reload();
       await expect(page).toHaveURL(`${origin}/admin`);
       assert.equal((await reloadedLeads).status(), 200);
-      await expect(page.getByText(leadName, { exact: true })).toBeVisible();
+      await expect(page.getByTestId("crm-lead-card").filter({hasText:leadName})).toBeVisible();
       const restoredSession = await context.request.get(`${origin}/api/lms/auth/me`);
       assert.equal(restoredSession.status(), 200);
       assert.deepEqual((await restoredSession.json()).roles, ["admin"]);

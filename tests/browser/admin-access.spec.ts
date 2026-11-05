@@ -2,6 +2,11 @@ import { expect, test } from "@playwright/test";
 
 for (const role of ["student", "trainer"] as const) {
   test(`Chromium: ${role} accounts are denied the counselling leads UI`, async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "serviceWorker", {
+        configurable: true, value: { register: async () => ({}) },
+      });
+    });
     let leadsApiRequests = 0;
     await page.route("**/api/lms/auth/me", (route) => route.fulfill({
       status: 200,
