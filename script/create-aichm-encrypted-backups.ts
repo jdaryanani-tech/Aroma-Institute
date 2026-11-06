@@ -461,7 +461,11 @@ async function createEncryptedDump(input: {
     PGOPTIONS: "-c timezone=UTC",
     PGAPPNAME: "aichm-encrypted-backup",
   };
-  if (input.targetCaFile) env.PGSSLROOTCERT = input.targetCaFile;
+  if (input.id === "source-production") {
+    env.PGSSLROOTCERT = "system";
+  } else if (input.targetCaFile) {
+    env.PGSSLROOTCERT = input.targetCaFile;
+  }
 
   const args = ["--format=custom", "--no-password", `--snapshot=${input.snapshot.snapshotId}`];
   if (input.id === "source-production") args.push("--no-owner", "--no-acl");
@@ -1035,6 +1039,9 @@ async function main(): Promise<void> {
           const expectedMajor = Math.floor(snapshot.serverVersionNum / 10000);
           if (pgDump.major < expectedMajor) {
             throw new BackupFailure(`pg_dump_too_old_for_${spec.id}`);
+          }
+          if (spec.id === "source-production") {
+            await verifyConnectionIdentities(sourcePool, targetConnection.pool);
           }
           const backup = await createEncryptedDump({
             ...spec,
