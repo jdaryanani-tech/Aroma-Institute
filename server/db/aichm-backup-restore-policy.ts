@@ -1,4 +1,15 @@
 export type BackupRestoreScope = "full_database" | "public_schema";
+export type BackupCreationMode = "initial" | "refresh_source";
+
+export function selectDumpScopes(
+  mode: BackupCreationMode,
+  existingScopes: readonly BackupRestoreScope[],
+): BackupRestoreScope[] {
+  if (mode === "refresh_source") return ["full_database"];
+  return (["full_database", "public_schema"] as const).filter(
+    (scope) => !existingScopes.includes(scope),
+  );
+}
 
 export interface BackupRestoreReference {
   manifest: {

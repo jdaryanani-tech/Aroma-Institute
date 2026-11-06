@@ -28,7 +28,7 @@ import {
   classifyPgDumpDiagnostic,
   type PgDumpDiagnostic,
 } from "../server/db/pg-dump-diagnostic";
-import { selectRestoreBackups } from "../server/db/aichm-backup-restore-policy";
+import { selectDumpScopes, selectRestoreBackups } from "../server/db/aichm-backup-restore-policy";
 
 const EXPECTED_SOURCE_DATABASE = "neondb";
 const EXPECTED_SUPABASE_DATABASE = "postgres";
@@ -890,16 +890,18 @@ async function main(): Promise<void> {
   const createNewBackups = process.argv.includes("--confirm-backup-and-restore");
   const resumeFailedSteps = process.argv.includes("--resume-failed-backups");
   const resumeSourceBackup = process.argv.includes("--resume-source-backup");
+  const refreshSourceBackup = process.argv.includes("--refresh-source-production-backup");
   const verifySourceRestore = process.argv.includes("--verify-source-restore");
   const selectedModes = [
     createNewBackups,
     resumeFailedSteps,
     resumeSourceBackup,
+    refreshSourceBackup,
     verifySourceRestore,
   ].filter(Boolean).length;
   if (selectedModes !== 1) {
     console.log(
-      "Choose one mode: --confirm-backup-and-restore, --resume-failed-backups, --resume-source-backup, or --verify-source-restore.",
+      "Choose one mode: --confirm-backup-and-restore, --resume-failed-backups, --resume-source-backup, --refresh-source-production-backup, or --verify-source-restore.",
     );
     return;
   }
@@ -946,7 +948,7 @@ async function main(): Promise<void> {
         }
         backupsToRestore = sourceBackups;
       }
-    } else {
+    } else if (!refreshSourceBackup) {
       const existing = await readdir(OUTPUT_DIRECTORY).catch(() => []);
       if (existing.length > 0) {
         throw new BackupFailure("existing_artifacts_present_use_resume_mode");
@@ -1011,9 +1013,11 @@ async function main(): Promise<void> {
         uri: process.env.SUPABASE_DATABASE_URL,
       },
     ];
-    const specsToDump = allSpecs.filter(
-      (spec) => !backups.some((backup) => backup.manifest.source.scope === spec.scope),
+    const selectedDumpScopes = selectDumpScopes(
+      refreshSourceBackup ? "refresh_source" : "initial",
+      backups.map((backup) => backup.manifest.source.scope),
     );
+    const specsToDump = allSpecs.filter((spec) => selectedDumpScopes.includes(spec.scope));
 
     if (specsToDump.length > 0) {
       await mkdir(OUTPUT_DIRECTORY, { recursive: true, mode: 0o700 });
@@ -1038,8 +1042,8 @@ async function main(): Promise<void> {
             }
           : { ...spec, passFile: path.join(credentialTempDir!, `${spec.id}.pgpass`) },
       );
-      const pendingSpecs = configuredSpecs.filter(
-        (spec) => !backups.some((backup) => backup.manifest.source.scope === spec.scope),
+      const pendingSpecs = configuredSpecs.filter((spec) =>
+        selectedDumpScopes.includes(spec.scope),
       );
       if (verifySourceRestore && pendingSpecs.length > 0) {
         throw new BackupFailure("source_restore_only_refuses_to_create_backup");
@@ -1083,10 +1087,10 @@ async function main(): Promise<void> {
       await rm(credentialTempDir, { recursive: true, force: true });
       credentialTempDir = undefined;
     }
-    if (!resumeSourceBackup && !verifySourceRestore) {
+    if (!resumeSourceBackup && !refreshSourceBackup && !verifySourceRestore) {
       backupsToRestore = selectRestoreBackups(backups, false);
     }
-    if (resumeSourceBackup) backupsToRestore = newBackups;
+    if (resumeSourceBackup || refreshSourceBackup) backupsToRestore = newBackups;
     if (backupsToRestore.length) {
       try {
         failures.push(...(await restoreAll(backupsToRestore, key, policyRolesByScope)));
@@ -1099,7 +1103,7 @@ async function main(): Promise<void> {
       }
     }
 
-    if (resumeSourceBackup && diagnostics.length > 0) {
+    if ((resumeSourceBackup || refreshSourceBackup) && diagnostics.length > 0) {
       console.log(
         JSON.stringify({
           status: "failed",
@@ -1121,7 +1125,7 @@ async function main(): Promise<void> {
         pgDumpVersion: pgDump.text,
         pgRestoreVersion: pgRestore.text,
         isolatedPostgresMajor: postgres.major,
-        artifacts: (resumeSourceBackup ? newBackups : verifySourceRestore ? backupsToRestore : backups).map(({ manifest, manifestPath, artifactPath }) => ({
+        artifacts: (resumeSourceBackup || refreshSourceBackup ? newBackups : verifySourceRestore ? backupsToRestore : backups).map(({ manifest, manifestPath, artifactPath }) => ({
           path: path.relative(process.cwd(), artifactPath),
           manifestPath: path.relative(process.cwd(), manifestPath),
           manifest,

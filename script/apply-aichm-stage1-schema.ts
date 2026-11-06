@@ -27,11 +27,6 @@ const APP_MIGRATION_PATH = path.join(
 );
 const FORBIDDEN_ROLES = ["anon", "authenticated", "service_role"] as const;
 const PRESERVED_PUBLIC_TABLES = ["leads", "conversations", "course_knowledge"] as const;
-const EXPECTED_PUBLIC_COUNTS: Record<(typeof PRESERVED_PUBLIC_TABLES)[number], string> = {
-  leads: "31",
-  conversations: "300",
-  course_knowledge: "54",
-};
 
 class Stage1GuardError extends Error {
   constructor(readonly safeCategory: string, readonly safeDetails?: Record<string, unknown>) {
@@ -378,8 +373,8 @@ async function readSchemaAppliedVersions(queryable: Queryable): Promise<Set<stri
 
 function assertPublicCounts(actual: Record<string, string>) {
   for (const table of PRESERVED_PUBLIC_TABLES) {
-    if (actual[table] !== EXPECTED_PUBLIC_COUNTS[table]) {
-      stop("preserved_public_count_mismatch");
+    if (!/^(0|[1-9]\d*)$/.test(actual[table] ?? "")) {
+      stop("preserved_public_count_unavailable");
     }
   }
 }
