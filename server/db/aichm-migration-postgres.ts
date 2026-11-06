@@ -164,6 +164,7 @@ export class PostgresMigrationStore implements MigrationStore {
     private readonly configuredHost: string,
     private readonly configuredPort: number,
     private readonly projectRef?: string,
+    private readonly readOnlySnapshot = false,
   ) {}
 
   async identity(): Promise<DatabaseIdentity> {
@@ -177,7 +178,7 @@ export class PostgresMigrationStore implements MigrationStore {
       }>(
         "SELECT current_database() AS database, current_user AS user, " +
           "pg_is_in_recovery() AS is_recovery, " +
-          "current_setting('transaction_read_only')::boolean AS is_read_only",
+          "current_setting('default_transaction_read_only')::boolean AS is_read_only",
       );
       const clientWithSocket = client as unknown as { connection: { stream: {
         encrypted?: boolean;
@@ -275,7 +276,7 @@ export class PostgresMigrationStore implements MigrationStore {
       contype: "p" | "u";
       columns: string[];
     }>(
-      `SELECT c.contype, array_agg(a.attname ORDER BY key_column.ordinality) AS columns ` +
+      `SELECT c.contype, array_agg(a.attname::text ORDER BY key_column.ordinality) AS columns ` +
         `FROM pg_constraint c ` +
         `JOIN pg_class t ON t.oid=c.conrelid ` +
         `JOIN pg_namespace n ON n.oid=t.relnamespace ` +
@@ -357,6 +358,13 @@ export class PostgresMigrationStore implements MigrationStore {
 
   async transaction<T>(callback: (transaction: MigrationTransaction) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
+    if (this.readOnlySnapshot) {
+      try {
+        return await callback(new PgMigrationTransaction(client));
+      } finally {
+        client.release();
+      }
+    }
     try {
       await client.query("BEGIN");
       const result = await callback(new PgMigrationTransaction(client));
@@ -380,4 +388,26 @@ export function migrationStoreFromPool(
   config: { host: string; port: number; projectRef?: string },
 ): PostgresMigrationStore {
   return new PostgresMigrationStore(pool, config.host, config.port, config.projectRef);
+}
+
+export function migrationStoreFromReadOnlyClient(
+  client: PoolClient,
+  config: { host: string; port: number; projectRef?: string },
+): PostgresMigrationStore {
+  const pinnedClient = {
+    query: client.query.bind(client),
+    release: () => undefined,
+    connection: (client as unknown as { connection: unknown }).connection,
+  };
+  const pinnedPool = {
+    query: client.query.bind(client),
+    connect: async () => pinnedClient,
+  } as unknown as Pool;
+  return new PostgresMigrationStore(
+    pinnedPool,
+    config.host,
+    config.port,
+    config.projectRef,
+    true,
+  );
 }

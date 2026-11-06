@@ -1,9 +1,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { PoolClient } from "pg";
 import { createSupabaseMigrationConnection } from "../server/db/supabase-migration";
 import { createAichmSourceMigrationPool } from "../server/db/aichm-source-migration";
-import { migrationStoreFromPool } from "../server/db/aichm-migration-postgres";
+import {
+  migrationStoreFromPool,
+  migrationStoreFromReadOnlyClient,
+} from "../server/db/aichm-migration-postgres";
 import {
   assertApplyPrerequisites,
   runAichmMigration,
@@ -128,18 +132,56 @@ async function liveRun(args: Arguments): Promise<void> {
 
   const sourcePool = createAichmSourceMigrationPool();
   const targetConnection = createSupabaseMigrationConnection();
+  let sourceSnapshotClient: PoolClient | undefined;
+  let targetSnapshotClient: PoolClient | undefined;
+  let sourceSnapshotOpen = false;
+  let targetSnapshotOpen = false;
   try {
     const sourceUrl = new URL(process.env.AICHM_SOURCE_PROD_DATABASE_URL!);
     const targetUrl = new URL(process.env.SUPABASE_DATABASE_URL!);
-    const source = migrationStoreFromPool(sourcePool, {
+    const sourceConfig = {
       host: sourceUrl.hostname,
       port: Number(sourceUrl.port || "5432"),
-    });
-    const target = migrationStoreFromPool(targetConnection.pool, {
+    };
+    const targetConfig = {
       host: targetUrl.hostname,
       port: Number(targetUrl.port || "5432"),
       projectRef: "xylqezjvqqqjozenuygh",
-    });
+    };
+    let source = migrationStoreFromPool(sourcePool, sourceConfig);
+    let target = migrationStoreFromPool(targetConnection.pool, targetConfig);
+    let snapshot: NonNullable<Parameters<typeof runAichmMigration>[2]["snapshot"]> | undefined;
+
+    if (!isApply) {
+      sourceSnapshotClient = await sourcePool.connect();
+      await sourceSnapshotClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      sourceSnapshotOpen = true;
+      const sourceSnapshot = await sourceSnapshotClient.query<{
+        snapshot_id: string;
+        captured_at: string;
+      }>("SELECT pg_export_snapshot() AS snapshot_id, transaction_timestamp() AS captured_at");
+
+      targetSnapshotClient = await targetConnection.pool.connect();
+      await targetSnapshotClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      targetSnapshotOpen = true;
+      const targetSnapshot = await targetSnapshotClient.query<{
+        snapshot_id: string;
+        captured_at: string;
+      }>("SELECT pg_export_snapshot() AS snapshot_id, transaction_timestamp() AS captured_at");
+
+      source = migrationStoreFromReadOnlyClient(sourceSnapshotClient, sourceConfig);
+      target = migrationStoreFromReadOnlyClient(targetSnapshotClient, targetConfig);
+      snapshot = {
+        source: {
+          snapshotId: sourceSnapshot.rows[0].snapshot_id,
+          capturedAt: sourceSnapshot.rows[0].captured_at,
+        },
+        target: {
+          snapshotId: targetSnapshot.rows[0].snapshot_id,
+          capturedAt: targetSnapshot.rows[0].captured_at,
+        },
+      };
+    }
 
     let applyPrerequisites: ApplyPrerequisiteInput | undefined;
     if (isApply) {
@@ -169,12 +211,21 @@ async function liveRun(args: Arguments): Promise<void> {
     const plan = await runAichmMigration(source, target, {
       mode: isApply ? "apply" : "dry-run",
       runId: args.runId ?? `read-only-${randomUUID()}`,
+      snapshot,
       reconciliation: reconciliation?.document,
       applyPrerequisites,
       logger: (entry) => console.log(JSON.stringify(entry)),
     });
     console.log(JSON.stringify(plan, null, 2));
   } finally {
+    if (sourceSnapshotClient) {
+      if (sourceSnapshotOpen) await sourceSnapshotClient.query("ROLLBACK").catch(() => undefined);
+      sourceSnapshotClient.release();
+    }
+    if (targetSnapshotClient) {
+      if (targetSnapshotOpen) await targetSnapshotClient.query("ROLLBACK").catch(() => undefined);
+      targetSnapshotClient.release();
+    }
     await Promise.allSettled([sourcePool.end(), targetConnection.pool.end()]);
   }
 }

@@ -5,6 +5,7 @@ import {
   FUTURE_CALENDAR_TABLES,
   PRESERVED_SUPABASE_PUBLIC_TABLES,
 } from "./aichm-migration-plan";
+import { normalizeAichmColumnDefault } from "./aichm-schema-stage1";
 
 export const AICHM_TARGET_SCHEMA = "aichm";
 export const AICHM_TARGET_PROJECT_REF = "xylqezjvqqqjozenuygh";
@@ -242,6 +243,10 @@ export interface TableMigrationCounts {
 export interface MigrationPlan {
   mode: "dry-run" | "apply";
   runId: string;
+  snapshot: {
+    source: { snapshotId: string; capturedAt: string };
+    target: { snapshotId: string; capturedAt: string };
+  } | null;
   source: { database: string; host: string; port: number };
   target: { database: string; host: string; port: number; projectRef: string };
   writesEnabled: boolean;
@@ -255,6 +260,7 @@ export interface MigrationPlan {
 export interface MigrationRunOptions {
   mode: "dry-run" | "apply";
   runId: string;
+  snapshot?: MigrationPlan["snapshot"];
   batchSize?: number;
   reconciliation?: ReconciliationManifest;
   columnTransforms?: ColumnTransformRegistry;
@@ -269,11 +275,8 @@ function quoteIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
-function normalizeDefaultExpression(expression: string | null): string | null {
-  if (!expression) return null;
-  return expression
-    .replaceAll('"public".', '"aichm".')
-    .replaceAll("public.", "aichm.");
+export function normalizeMigrationDefaultExpression(expression: string | null): string | null {
+  return normalizeAichmColumnDefault(expression);
 }
 
 export function canonicalize(value: unknown): string {
@@ -345,7 +348,7 @@ export function migrationSchemaFingerprint(
           characterMaximumLength: characterMaximumLength ?? null,
           numericPrecision: numericPrecision ?? null,
           numericScale: numericScale ?? null,
-          defaultExpression: normalizeDefaultExpression(defaultExpression ?? null),
+          defaultExpression: normalizeMigrationDefaultExpression(defaultExpression ?? null),
           nullable,
           hasDefault,
           ordinal,
@@ -628,8 +631,8 @@ function validateMetadata(
       (sourceColumn.characterMaximumLength ?? null) !== (targetColumn.characterMaximumLength ?? null) ||
       (sourceColumn.numericPrecision ?? null) !== (targetColumn.numericPrecision ?? null) ||
       (sourceColumn.numericScale ?? null) !== (targetColumn.numericScale ?? null) ||
-      normalizeDefaultExpression(sourceColumn.defaultExpression ?? null) !==
-        normalizeDefaultExpression(targetColumn.defaultExpression ?? null)
+      normalizeMigrationDefaultExpression(sourceColumn.defaultExpression ?? null) !==
+        normalizeMigrationDefaultExpression(targetColumn.defaultExpression ?? null)
     ) {
       throw new Error(`Column type is incompatible for ${mapping.sourceTable}.`);
     }
@@ -788,6 +791,7 @@ export async function runAichmMigration(
   const plan: MigrationPlan = {
     mode: options.mode,
     runId: options.runId,
+    snapshot: options.mode === "dry-run" ? options.snapshot ?? null : null,
     source: { database: sourceIdentity.database, host: sourceIdentity.host, port: sourceIdentity.port },
     target: {
       database: targetIdentity.database,

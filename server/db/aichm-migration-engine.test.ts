@@ -13,6 +13,7 @@ import {
   assertNoSecretInAuditEntry,
   canonicalize,
   migrationSchemaFingerprint,
+  normalizeMigrationDefaultExpression,
   runAichmMigration,
   signedDocumentContentChecksum,
   transformMigrationRow,
@@ -65,6 +66,17 @@ const RUN_IDS = {
   schema: "00000000-0000-4000-8000-000000000007",
   crosswalk: "00000000-0000-4000-8000-000000000008",
 };
+
+test("migration metadata treats public and aichm sequence and enum defaults as equivalent", () => {
+  assert.equal(
+    normalizeMigrationDefaultExpression("nextval('lms_users_id_seq'::regclass)"),
+    normalizeMigrationDefaultExpression("nextval('aichm.lms_users_id_seq'::regclass)"),
+  );
+  assert.equal(
+    normalizeMigrationDefaultExpression("'draft'::public.lms_content_status"),
+    normalizeMigrationDefaultExpression("'draft'::aichm.lms_content_status"),
+  );
+});
 
 function signed<T>(document: T): SignedDocument<T> {
   return {
@@ -475,13 +487,19 @@ test("synthetic dry-run reports insert/skip/review/conflict without writing or l
   };
   const { source, target } = makeStores(rows);
   const audit: Record<string, unknown>[] = [];
+  const snapshot = {
+    source: { snapshotId: "source-snapshot-test", capturedAt: "2026-11-06T00:00:00.000Z" },
+    target: { snapshotId: "target-snapshot-test", capturedAt: "2026-11-06T00:00:01.000Z" },
+  };
   const plan = await runAichmMigration(source, target, {
     mode: "dry-run",
     runId: RUN_IDS.synthetic,
+    snapshot,
     batchSize: 1,
     logger: (entry) => audit.push(entry),
   });
   assert.equal(plan.writesEnabled, false);
+  assert.deepEqual(plan.snapshot, snapshot);
   assert.equal(plan.tables.lms_courses.insert, 1);
   assert.equal(plan.tables.admissions_leads.review, 1);
   assert.equal(target.writes, 0);
