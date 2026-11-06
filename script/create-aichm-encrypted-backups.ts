@@ -748,6 +748,7 @@ async function restoreArtifact(
         throw new BackupFailure("restored_schema_or_counts_mismatch");
       }
       manifest.restore.status = "verified";
+      delete manifest.restore.errorCode;
       manifest.restore.verifiedAt = new Date().toISOString();
     } finally {
       await restoredPool.end();

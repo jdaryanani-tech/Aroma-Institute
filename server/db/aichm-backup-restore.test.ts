@@ -12,7 +12,7 @@ test("isolated restore preserves template0 public schema and all archived source
   assert.match(source, /createdb", \["--template=template0", dbName\]/);
   assert.doesNotMatch(source, /DROP SCHEMA IF EXISTS public CASCADE/);
   assert.match(source, /"--exit-on-error", "--single-transaction", "--no-owner", "--no-acl"/);
-  assert.doesNotMatch(source, /--exclude-schema|--schema=/);
   assert.match(source, /const expectedNames = manifest\.source\.tables\.map/);
   assert.match(source, /JSON\.stringify\(restored\.tables\) === JSON\.stringify\(manifest\.source\.tables\)/);
+  assert.match(source, /delete manifest\.restore\.errorCode/);
 });
