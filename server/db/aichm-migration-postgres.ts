@@ -7,7 +7,7 @@ import type {
   MigrationTransaction,
   TableMetadata,
 } from "./aichm-migration-engine";
-import { canonicalize } from "./aichm-migration-engine";
+import { AICHM_REQUIRED_SCHEMA_VERSION, canonicalize } from "./aichm-migration-engine";
 
 type QueryResult<Row = Record<string, unknown>> = {
   rows: Row[];
@@ -205,7 +205,8 @@ export class PostgresMigrationStore implements MigrationStore {
   async schemaVersion(): Promise<string | null> {
     try {
       const result = await this.pool.query<{ version: string }>(
-        `SELECT version FROM "aichm"."schema_migrations" ORDER BY applied_at DESC LIMIT 1`,
+        `SELECT version FROM "aichm"."schema_migrations" WHERE version = $1 LIMIT 1`,
+        [AICHM_REQUIRED_SCHEMA_VERSION],
       );
       return result.rows[0]?.version ?? null;
     } catch (error) {

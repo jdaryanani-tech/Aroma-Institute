@@ -1,6 +1,12 @@
 # AICHM → Supabase migration preparation
 
-**Status:** migration engine and preparation artifacts are implemented in the workspace. No live database connection was opened by this task; no DDL, DML, data copy, export, backup, restore, secret change, runtime routing change, publish, or cutover occurred.
+**Status:** Stage 1 target schema is applied to the existing Supabase project. This was additive DDL only: no source or target application records were copied, no production runtime routing changed, and the app was not published or cut over. `DATABASE_URL` remains the current application database.
+
+**Applied migration IDs:** `aichm-migration-control-v1` and `aichm-app-schema-v1`.
+
+**Stage 1 verification:** 34 empty application tables, 246 columns, 34 primary keys, 46 foreign keys, 8 unique constraints, 3 check constraints, 88 application indexes, 25 sequences and 5 enum types. Three migration-control tables also exist; only the two migration-ledger rows are populated. All 34 application tables have RLS enabled, no policies and no grants to `PUBLIC`, `anon`, `authenticated` or `service_role`. The source schema was freshly inspected from the production primary using strict TLS. The source database was not changed.
+
+Existing Supabase public counts remain `leads=31`, `conversations=300`, `course_knowledge=54`; their RLS/policy configuration was not changed. The migration did not alter PostgREST settings, and no database-level `pgrst.db_schemas` setting includes `aichm`. The project-level Data API exposed-schema setting was not independently visible to the database connection and should be checked in the Supabase Dashboard before any future client access. No client access is intended for this private schema.
 
 **Inventory date:** 2026-11-06 UTC. The Supabase TLS/inventory probe completed at 2026-11-06T06:59:24Z; Replit development and production metadata were queried read-only during the same audit session. Counts are point-in-time snapshots and can change.
 
@@ -12,7 +18,7 @@
 | Replit production read-only replica | `neondb` | 16.15 | 34 / 53 | 10,141,696 bytes |
 | Supabase target (`xylqezjvqqqjozenuygh`) | `postgres` | 17.11 | 3 existing public app tables / 385 rows | 11,540,147 bytes |
 
-The Replit production inventory came from Replit's read-only production database query path, not a direct connection to the production app process. It is suitable for metadata planning, not a production backup or a cutover guarantee.
+The JSON source inventory files are point-in-time audit snapshots. The Stage 1 schema was generated from a fresh metadata-only catalog export of the production primary, not by replaying those stale migration journals.
 
 Detailed metadata-only inventories:
 
@@ -60,11 +66,13 @@ The connection read only database identity, catalogs, and exact table counts. Th
 
 ## Preparation files
 
-- `mapping-compatibility.md` — complete source-table mapping, preserved n8n tables, reconciliation, schema/RLS approach, and unresolved sources.
-- `runbook.md` — backup, restore rehearsal, dry-run, verification, rollback, and go/no-go sequence.
-- `server/db/aichm-migration-plan.ts` and `script/aichm-supabase-migration-prep.ts` — deterministic snapshot-based dry-run planner. It has no database writer. `--apply` is deliberately rejected until a separately reviewed migration implementation exists.
-- `server/db/aichm-migration-plan.test.ts` — planner safety/order tests.
+- `supabase/migrations/20261106_aichm_migration_control_v1.sql` — private migration-control tables.
+- `supabase/migrations/20261106_aichm_app_schema_v1.sql` — generated empty application schema from a production-primary schema-only export; no row data.
+- `server/db/aichm-schema-stage1.ts` and `script/generate-aichm-stage1-schema.ts` — allowlisted, metadata-only schema generator.
+- `script/apply-aichm-stage1-schema.ts` — explicit transactional Stage 1 DDL runner with identity/TLS, schema, RLS, grants and preservation checks; rerun after success is read-only verification.
+- `server/db/aichm-migration-plan.ts`, `server/db/aichm-migration-engine.ts`, and the migration scripts — data-copy planning/apply gates. The data-copy engine was not run in this stage.
+- `runbook.md` and `migration-engine.md` — backup, restore, reconciliation, dry-run and cutover gates.
 
-The source remains `DATABASE_URL`. The migration target factory reads `SUPABASE_DATABASE_URL` and `SUPABASE_DB_SSL_CA`; the source factory is separately gated by `AICHM_SOURCE_PROD_DATABASE_URL`. Apply mode additionally requires `AICHM_BACKUP_ENCRYPTION_KEY` and `AICHM_MIGRATION_APPROVAL_PUBLIC_KEY` plus signed backup, reconciliation, schema-version, and owner-approval manifests. Secret values are never included in the artifacts. These new apply prerequisites are not all configured, and no backup/restore manifest exists.
+The source remains `DATABASE_URL`. The migration target factory reads `SUPABASE_DATABASE_URL` and `SUPABASE_DB_SSL_CA`; the production-source factory is separately gated by `AICHM_SOURCE_PROD_DATABASE_URL` and verifies `verify-full` TLS. Data-copy apply mode remains blocked until the production backup is refreshed and independently restore-tested, reconciliation and schema manifests are reviewed/signed, and the separate approval gates are supplied. Do not infer data-migration approval from the Stage 1 DDL authorization.
 
-The code-based engine, connection factories, apply gates and synthetic tests are described in [`migration-engine.md`](migration-engine.md). The runner has no live run history in this task. Its default mode reads the committed inventory snapshots only; live dry-run requires explicit `--live-dry-run`, and apply requires both `--apply` and `--production-cutover` plus every approval gate. Do not use the runner against live databases until the missing source-primary and verified backup/restore prerequisites are resolved.
+The code-based engine, connection factories, apply gates and synthetic tests are described in [`migration-engine.md`](migration-engine.md). No data-copy run or cutover occurred. The Supabase public backup is verified; the production backup is not current enough for data-copy use and must be refreshed/restored before that stage. Calendar, payments and storage/media transfer remain separate unresolved work.

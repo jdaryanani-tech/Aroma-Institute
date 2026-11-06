@@ -12,4 +12,6 @@
 - [First-owner recovery boundary](first-owner-recovery.md) — First-owner creation is not an existing-account reset; never reopen it by deleting audit evidence.
 - [AVNI questionnaire session state](avni-questionnaire-session-state.md) — Keep unfinished WhatsApp answers in n8n state; persist only complete validated submissions in the existing inquiry flow.
 - [Supabase pg TLS configuration](supabase-pg-tls.md) — Keep the migration pool separate; validate SSL mode, then pass CA and hostname verification explicitly to pg.
+- [Supabase schema metadata comparison](supabase-schema-metadata-comparison.md) — Normalize schema qualification in sequence and enum defaults before comparing equivalent source/target catalogs.
+- [AICHM appointment source of truth](aichm-calendar-booking.md) — Use the in-app Calendar for confirmed counselling bookings; questionnaire preferences remain requests until an eligible, explicitly confirmed slot is committed.
 - [Replit production pg_dump TLS](replit-production-pgdump-tls.md) — libpq 17.6 verified the production source with `PGSSLROOTCERT=system` and `verify-full`; no downloadable source CA was documented.

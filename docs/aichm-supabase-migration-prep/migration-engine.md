@@ -2,9 +2,9 @@
 
 ## Safety state
 
-This is migration code, not an authorization to migrate. No live database connection, DDL/DML, export, backup, restore, or data copy was run while implementing it. `server/db.ts` continues to use `DATABASE_URL`.
+Stage 1 of the target migration has been applied as empty-schema DDL only. No application records were copied, and no source schema/data, runtime routing, secrets, or deployment was changed. `server/db.ts` continues to use `DATABASE_URL`.
 
-The target currently has no AICHM application schema. The control-schema SQL file is a draft and has not been applied. A full application-schema migration and compatibility review are still required before the engine can pass its target-table preflight.
+The existing Supabase target now has the private `aichm` schema, its migration-control tables, and the 34 empty application tables from `aichm-app-schema-v1`. The existing `public` n8n/Avni tables are preserved. The data-copy engine remains a separate stage and has not been run.
 
 ## Runner behavior
 
@@ -25,7 +25,7 @@ Apply requires all of the following together:
 - A signed compatible schema-version manifest. It must match the live source/target schema fingerprints and the applied control-schema version.
 - A separate owner-signed cutover approval binding the exact backup, reconciliation, and schema manifests to the production source and approved Supabase project.
 
-Manifest files are supplied as CLI paths and are not emitted by the runner. The public signing key is configuration, not a substitute for owner review. Missing or mismatched prerequisites stop before any target writes. No apply command has been run.
+Manifest files are supplied as CLI paths and are not emitted by the runner. The public signing key is configuration, not a substitute for owner review. Missing or mismatched prerequisites stop before data-copy writes. No data-copy apply command has been run.
 
 ## Copy behavior
 
@@ -39,9 +39,11 @@ Manifest files are supplied as CLI paths and are not emitted by the runner. The 
 - Calendar tables are excluded. Existing expiring sessions, OTP/password-setup tokens, and rate-limit rows are deferred for an explicit sign-out/expiry decision. Custom `lms_users` password hashes and role rows remain custom auth, not Supabase Auth.
 - Payments and App Storage objects are not inferred or copied. Payments have no audited source table; VSL/media objects need a separate hashed object manifest and transfer plan.
 
-## Prepared control schema
+## Applied Stage 1 schema
 
-[`supabase-migration-control-schema.sql`](supabase-migration-control-schema.sql) creates only the private `aichm` schema-control, checkpoint, and crosswalk tables with RLS enabled and no browser policies. It is not applied. It is not the full AICHM application schema. Target mapped tables must be created by a separately reviewed additive schema migration first.
+The versioned files `supabase/migrations/20261106_aichm_migration_control_v1.sql` and `supabase/migrations/20261106_aichm_app_schema_v1.sql` were applied through `script/apply-aichm-stage1-schema.ts`. Verification confirmed 34 empty application tables matching the current production-primary catalog, with RLS enabled and no browser policies or grants. `supabase-migration-control-schema.sql` is reference-only; do not execute it directly.
+
+No Calendar or payment tables were created. `aichm` was not added to database-level PostgREST schema settings; confirm the project-level Data API exposed-schema list in the Supabase Dashboard before any future API access.
 
 ## Safe validation
 
@@ -56,4 +58,4 @@ npx tsx --test server/db/aichm-migration-engine.test.ts \
 
 They cover prerequisite refusal, signatures, backup/restore manifest validation, identity/TLS checks, FK order, protected tables, review gates, conflicts, secret-safe logging, stable IDs/auth hashes, transactional rollback, checkpoint resume, rerun skips, and transform restrictions.
 
-Do not run the live modes until the owner has provisioned a supported production-primary connection and verified encrypted backups/restores, reviewed the full target schema, and supplied signed approval manifests. The engine does not create backups or run schema DDL.
+Do not run data-copy modes until a fresh production-primary backup is independently restored, reconciliation and schema manifests are reviewed, and all separate owner approval gates are satisfied. The data-copy engine does not create backups or run schema DDL; Stage 1 schema creation is a separate completed operation.

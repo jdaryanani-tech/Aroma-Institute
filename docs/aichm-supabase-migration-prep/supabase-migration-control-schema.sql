@@ -1,11 +1,9 @@
--- Preparation artifact only. Do not execute until the target schema, backup,
--- restore, reconciliation, and owner-approval gates have been reviewed.
--- This migration creates private migration-control objects only. It does not
--- alter the existing public.leads, public.conversations, or
--- public.course_knowledge tables.
+-- Reference-only copy of the control schema. The versioned migration under
+-- supabase/migrations is the source of truth; do not execute this file directly.
+-- No public AICHM tables or data are altered by the versioned migration.
 
-CREATE SCHEMA IF NOT EXISTS aichm;
-REVOKE ALL ON SCHEMA aichm FROM PUBLIC;
+CREATE SCHEMA IF NOT EXISTS aichm AUTHORIZATION postgres;
+REVOKE ALL ON SCHEMA aichm FROM PUBLIC, anon, authenticated, service_role;
 
 CREATE TABLE IF NOT EXISTS aichm.schema_migrations (
   version text PRIMARY KEY,
@@ -49,18 +47,18 @@ ALTER TABLE aichm.schema_migrations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE aichm.migration_checkpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE aichm.migration_crosswalk ENABLE ROW LEVEL SECURITY;
 
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
-    REVOKE ALL ON ALL TABLES IN SCHEMA aichm FROM anon;
-    REVOKE USAGE ON SCHEMA aichm FROM anon;
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-    REVOKE ALL ON ALL TABLES IN SCHEMA aichm FROM authenticated;
-    REVOKE USAGE ON SCHEMA aichm FROM authenticated;
-  END IF;
-END
-$$;
+REVOKE ALL ON ALL TABLES IN SCHEMA aichm FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA aichm FROM anon;
+REVOKE ALL ON ALL TABLES IN SCHEMA aichm FROM authenticated;
+REVOKE ALL ON ALL TABLES IN SCHEMA aichm FROM service_role;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA aichm FROM PUBLIC;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA aichm FROM anon;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA aichm FROM authenticated;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA aichm FROM service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA aichm
+  REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA aichm
+  REVOKE ALL ON SEQUENCES FROM PUBLIC, anon, authenticated, service_role;
 
 INSERT INTO aichm.schema_migrations (version, migration_name)
 VALUES ('aichm-migration-control-v1', 'private-migration-control-tables-only')

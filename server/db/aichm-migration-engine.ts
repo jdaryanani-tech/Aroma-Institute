@@ -8,7 +8,7 @@ import {
 
 export const AICHM_TARGET_SCHEMA = "aichm";
 export const AICHM_TARGET_PROJECT_REF = "xylqezjvqqqjozenuygh";
-export const AICHM_REQUIRED_SCHEMA_VERSION = "aichm-migration-control-v1";
+export const AICHM_REQUIRED_SCHEMA_VERSION = "aichm-app-schema-v1";
 export const AICHM_TRANSFORM_SET_VERSION = "identity-v1";
 
 const DEFERRED_TRANSIENT_TABLES = new Set([

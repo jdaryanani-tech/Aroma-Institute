@@ -33,7 +33,7 @@ No source or target backup was created in this preparation task. Before a migrat
 5. Restore development and production exports into **separate**, isolated, disposable PostgreSQL 16-compatible databases, then run count, schema, sequence, FK, and checksum reconciliation for each. Restore rehearsal must succeed before any target copy.
 6. Retain all source and target backups through the agreed rollback window. Do not delete or overwrite either original database.
 
-**Current blocker:** Replit's production query tool in this audit is read-only and does not produce a verified dump or restore rehearsal. The owner/operator must select and validate the supported production export/backup path before migration work can advance.
+**Current blocker:** Stage 1 created only empty target tables. Before any data copy, refresh the production-primary backup and independently restore-test it because the existing source backup is older than current source counts. The existing Supabase public backup remains independently verified.
 
 ## 3. Dry-run reconciliation
 
@@ -58,9 +58,9 @@ The checksum of an encrypted backup file is a separate artifact-integrity check,
 
 ## 4. Staged schema and data preparation
 
-1. Review a fresh additive, idempotent `aichm` schema migration. Do not execute it in this phase. Ensure it does not alter existing public tables, Supabase Auth, Storage policies, or n8n objects.
-2. Make application schema/SQL access explicit for `aichm`; retain `public` in the search path only for intentionally accessed Supabase-owned tables. Use a narrowly privileged server role, no browser database client, and no broad `anon`/`authenticated` grants.
-3. Apply schema only to an isolated restore/rehearsal target first. Validate RLS and role grants there.
+1. Stage 1 is complete: the additive, versioned `aichm` control and application schema migrations are applied to the existing Supabase target. The 34 application tables are empty; the source was not changed.
+2. Before data copy, refresh and independently restore-test the production-primary backup, then review the source/target dry-run and signed reconciliation/schema manifests.
+3. Make application schema/SQL access explicit for `aichm`; retain `public` only for intentionally accessed Supabase-owned tables. Use a narrowly privileged server role, no browser database client, and no broad `anon`/`authenticated` grants.
 4. Copy in dependency order with bounded transactions/batches. Persist an append-only checkpoint per table/batch and source-key digest so a rerun skips identical rows. Use insert-only/no-overwrite semantics; conflicts stop the batch and require review.
 5. Preserve primary keys, enum values, timestamps, FK relationships and sequence state. Set sequences only after validating the target maximum ID.
 6. Reconcile legacy public leads using a private crosswalk. Do not merge or overwrite by phone. Keep all inquiries as separate historical submissions.

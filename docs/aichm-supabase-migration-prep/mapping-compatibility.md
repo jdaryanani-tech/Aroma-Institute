@@ -2,7 +2,7 @@
 
 ## Schema boundary
 
-Keep the existing Supabase `public.leads`, `public.conversations`, and `public.course_knowledge` tables in place for the current n8n/Avni workflows. Put Replit-owned application tables in a new private `aichm` schema after a separately reviewed, additive schema migration. No `aichm` schema is present today.
+Keep the existing Supabase `public.leads`, `public.conversations`, and `public.course_knowledge` tables in place for the current n8n/Avni workflows. Replit-owned application tables are now present as empty tables in the private `aichm` schema, created by additive Stage 1 migrations. No records have been copied.
 
 Current Drizzle definitions use `pgTable` and much raw SQL is unqualified. A future app pool can use `search_path=aichm,public` so unqualified application table names resolve to `aichm`; audit and rewrite explicit `public.*` references and generated foreign-key references before cutover. Do not apply current `migrations/0000`–`0011` unchanged: they were generated for the Replit source schema, and the Calendar migration contains explicit `public` references. Generate a fresh target schema from the reconciled current schema and add it without altering the existing public tables.
 
