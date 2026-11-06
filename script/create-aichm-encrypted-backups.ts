@@ -38,7 +38,7 @@ const OUTPUT_DIRECTORY = path.resolve(".local/aichm-backup-export");
 const FORMAT_VERSION = "aichm-aesgcm-v1";
 const TABLE_RELKINDS = ["r", "p", "m"];
 
-type Scope = "full_database" | "public_schema";
+type Scope = "full_database" | "public_schema" | "supabase_application";
 type TableCount = { schema: string; table: string; rows: string };
 type DatabaseSnapshot = {
   client: PoolClient;
@@ -299,8 +299,15 @@ async function getTableCounts(
   const predicate =
     scope === "public_schema"
       ? "n.nspname = $1"
-      : "n.nspname NOT LIKE $1 AND n.nspname <> $2";
-  const parameters = scope === "public_schema" ? ["public"] : ["pg_%", "information_schema"];
+      : scope === "supabase_application"
+        ? "n.nspname = ANY($1::text[])"
+        : "n.nspname NOT LIKE $1 AND n.nspname <> $2";
+  const parameters =
+    scope === "public_schema"
+      ? ["public"]
+      : scope === "supabase_application"
+        ? [["public", "aichm"]]
+        : ["pg_%", "information_schema"];
   const foreignResult = await client.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace ` +
       `WHERE ${predicate} AND c.relkind = 'f'`,
@@ -334,8 +341,15 @@ async function getPolicyRoles(pool: Pool, scope: Scope): Promise<string[]> {
   const predicate =
     scope === "public_schema"
       ? "n.nspname = $1"
-      : "n.nspname NOT LIKE $1 AND n.nspname <> $2";
-  const parameters = scope === "public_schema" ? ["public"] : ["pg_%", "information_schema"];
+      : scope === "supabase_application"
+        ? "n.nspname = ANY($1::text[])"
+        : "n.nspname NOT LIKE $1 AND n.nspname <> $2";
+  const parameters =
+    scope === "public_schema"
+      ? ["public"]
+      : scope === "supabase_application"
+        ? [["public", "aichm"]]
+        : ["pg_%", "information_schema"];
   const result = await pool.query<{ role_name: string }>(
     `SELECT DISTINCT r.rolname AS role_name FROM pg_policy p ` +
       `JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace ` +
@@ -410,7 +424,7 @@ async function writeManifest(filename: string, manifest: DumpManifest): Promise<
 }
 
 async function createEncryptedDump(input: {
-  id: "source-production" | "supabase-public";
+  id: "source-production" | "supabase-application";
   scope: Scope;
   uri: string | undefined;
   snapshot: DatabaseSnapshot;
@@ -471,6 +485,7 @@ async function createEncryptedDump(input: {
   const args = ["--format=custom", "--no-password", `--snapshot=${input.snapshot.snapshotId}`];
   if (input.id === "source-production") args.push("--no-owner", "--no-acl");
   if (input.scope === "public_schema") args.push("--schema=public");
+  if (input.scope === "supabase_application") args.push("--schema=public", "--schema=aichm");
   const child = spawn("pg_dump", args, {
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -633,7 +648,11 @@ async function restoreArtifact(
 ): Promise<void> {
   const manifest = backup.manifest;
   const dbName =
-    manifest.source.scope === "full_database" ? "restore_source" : "restore_supabase_public";
+    manifest.source.scope === "full_database"
+      ? "restore_source"
+      : manifest.source.scope === "supabase_application"
+        ? "restore_supabase_application"
+        : "restore_supabase_public";
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH,
     HOME: os.tmpdir(),
@@ -891,17 +910,19 @@ async function main(): Promise<void> {
   const resumeFailedSteps = process.argv.includes("--resume-failed-backups");
   const resumeSourceBackup = process.argv.includes("--resume-source-backup");
   const refreshSourceBackup = process.argv.includes("--refresh-source-production-backup");
+  const refreshSupabaseBackup = process.argv.includes("--refresh-supabase-application-backup");
   const verifySourceRestore = process.argv.includes("--verify-source-restore");
   const selectedModes = [
     createNewBackups,
     resumeFailedSteps,
     resumeSourceBackup,
     refreshSourceBackup,
+    refreshSupabaseBackup,
     verifySourceRestore,
   ].filter(Boolean).length;
   if (selectedModes !== 1) {
     console.log(
-      "Choose one mode: --confirm-backup-and-restore, --resume-failed-backups, --resume-source-backup, --refresh-source-production-backup, or --verify-source-restore.",
+      "Choose one mode: --confirm-backup-and-restore, --resume-failed-backups, --resume-source-backup, --refresh-source-production-backup, --refresh-supabase-application-backup, or --verify-source-restore.",
     );
     return;
   }
@@ -917,7 +938,7 @@ async function main(): Promise<void> {
   const diagnostics: PgDumpDiagnostic[] = [];
   try {
     await assertOutputProtection();
-    if (resumeFailedSteps || resumeSourceBackup || verifySourceRestore) {
+    if (resumeFailedSteps || resumeSourceBackup || refreshSupabaseBackup || verifySourceRestore) {
       backups.push(...(await loadExistingBackups()));
       if (resumeSourceBackup) {
         const hasVerifiedSupabaseBackup = backups.some(
@@ -969,6 +990,7 @@ async function main(): Promise<void> {
     const policyRolesByScope: Record<Scope, string[]> = {
       full_database: sourcePolicyRoles,
       public_schema: targetPolicyRoles,
+      supabase_application: targetPolicyRoles,
     };
 
     const targetPoolConfig = buildSupabaseMigrationPoolConfig();
@@ -995,7 +1017,7 @@ async function main(): Promise<void> {
     }
 
     const allSpecs: Array<{
-      id: "source-production" | "supabase-public";
+      id: "source-production" | "supabase-application";
       scope: Scope;
       pool: Pool;
       uri: string | undefined;
@@ -1007,14 +1029,18 @@ async function main(): Promise<void> {
         uri: process.env.AICHM_SOURCE_PROD_DATABASE_URL,
       },
       {
-        id: "supabase-public",
-        scope: "public_schema",
+        id: "supabase-application",
+        scope: "supabase_application",
         pool: targetConnection.pool,
         uri: process.env.SUPABASE_DATABASE_URL,
       },
     ];
     const selectedDumpScopes = selectDumpScopes(
-      refreshSourceBackup ? "refresh_source" : "initial",
+      refreshSourceBackup
+        ? "refresh_source"
+        : refreshSupabaseBackup
+          ? "refresh_supabase"
+          : "initial",
       backups.map((backup) => backup.manifest.source.scope),
     );
     const specsToDump = allSpecs.filter((spec) => selectedDumpScopes.includes(spec.scope));
@@ -1025,7 +1051,7 @@ async function main(): Promise<void> {
       credentialTempDir = await mkdtemp("/dev/shm/aichm-backup-creds-");
       await chmod(credentialTempDir, 0o700);
       const targetCaFile = path.join(credentialTempDir, "supabase-ca.pem");
-      if (specsToDump.some((spec) => spec.scope === "public_schema")) {
+      if (specsToDump.some((spec) => spec.scope === "public_schema" || spec.scope === "supabase_application")) {
         await writeFile(targetCaFile, targetCa.ca, {
           encoding: "utf8",
           mode: 0o600,
@@ -1034,7 +1060,7 @@ async function main(): Promise<void> {
         await chmod(targetCaFile, 0o600);
       }
       const configuredSpecs = allSpecs.map((spec) =>
-        spec.scope === "public_schema"
+        spec.scope === "public_schema" || spec.scope === "supabase_application"
           ? {
               ...spec,
               passFile: path.join(credentialTempDir!, `${spec.id}.pgpass`),
@@ -1090,7 +1116,9 @@ async function main(): Promise<void> {
     if (!resumeSourceBackup && !refreshSourceBackup && !verifySourceRestore) {
       backupsToRestore = selectRestoreBackups(backups, false);
     }
-    if (resumeSourceBackup || refreshSourceBackup) backupsToRestore = newBackups;
+      if (resumeSourceBackup || refreshSourceBackup || refreshSupabaseBackup) {
+        backupsToRestore = newBackups;
+      }
     if (backupsToRestore.length) {
       try {
         failures.push(...(await restoreAll(backupsToRestore, key, policyRolesByScope)));
@@ -1103,19 +1131,20 @@ async function main(): Promise<void> {
       }
     }
 
-    if ((resumeSourceBackup || refreshSourceBackup) && diagnostics.length > 0) {
+    if ((resumeSourceBackup || refreshSourceBackup || refreshSupabaseBackup) && diagnostics.length > 0) {
       console.log(
         JSON.stringify({
           status: "failed",
           diagnostic: diagnostics[0],
-          sourceArtifactRetained: false,
+          newArtifactRetained: false,
           partialCiphertextRemoved: true,
-          existingSupabaseBackupUnchanged: true,
+          existingBackupsUnchanged: true,
           scratchRemoved: true,
           sourceDatabaseUnchanged: true,
           supabaseDatabaseUnchanged: true,
         }),
       );
+      process.exitCode = 2;
       return;
     }
 
@@ -1125,7 +1154,7 @@ async function main(): Promise<void> {
         pgDumpVersion: pgDump.text,
         pgRestoreVersion: pgRestore.text,
         isolatedPostgresMajor: postgres.major,
-        artifacts: (resumeSourceBackup || refreshSourceBackup ? newBackups : verifySourceRestore ? backupsToRestore : backups).map(({ manifest, manifestPath, artifactPath }) => ({
+        artifacts: (resumeSourceBackup || refreshSourceBackup || refreshSupabaseBackup ? newBackups : verifySourceRestore ? backupsToRestore : backups).map(({ manifest, manifestPath, artifactPath }) => ({
           path: path.relative(process.cwd(), artifactPath),
           manifestPath: path.relative(process.cwd(), manifestPath),
           manifest,
@@ -1137,6 +1166,7 @@ async function main(): Promise<void> {
         supabaseSchemaUnchanged: true,
       }),
     );
+    if (failures.length > 0 || diagnostics.length > 0) process.exitCode = 2;
   } catch (error) {
     console.error(JSON.stringify({ status: "stopped", errorCode: safeCode(error) }));
     process.exitCode = 2;

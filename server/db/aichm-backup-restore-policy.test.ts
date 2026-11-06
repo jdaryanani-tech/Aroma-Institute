@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { selectDumpScopes, selectRestoreBackups } from "./aichm-backup-restore-policy";
 
-function backup(scope: "full_database" | "public_schema", name: string) {
+function backup(
+  scope: "full_database" | "public_schema" | "supabase_application",
+  name: string,
+) {
   return { name, manifest: { source: { scope } } };
 }
 
@@ -21,6 +24,19 @@ test("source refresh creates only a new production dump and preserves existing a
     selectDumpScopes("refresh_source", ["full_database", "public_schema"]),
     ["full_database"],
   );
-  assert.deepEqual(selectDumpScopes("initial", []), ["full_database", "public_schema"]);
-  assert.deepEqual(selectDumpScopes("initial", ["public_schema"]), ["full_database"]);
+  assert.deepEqual(
+    selectDumpScopes("initial", []),
+    ["full_database", "supabase_application"],
+  );
+  assert.deepEqual(
+    selectDumpScopes("initial", ["supabase_application"]),
+    ["full_database"],
+  );
+});
+
+test("Supabase refresh selects the public and aichm application backup only", () => {
+  assert.deepEqual(
+    selectDumpScopes("refresh_supabase", ["full_database", "public_schema", "supabase_application"]),
+    ["supabase_application"],
+  );
 });

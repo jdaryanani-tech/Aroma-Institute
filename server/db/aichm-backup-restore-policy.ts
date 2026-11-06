@@ -1,12 +1,16 @@
-export type BackupRestoreScope = "full_database" | "public_schema";
-export type BackupCreationMode = "initial" | "refresh_source";
+export type BackupRestoreScope =
+  | "full_database"
+  | "public_schema"
+  | "supabase_application";
+export type BackupCreationMode = "initial" | "refresh_source" | "refresh_supabase";
 
 export function selectDumpScopes(
   mode: BackupCreationMode,
   existingScopes: readonly BackupRestoreScope[],
 ): BackupRestoreScope[] {
   if (mode === "refresh_source") return ["full_database"];
-  return (["full_database", "public_schema"] as const).filter(
+  if (mode === "refresh_supabase") return ["supabase_application"];
+  return (["full_database", "supabase_application"] as const).filter(
     (scope) => !existingScopes.includes(scope),
   );
 }
