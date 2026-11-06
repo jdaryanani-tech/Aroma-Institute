@@ -1,6 +1,7 @@
 node_modules
 dist
 generated-artifacts/
+.local/aichm-backup-export/
 /playwright-report/
 /test-results/
 .DS_Store
