@@ -28,6 +28,7 @@ import {
   classifyPgDumpDiagnostic,
   type PgDumpDiagnostic,
 } from "../server/db/pg-dump-diagnostic";
+import { selectRestoreBackups } from "../server/db/aichm-backup-restore-policy";
 
 const EXPECTED_SOURCE_DATABASE = "neondb";
 const EXPECTED_SUPABASE_DATABASE = "postgres";
@@ -671,23 +672,8 @@ async function restoreArtifact(
     await localAdmin.end();
   }
   await runQuiet("createdb", ["--template=template0", dbName], env);
-  const localPoolForPreparation = new Pool({
-    host: local.socketDir,
-    port: local.port,
-    user: "postgres",
-    database: dbName,
-    ssl: false,
-  });
-  try {
-    const client = await localPoolForPreparation.connect();
-    try {
-      await client.query("DROP SCHEMA IF EXISTS public CASCADE");
-    } finally {
-      client.release();
-    }
-  } finally {
-    await localPoolForPreparation.end();
-  }
+  // The custom archive has public relations but no public-schema TOC entry.
+  // Keep template0's default public schema so those relations can be restored.
 
   const decipher = createDecipheriv(
     "aes-256-gcm",
@@ -903,10 +889,16 @@ async function main(): Promise<void> {
   const createNewBackups = process.argv.includes("--confirm-backup-and-restore");
   const resumeFailedSteps = process.argv.includes("--resume-failed-backups");
   const resumeSourceBackup = process.argv.includes("--resume-source-backup");
-  const selectedModes = [createNewBackups, resumeFailedSteps, resumeSourceBackup].filter(Boolean).length;
+  const verifySourceRestore = process.argv.includes("--verify-source-restore");
+  const selectedModes = [
+    createNewBackups,
+    resumeFailedSteps,
+    resumeSourceBackup,
+    verifySourceRestore,
+  ].filter(Boolean).length;
   if (selectedModes !== 1) {
     console.log(
-      "Choose one mode: --confirm-backup-and-restore, --resume-failed-backups, or --resume-source-backup.",
+      "Choose one mode: --confirm-backup-and-restore, --resume-failed-backups, --resume-source-backup, or --verify-source-restore.",
     );
     return;
   }
@@ -917,11 +909,12 @@ async function main(): Promise<void> {
   let credentialTempDir: string | undefined;
   const backups: Array<{ manifest: DumpManifest; manifestPath: string; artifactPath: string }> = [];
   const newBackups: Array<{ manifest: DumpManifest; manifestPath: string; artifactPath: string }> = [];
+  let backupsToRestore: Array<{ manifest: DumpManifest; manifestPath: string; artifactPath: string }> = [];
   const failures: Array<{ target: string; errorCode: string }> = [];
   const diagnostics: PgDumpDiagnostic[] = [];
   try {
     await assertOutputProtection();
-    if (resumeFailedSteps || resumeSourceBackup) {
+    if (resumeFailedSteps || resumeSourceBackup || verifySourceRestore) {
       backups.push(...(await loadExistingBackups()));
       if (resumeSourceBackup) {
         const hasVerifiedSupabaseBackup = backups.some(
@@ -935,6 +928,22 @@ async function main(): Promise<void> {
         if (!hasVerifiedSupabaseBackup || hasSourceBackup) {
           throw new BackupFailure("source_only_resume_requires_supabase_backup_and_no_source_backup");
         }
+      }
+      if (verifySourceRestore) {
+        const sourceBackups = selectRestoreBackups(backups, true);
+        const hasVerifiedSupabaseBackup = backups.some(
+          (backup) =>
+            backup.manifest.source.scope === "public_schema" &&
+            backup.manifest.restore.status === "verified",
+        );
+        if (
+          sourceBackups.length !== 1 ||
+          sourceBackups[0].manifest.restore.status !== "failed" ||
+          !hasVerifiedSupabaseBackup
+        ) {
+          throw new BackupFailure("source_restore_only_requires_failed_source_and_verified_supabase_backup");
+        }
+        backupsToRestore = sourceBackups;
       }
     } else {
       const existing = await readdir(OUTPUT_DIRECTORY).catch(() => []);
@@ -1031,6 +1040,9 @@ async function main(): Promise<void> {
       const pendingSpecs = configuredSpecs.filter(
         (spec) => !backups.some((backup) => backup.manifest.source.scope === spec.scope),
       );
+      if (verifySourceRestore && pendingSpecs.length > 0) {
+        throw new BackupFailure("source_restore_only_refuses_to_create_backup");
+      }
 
       for (const spec of pendingSpecs) {
         let snapshot: DatabaseSnapshot | undefined;
@@ -1070,7 +1082,10 @@ async function main(): Promise<void> {
       await rm(credentialTempDir, { recursive: true, force: true });
       credentialTempDir = undefined;
     }
-    const backupsToRestore = resumeSourceBackup ? newBackups : backups;
+    if (!resumeSourceBackup && !verifySourceRestore) {
+      backupsToRestore = selectRestoreBackups(backups, false);
+    }
+    if (resumeSourceBackup) backupsToRestore = newBackups;
     if (backupsToRestore.length) {
       try {
         failures.push(...(await restoreAll(backupsToRestore, key, policyRolesByScope)));
@@ -1101,10 +1116,11 @@ async function main(): Promise<void> {
 
     console.log(
       JSON.stringify({
+        restoreOnly: verifySourceRestore,
         pgDumpVersion: pgDump.text,
         pgRestoreVersion: pgRestore.text,
         isolatedPostgresMajor: postgres.major,
-        artifacts: (resumeSourceBackup ? newBackups : backups).map(({ manifest, manifestPath, artifactPath }) => ({
+        artifacts: (resumeSourceBackup ? newBackups : verifySourceRestore ? backupsToRestore : backups).map(({ manifest, manifestPath, artifactPath }) => ({
           path: path.relative(process.cwd(), artifactPath),
           manifestPath: path.relative(process.cwd(), manifestPath),
           manifest,
