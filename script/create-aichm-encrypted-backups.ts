@@ -24,6 +24,10 @@ import {
   createSupabaseMigrationConnection,
 } from "../server/db/supabase-migration";
 import { migrationStoreFromPool } from "../server/db/aichm-migration-postgres";
+import {
+  classifyPgDumpDiagnostic,
+  type PgDumpDiagnostic,
+} from "../server/db/pg-dump-diagnostic";
 
 const EXPECTED_SOURCE_DATABASE = "neondb";
 const EXPECTED_SUPABASE_DATABASE = "postgres";
@@ -98,6 +102,12 @@ class BackupFailure extends Error {
   }
 }
 
+class PgDumpFailure extends BackupFailure {
+  constructor(readonly diagnostic: PgDumpDiagnostic) {
+    super("pg_dump_failed");
+  }
+}
+
 class HashingTransform extends Transform {
   constructor(private readonly hash: Hash) {
     super();
@@ -137,48 +147,19 @@ function captureStderr(child: ReturnType<typeof spawn>): () => string {
   return () => Buffer.concat(chunks).toString("utf8");
 }
 
-function classifyToolStderr(tool: "pg_dump" | "pg_restore", stderr: string): string {
+function classifyRestoreStderr(stderr: string): string {
   const text = stderr.toLowerCase();
-  if (/pg_hba\.conf|password authentication failed|no password supplied|authentication failed/.test(text)) {
-    return `${tool}_authentication_failed`;
+  if (/role .* does not exist/.test(text)) return "pg_restore_missing_role_dependency";
+  if (/relation .* does not exist|schema .* does not exist|function .* does not exist/.test(text)) {
+    return "pg_restore_missing_object_dependency";
   }
-  if (/certificate verify|ssl error|tls handshake|ssl syscall/.test(text)) {
-    return `${tool}_tls_verification_failed`;
+  if (/permission denied|must be owner|insufficient privilege/.test(text)) {
+    return "pg_restore_privilege_failure";
   }
-  if (/could not connect|connection refused|connection timed out|network is unreachable|name or service not known/.test(text)) {
-    return `${tool}_connection_failed`;
+  if (/already exists|duplicate key|conflicts with existing/.test(text)) {
+    return "pg_restore_disposable_object_conflict";
   }
-  if (/permission denied|must be owner|not have permission|insufficient privilege/.test(text)) {
-    return `${tool}_privilege_or_ownership_failure`;
-  }
-  if (/snapshot/.test(text)) return `${tool}_snapshot_import_failed`;
-  if (/extension .* is not available|could not open extension control file/.test(text)) {
-    return `${tool}_missing_extension_dependency`;
-  }
-  if (/role .* does not exist/.test(text)) return `${tool}_missing_role_dependency`;
-  if (/schema .* does not exist/.test(text)) return `${tool}_missing_schema_dependency`;
-  if (/function .* does not exist|procedure .* does not exist/.test(text)) {
-    return `${tool}_missing_function_dependency`;
-  }
-  if (/relation .* does not exist|type .* does not exist/.test(text)) {
-    return `${tool}_missing_object_dependency`;
-  }
-  if (/unsupported version|archive version|server version mismatch/.test(text)) {
-    return `${tool}_version_incompatible`;
-  }
-  if (/no space left on device|out of memory|disk quota exceeded/.test(text)) {
-    return `${tool}_local_storage_resource_failure`;
-  }
-  if (/duplicate key|already exists|conflicts with existing/.test(text)) {
-    return `${tool}_disposable_restore_object_conflict`;
-  }
-  if (/sqlstate|error:|fatal:/.test(text)) {
-    const state = text.match(/(?:sqlstate|sql state)\s*[:=]\s*([0-9a-z]{5})/i)?.[1];
-    return state
-      ? `${tool}_database_error_sqlstate_${state.toUpperCase()}`
-      : `${tool}_database_error`;
-  }
-  return `${tool}_exit_failed`;
+  return "pg_restore_failed";
 }
 
 function safeHostMatch(hostname: string | undefined, expected: string): boolean {
@@ -483,6 +464,7 @@ async function createEncryptedDump(input: {
   if (input.targetCaFile) env.PGSSLROOTCERT = input.targetCaFile;
 
   const args = ["--format=custom", "--no-password", `--snapshot=${input.snapshot.snapshotId}`];
+  if (input.id === "source-production") args.push("--no-owner", "--no-acl");
   if (input.scope === "public_schema") args.push("--schema=public");
   const child = spawn("pg_dump", args, {
     env,
@@ -503,7 +485,7 @@ async function createEncryptedDump(input: {
     );
     const exitCode = await exitPromise;
     if (exitCode !== 0) {
-      throw new BackupFailure(classifyToolStderr("pg_dump", diagnostics()));
+      throw new PgDumpFailure(classifyPgDumpDiagnostic(diagnostics(), exitCode));
     }
     await chmod(partialPath, 0o600);
     await rename(partialPath, artifactPath);
@@ -549,10 +531,22 @@ async function createEncryptedDump(input: {
     return { manifest, manifestPath, artifactPath };
   } catch (error) {
     child.kill("SIGTERM");
-    await exitPromise.catch(() => undefined);
+    const exitCode = await exitPromise.catch(() => -1);
     await rm(partialPath, { force: true });
     await rm(artifactPath, { force: true });
-    throw error instanceof BackupFailure ? error : new BackupFailure("encrypted_dump_failed");
+    if (error instanceof PgDumpFailure) throw error;
+    const systemErrorCode =
+      error && typeof error === "object" && "code" in error && typeof error.code === "string"
+        ? error.code
+        : undefined;
+    throw new PgDumpFailure(
+      classifyPgDumpDiagnostic(
+        diagnostics(),
+        exitCode,
+        exitCode < 0 ? "encrypted_stream" : "pg_dump",
+        systemErrorCode,
+      ),
+    );
   }
 }
 
@@ -617,10 +611,6 @@ async function loadExistingBackups(): Promise<
     if (!artifactStat || artifactStat.size !== manifest.artifact.ciphertextBytes) {
       throw new BackupFailure("existing_encrypted_artifact_missing_or_wrong_size");
     }
-    manifest.restore = {
-      status: "pending",
-      archiveAuthentication: "failed",
-    };
     backups.push({ manifest, manifestPath, artifactPath });
   }
   if (backups.length === 0) throw new BackupFailure("no_existing_backup_manifests");
@@ -738,7 +728,7 @@ async function restoreArtifact(
     const exitCode = await exitPromise;
     manifest.restore.pgRestoreExitCode = exitCode;
     if (exitCode !== 0) {
-      throw new BackupFailure(classifyToolStderr("pg_restore", diagnostics()));
+      throw new BackupFailure(classifyRestoreStderr(diagnostics()));
     }
 
     const restoredPool = new Pool({
@@ -908,9 +898,11 @@ async function verifyConnectionIdentities(
 async function main(): Promise<void> {
   const createNewBackups = process.argv.includes("--confirm-backup-and-restore");
   const resumeFailedSteps = process.argv.includes("--resume-failed-backups");
-  if (createNewBackups === resumeFailedSteps) {
+  const resumeSourceBackup = process.argv.includes("--resume-source-backup");
+  const selectedModes = [createNewBackups, resumeFailedSteps, resumeSourceBackup].filter(Boolean).length;
+  if (selectedModes !== 1) {
     console.log(
-      "Use --confirm-backup-and-restore for new backups, or --resume-failed-backups to reuse existing encrypted artifacts.",
+      "Choose one mode: --confirm-backup-and-restore, --resume-failed-backups, or --resume-source-backup.",
     );
     return;
   }
@@ -920,11 +912,26 @@ async function main(): Promise<void> {
   let targetConnection: ReturnType<typeof createSupabaseMigrationConnection> | undefined;
   let credentialTempDir: string | undefined;
   const backups: Array<{ manifest: DumpManifest; manifestPath: string; artifactPath: string }> = [];
+  const newBackups: Array<{ manifest: DumpManifest; manifestPath: string; artifactPath: string }> = [];
   const failures: Array<{ target: string; errorCode: string }> = [];
+  const diagnostics: PgDumpDiagnostic[] = [];
   try {
     await assertOutputProtection();
-    if (resumeFailedSteps) {
+    if (resumeFailedSteps || resumeSourceBackup) {
       backups.push(...(await loadExistingBackups()));
+      if (resumeSourceBackup) {
+        const hasVerifiedSupabaseBackup = backups.some(
+          (backup) =>
+            backup.manifest.source.scope === "public_schema" &&
+            backup.manifest.restore.status === "verified",
+        );
+        const hasSourceBackup = backups.some(
+          (backup) => backup.manifest.source.scope === "full_database",
+        );
+        if (!hasVerifiedSupabaseBackup || hasSourceBackup) {
+          throw new BackupFailure("source_only_resume_requires_supabase_backup_and_no_source_backup");
+        }
+      }
     } else {
       const existing = await readdir(OUTPUT_DIRECTORY).catch(() => []);
       if (existing.length > 0) {
@@ -1037,10 +1044,15 @@ async function main(): Promise<void> {
             key,
           });
           backups.push(backup);
+          newBackups.push(backup);
           await finishSnapshot(snapshot, true);
           snapshot = undefined;
         } catch (error) {
-          failures.push({ target: spec.id, errorCode: safeCode(error) });
+          if (error instanceof PgDumpFailure) {
+            diagnostics.push(error.diagnostic);
+          } else {
+            failures.push({ target: spec.id, errorCode: safeCode(error) });
+          }
         } finally {
           if (snapshot) await finishSnapshot(snapshot, false).catch(() => undefined);
         }
@@ -1051,14 +1063,33 @@ async function main(): Promise<void> {
       await rm(credentialTempDir, { recursive: true, force: true });
       credentialTempDir = undefined;
     }
-    if (backups.length) {
+    const backupsToRestore = resumeSourceBackup ? newBackups : backups;
+    if (backupsToRestore.length) {
       try {
-        failures.push(...(await restoreAll(backups, key, policyRolesByScope)));
+        failures.push(...(await restoreAll(backupsToRestore, key, policyRolesByScope)));
       } catch (error) {
         failures.push({ target: "isolated_restore", errorCode: safeCode(error) });
       }
     } else {
-      failures.push({ target: "isolated_restore", errorCode: "no_valid_encrypted_artifacts" });
+      if (diagnostics.length === 0) {
+        failures.push({ target: "isolated_restore", errorCode: "no_valid_encrypted_artifacts" });
+      }
+    }
+
+    if (resumeSourceBackup && diagnostics.length > 0) {
+      console.log(
+        JSON.stringify({
+          status: "failed",
+          diagnostic: diagnostics[0],
+          sourceArtifactRetained: false,
+          partialCiphertextRemoved: true,
+          existingSupabaseBackupUnchanged: true,
+          scratchRemoved: true,
+          sourceDatabaseUnchanged: true,
+          supabaseDatabaseUnchanged: true,
+        }),
+      );
+      return;
     }
 
     console.log(
@@ -1066,12 +1097,13 @@ async function main(): Promise<void> {
         pgDumpVersion: pgDump.text,
         pgRestoreVersion: pgRestore.text,
         isolatedPostgresMajor: postgres.major,
-        artifacts: backups.map(({ manifest, manifestPath, artifactPath }) => ({
+        artifacts: (resumeSourceBackup ? newBackups : backups).map(({ manifest, manifestPath, artifactPath }) => ({
           path: path.relative(process.cwd(), artifactPath),
           manifestPath: path.relative(process.cwd(), manifestPath),
           manifest,
         })),
         failures,
+        diagnostics,
         scratchRemoved: true,
         sourceSchemaUnchanged: true,
         supabaseSchemaUnchanged: true,
