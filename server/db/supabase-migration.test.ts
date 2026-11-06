@@ -57,6 +57,26 @@ test("invalid or non-PEM CA material is rejected without exposing its contents",
     () => buildConfig({ ca: "-----BEGIN CERTIFICATE-----invalid-----END CERTIFICATE-----" }),
     /invalid PEM certificate/,
   );
+  assert.throws(
+    () =>
+      buildConfig({
+        ca: "-----BEGIN CERTIFICATE-----\nnot-valid-base64!?\n-----END CERTIFICATE-----",
+      }),
+    /invalid PEM certificate/,
+  );
+  assert.throws(
+    () => buildConfig({ ca: "-----BEGIN CERTIFICATE-----valid-base64-body" }),
+    /PEM-encoded certificate/,
+  );
+});
+
+test("multiline and flattened CA PEM are normalized to valid certificate blocks", () => {
+  const expectedPem = TEST_CA.replace(/\r\n/g, "\n").trim();
+  const multilineConfig = buildConfig({ ca: TEST_CA });
+  const flattenedConfig = buildConfig({ ca: TEST_CA.replace(/[\r\n]/g, "") });
+
+  assert.equal(multilineConfig.ssl && typeof multilineConfig.ssl === "object" ? multilineConfig.ssl.ca : null, expectedPem);
+  assert.equal(flattenedConfig.ssl && typeof flattenedConfig.ssl === "object" ? flattenedConfig.ssl.ca : null, expectedPem);
 });
 
 test("migration URI must explicitly require SSL", () => {
@@ -103,7 +123,7 @@ test("the pg config keeps strict CA and hostname verification while stripping on
   if (!config.ssl || typeof config.ssl !== "object") {
     assert.fail("Expected an explicit TLS configuration.");
   }
-  assert.equal(config.ssl.ca, TEST_CA);
+  assert.equal(config.ssl.ca, TEST_CA.replace(/\r\n/g, "\n").trim());
   assert.equal(config.ssl.rejectUnauthorized, true);
   assert.equal(config.ssl.checkServerIdentity, checkServerIdentity);
   assert.equal(config.ssl.minVersion, "TLSv1.2");
@@ -115,7 +135,7 @@ test("the pg config keeps strict CA and hostname verification while stripping on
     config: PoolConfig,
   ) => { ssl: { ca?: string; rejectUnauthorized?: boolean } };
   const actualPgParameters = new ConnectionParameters(config);
-  assert.equal(actualPgParameters.ssl.ca, TEST_CA);
+  assert.equal(actualPgParameters.ssl.ca, TEST_CA.replace(/\r\n/g, "\n").trim());
   assert.equal(actualPgParameters.ssl.rejectUnauthorized, true);
 });
 

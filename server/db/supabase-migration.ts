@@ -10,6 +10,9 @@ const EXPECTED_PROJECT_REF = "xylqezjvqqqjozenuygh";
 const EXPECTED_SESSION_POOLER_HOST = "aws-0-ap-northeast-1.pooler.supabase.com";
 const EXPECTED_SESSION_POOLER_PORT = "5432";
 const EXPECTED_DATABASE_PATH = "/postgres";
+const CERTIFICATE_BEGIN = "-----BEGIN CERTIFICATE-----";
+const CERTIFICATE_END = "-----END CERTIFICATE-----";
+const PEM_LINE_LENGTH = 64;
 
 export type SupabaseMigrationEnvironment = Record<string, string | undefined>;
 
@@ -22,30 +25,43 @@ function requiredValue(value: string | undefined, name: string): string {
 }
 
 function validateCertificate(certificate: string): string {
-  const blocks = certificate.match(
-    /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g,
-  );
-  const remainder = certificate.replace(
-    /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g,
-    "",
-  );
+  const blockPattern = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/g;
+  const blocks = Array.from(certificate.matchAll(blockPattern), (match) => match[1]);
+  const remainder = certificate.replace(blockPattern, "");
 
   if (!blocks?.length || remainder.trim()) {
     throw new Error("SUPABASE_DB_SSL_CA must contain PEM-encoded certificate text.");
   }
 
   try {
-    for (const block of blocks) {
+    const normalizedBlocks = blocks.map((body) => {
+      const base64 = body.replace(/\s+/g, "");
+      const hasValidBase64 =
+        base64.length > 0 &&
+        base64.length % 4 === 0 &&
+        /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+          base64,
+        );
+
+      if (!hasValidBase64 || Buffer.from(base64, "base64").toString("base64") !== base64) {
+        throw new Error("Certificate payload is not valid base64.");
+      }
+
+      const wrappedBody = base64.match(new RegExp(`.{1,${PEM_LINE_LENGTH}}`, "g"))!.join("\n");
+      return `${CERTIFICATE_BEGIN}\n${wrappedBody}\n${CERTIFICATE_END}`;
+    });
+    const normalizedCertificate = normalizedBlocks.join("\n");
+
+    for (const block of normalizedBlocks) {
       if (!new X509Certificate(block).ca) {
         throw new Error("Certificate is not a CA.");
       }
     }
-    createSecureContext({ ca: certificate, minVersion: "TLSv1.2" });
+    createSecureContext({ ca: normalizedCertificate, minVersion: "TLSv1.2" });
+    return normalizedCertificate;
   } catch {
     throw new Error("SUPABASE_DB_SSL_CA contains an invalid PEM certificate.");
   }
-
-  return certificate;
 }
 
 function validateConnectionUrl(connectionString: string): URL {
