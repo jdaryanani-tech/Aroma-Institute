@@ -8,7 +8,7 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "test": "tsx --test server/lms/*.test.ts server/admissions/*.test.ts server/crm/*.test.ts server/calendar/*.test.ts server/n8n-counselling.test.ts client/src/lib/*.test.ts",
+    "test": "tsx --test server/db/*.test.ts server/lms/*.test.ts server/admissions/*.test.ts server/crm/*.test.ts server/calendar/*.test.ts server/n8n-counselling.test.ts client/src/lib/*.test.ts",
     "test:crm": "NODE_ENV=test tsx --test server/crm/*.test.ts",
     "db:check:crm": "tsx script/check-crm-schema.ts",
     "test:admissions": "NODE_ENV=test tsx --test server/admissions/*.test.ts",
