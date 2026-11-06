@@ -127,6 +127,11 @@ test("the pg config keeps strict CA and hostname verification while stripping on
   assert.equal(config.ssl.rejectUnauthorized, true);
   assert.equal(config.ssl.checkServerIdentity, checkServerIdentity);
   assert.equal(config.ssl.minVersion, "TLSv1.2");
+  assert.equal(config.options, "-c timezone=UTC");
+  assert.equal(
+    config.types?.getTypeParser(1184, "text")("2026-11-06 01:02:03.123456+00"),
+    "2026-11-06 01:02:03.123456+00",
+  );
   assert.equal(Reflect.set(config.ssl, "rejectUnauthorized", false), false);
   assert.equal(Reflect.set(config, "ssl", false), false);
 

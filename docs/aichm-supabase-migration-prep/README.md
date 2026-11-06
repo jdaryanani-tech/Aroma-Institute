@@ -1,6 +1,6 @@
 # AICHM → Supabase migration preparation
 
-**Status:** preparation artifacts only. No DDL, DML, data copy, export, secret change, runtime routing change, publish, or cutover occurred.
+**Status:** migration engine and preparation artifacts are implemented in the workspace. No live database connection was opened by this task; no DDL, DML, data copy, export, backup, restore, secret change, runtime routing change, publish, or cutover occurred.
 
 **Inventory date:** 2026-11-06 UTC. The Supabase TLS/inventory probe completed at 2026-11-06T06:59:24Z; Replit development and production metadata were queried read-only during the same audit session. Counts are point-in-time snapshots and can change.
 
@@ -65,4 +65,6 @@ The connection read only database identity, catalogs, and exact table counts. Th
 - `server/db/aichm-migration-plan.ts` and `script/aichm-supabase-migration-prep.ts` — deterministic snapshot-based dry-run planner. It has no database writer. `--apply` is deliberately rejected until a separately reviewed migration implementation exists.
 - `server/db/aichm-migration-plan.test.ts` — planner safety/order tests.
 
-The source remains `DATABASE_URL`. Current migration connection secrets are `SUPABASE_DATABASE_URL` and `SUPABASE_DB_SSL_CA`; no secret values are in these artifacts. A dedicated least-privilege runtime database role and an audit HMAC key are future decisions, not configured here.
+The source remains `DATABASE_URL`. The migration target factory reads `SUPABASE_DATABASE_URL` and `SUPABASE_DB_SSL_CA`; the source factory is separately gated by `AICHM_SOURCE_PROD_DATABASE_URL`. Apply mode additionally requires `AICHM_BACKUP_ENCRYPTION_KEY` and `AICHM_MIGRATION_APPROVAL_PUBLIC_KEY` plus signed backup, reconciliation, schema-version, and owner-approval manifests. Secret values are never included in the artifacts. These new apply prerequisites are not all configured, and no backup/restore manifest exists.
+
+The code-based engine, connection factories, apply gates and synthetic tests are described in [`migration-engine.md`](migration-engine.md). The runner has no live run history in this task. Its default mode reads the committed inventory snapshots only; live dry-run requires explicit `--live-dry-run`, and apply requires both `--apply` and `--production-cutover` plus every approval gate. Do not use the runner against live databases until the missing source-primary and verified backup/restore prerequisites are resolved.

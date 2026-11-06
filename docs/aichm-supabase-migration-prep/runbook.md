@@ -7,7 +7,7 @@
 - Keep `DATABASE_URL` as the active app database until a separate owner-approved cutover.
 - Keep the existing Supabase public AICHM/n8n tables untouched.
 - Never run historical migrations `0000`–`0011` as a batch against either Supabase or production Replit.
-- The current `script/aichm-supabase-migration-prep.ts` reads committed metadata snapshots only. It has no database connection or writer; `--apply` exits with an error.
+- `script/aichm-supabase-migration-prep.ts` remains snapshot-only. The separate `script/aichm-migrate.ts` has snapshot-only default mode, explicit read-only live dry-run, and a guarded apply path. It was not run against live databases in this task.
 - Do not use `executeSql`'s production read-only replica as a backup/export source.
 - No live n8n request, WhatsApp send, Calendar reminder, or deployment is needed for schema/data preparation.
 
@@ -37,7 +37,7 @@ No source or target backup was created in this preparation task. Before a migrat
 
 ## 3. Dry-run reconciliation
 
-Run only a reviewed, read-only inventory/dry-run after backups are verified. The existing scaffold can render its captured snapshot plan; it does not connect to databases. A future live dry-run must:
+The current engine can perform a read-only live dry-run using the separate production-source and strict-TLS Supabase factories, but no live dry-run was run. Its default CLI mode reads captured metadata snapshots only. A live dry-run requires the explicit `--live-dry-run` flag; a target without the full AICHM schema stops at table preflight. Before using it:
 
 - Compare all source/target table names, columns, types, defaults, nullability, constraints, indexes, RLS, sequences, and relation sizes.
 - Build a table-by-table PK/FK plan. Preserve source IDs and use the dependency order in `server/db/aichm-migration-plan.ts`.
@@ -51,10 +51,10 @@ Run only a reviewed, read-only inventory/dry-run after backups are verified. The
 For each table and deterministic PK-ordered batch (for example, 1,000 rows):
 
 1. Canonicalize each row with explicit type tags; normalize timestamps to UTC; sort JSON object keys; preserve array order and exact bytea bytes.
-2. Compute an HMAC-SHA-256 over length-prefixed canonical rows using a one-run private audit key. Log only table name, batch ordinal, row count, and digest. Do not log or persist canonical row payloads or per-person hashes.
-3. Compare source and target batch HMACs and total counts. Recompute after retries. A mismatch blocks completion.
+2. The implementation computes a deterministic SHA-256 chain over canonical rows, excluding secret/token/session fields. Password hashes remain copied and compared in memory but are excluded from logged checksums. It logs only table name, batch number, aggregate counts and digest; it never emits row values or per-person hashes.
+3. Compare source and target batch-chain checksums and total counts. Recompute after retries. Any mismatch blocks completion.
 
-The future key may be provisioned as `AICHM_MIGRATION_AUDIT_KEY` through Replit Secrets for the migration environment only. It is not configured or used now. The checksum of an encrypted backup file is a separate artifact-integrity check, not a row-equivalence check.
+The checksum of an encrypted backup file is a separate artifact-integrity check, not a row-equivalence check.
 
 ## 4. Staged schema and data preparation
 

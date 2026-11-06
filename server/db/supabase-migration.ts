@@ -2,6 +2,7 @@ import { checkServerIdentity, createSecureContext, type ConnectionOptions } from
 import { X509Certificate } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool, type PoolConfig } from "pg";
+import { migrationPgTypes } from "./migration-pg-types";
 import * as siteSchema from "@shared/schema";
 import * as lmsSchema from "@shared/lms-schema";
 import * as calendarSchema from "@shared/calendar-schema";
@@ -165,6 +166,8 @@ export function buildSupabaseMigrationPoolConfig(
   return Object.freeze({
     connectionString: poolUrl.toString(),
     ssl,
+    options: "-c timezone=UTC",
+    types: migrationPgTypes,
     application_name: "aichm-supabase-migration",
   });
 }
