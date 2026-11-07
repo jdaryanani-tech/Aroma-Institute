@@ -24,6 +24,8 @@ import {
 } from "@/lms-ui";
 import { PwaInstallPrompt } from "@/lms-ui/PwaInstallPrompt";
 import CalendarPage from "@/calendar/CalendarPage";
+import MetaMarketing from "@/meta/MetaMarketing";
+import { isPublicAdmissionsPath } from "@/meta/scope";
 
 function Router() {
   return (
@@ -61,12 +63,14 @@ function App() {
   const [location] = useLocation();
   const isLearnPortal = location === "/learn" || location.startsWith("/learn/");
   const isAdminPortal = location === "/admin" || location.startsWith("/admin/");
+  const isPublicMarketingPage = isPublicAdmissionsPath(location);
 
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
         <Router />
+        {isPublicMarketingPage && <MetaMarketing />}
         {isLearnPortal && <PwaInstallPrompt />}
         {isAdminPortal && <AdminInstallHelp />}
       </TooltipProvider>

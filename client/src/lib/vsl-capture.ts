@@ -1,6 +1,7 @@
 type Observation = "play" | "sample" | "pause" | "seek" | "ended";
 type Status = "initial" | "saving" | "saved" | "unlinked" | "error";
 type Transport = (url: string, body: unknown) => Promise<{ ok: boolean; status: number; json(): Promise<any> }>;
+type MetaMilestone = { eventName: string; eventId: string; customData?: Record<string, string | number | boolean> };
 
 const defaultTransport: Transport = (url, body) => fetch(url, {
   method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
@@ -8,7 +9,11 @@ const defaultTransport: Transport = (url, body) => fetch(url, {
 });
 
 /** Serialized, retryable observations; lead identity is never accepted from JS. */
-export function createDurableVslTracker(onStatus: (status: Status) => void, transport: Transport = defaultTransport) {
+export function createDurableVslTracker(
+  onStatus: (status: Status) => void,
+  transport: Transport = defaultTransport,
+  onMetaMilestones: (events: MetaMilestone[]) => void = () => undefined,
+) {
   let playbackId: string | null = null;
   let initialized: Promise<void> | undefined;
   let sequence = 0;
@@ -40,7 +45,12 @@ export function createDurableVslTracker(onStatus: (status: Status) => void, tran
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
             const response = await transport("/api/vsl/events", body);
-            if (response.ok) { onStatus("saved"); return; }
+            if (response.ok) {
+              const result = await response.json().catch(() => null);
+              if (Array.isArray(result?.metaEvents)) onMetaMilestones(result.metaEvents);
+              onStatus("saved");
+              return;
+            }
             if (response.status < 500) throw new Error("capture_rejected");
           } catch (error) {
             if (attempt === 2 || (error instanceof Error && error.message === "capture_rejected")) throw error;

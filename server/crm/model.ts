@@ -2,16 +2,18 @@ import type { CrmCapabilities, CrmLead, CrmStage } from "@shared/crm";
 import type { QueryResultRow } from "pg";
 
 export type SqlDb = { query: (text: string, values?: any[]) => Promise<{ rows: any[] }> };
-export type CrmSchema = CrmCapabilities & { deliveryAttempts: boolean };
+export type CrmSchema = CrmCapabilities & { deliveryAttempts: boolean; metaAttribution: boolean };
 
 export async function inspectCrmSchema(db: SqlDb): Promise<CrmSchema> {
   const { rows: [r] } = await db.query(`SELECT
     to_regclass('admissions_leads') IS NOT NULL AS identity,
     to_regclass('admissions_vsl_events') IS NOT NULL AS video,
     to_regclass('admissions_crm_profiles') IS NOT NULL AND to_regclass('admissions_crm_activities') IS NOT NULL AS crm,
-    to_regclass('counselling_delivery_attempts') IS NOT NULL AS attempts`);
+    to_regclass('counselling_delivery_attempts') IS NOT NULL AS attempts,
+    to_regclass('admissions_lead_touchpoints') IS NOT NULL AS marketing`);
   return { identityTracking: r.identity, videoTracking: r.identity && r.video,
-    crmPersistence: r.crm, deliveryAttempts: r.attempts, calendarBookingVerification: false, chatHistory: false };
+    crmPersistence: r.crm, deliveryAttempts: r.attempts, metaAttribution: r.marketing,
+    calendarBookingVerification: false, chatHistory: false };
 }
 
 /** All optional tables are selected only after capability introspection, never via startup DDL. */
@@ -30,7 +32,11 @@ export function crmModelSql(c: CrmSchema) {
     ? `SELECT * FROM admissions_crm_profiles`
     : `SELECT NULL::integer inquiry_id,NULL::text stage,NULL::jsonb stage_evidence,NULL::integer owner_id,
        NULL::timestamptz follow_up_at,NULL::timestamptz updated_at,NULL::integer updated_by,NULL::integer version WHERE false`;
+  const touchpoints = c.metaAttribution
+    ? `SELECT lead_id,inquiry_id,source_channel FROM admissions_lead_touchpoints`
+    : `SELECT NULL::uuid lead_id,NULL::integer inquiry_id,NULL::text source_channel WHERE false`;
   return `WITH lead_source AS (${leads}), video_source AS (${video}), profile_source AS (${profiles}),
+    touchpoint_source AS (${touchpoints}),
     normalized AS (
       SELECT i.id,i.name,i.email,i.phone,i.program_interest,i.counselling_submitted_at,
         (i.counselling_answers IS NOT NULL AND i.counselling_submitted_at IS NOT NULL) verified_form,
@@ -70,7 +76,8 @@ export function crmModelSql(c: CrmSchema) {
       FROM keyed GROUP BY person_key
     ), model AS (
       SELECT g.*,coalesce(l.name,g.name) display_name,
-        ARRAY_REMOVE(ARRAY[l.entry_source,CASE WHEN g.has_verified_form THEN 'counselling' ELSE 'website_enquiry' END],NULL) sources,
+        ARRAY_REMOVE(ARRAY[l.entry_source,CASE WHEN g.has_verified_form THEN 'counselling' ELSE 'website_enquiry' END],NULL)
+          || coalesce(ts.channels,ARRAY[]::text[]) sources,
         coalesce(p.stage,CASE WHEN g.has_verified_form THEN 'form_submitted' WHEN v.watched THEN 'vsl_watched' ELSE 'new_enquiry' END) stage,
         CASE WHEN p.stage IS NOT NULL THEN 'admin' WHEN g.has_verified_form THEN 'verified_form' WHEN v.watched THEN 'verified_video' ELSE 'new' END stage_source,
         p.stage_evidence,p.owner_id,u.display_name owner_name,p.follow_up_at,
@@ -83,6 +90,8 @@ export function crmModelSql(c: CrmSchema) {
       LEFT JOIN video_source v ON v.lead_id::text=g.lead_id
       LEFT JOIN LATERAL(SELECT * FROM profile_source pp WHERE pp.inquiry_id=ANY(g.inquiry_ids)
         ORDER BY pp.updated_at DESC,pp.inquiry_id LIMIT 1) p ON true
+      LEFT JOIN LATERAL(SELECT array_agg(DISTINCT touch.source_channel) channels FROM touchpoint_source touch
+        WHERE touch.lead_id::text=g.lead_id OR touch.inquiry_id=ANY(g.inquiry_ids)) ts ON true
       LEFT JOIN lms_users u ON u.id=p.owner_id
     )`;
 }

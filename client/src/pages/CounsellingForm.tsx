@@ -12,6 +12,7 @@ import {
   type CounsellingAnswers,
 } from "@shared/schema";
 import { counsellingQuestions, type QuestionnaireQuestion } from "./counsellingQuestions";
+import { getMarketingAttribution, trackMetaEvent } from "@/meta/tracking";
 
 const initialAnswers: Record<string, unknown> = {
   fullName: "",
@@ -166,7 +167,12 @@ export default function CounsellingForm() {
 
     setSubmitting(true);
     try {
-      await apiRequest("POST", "/api/counselling-inquiries", payloadResult.data);
+      const response = await apiRequest("POST", "/api/counselling-inquiries", {
+        ...payloadResult.data,
+        attribution: getMarketingAttribution(),
+      });
+      const result = await response.json();
+      trackMetaEvent("CounsellingSubmitted", result.metaEventId, { funnel_step: "counselling_submitted" });
       setComplete(true);
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Request submit nahi ho payi. Dobara try karein.");

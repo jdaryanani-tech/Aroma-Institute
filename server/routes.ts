@@ -13,6 +13,10 @@ import { registerFollowUpStatusRoute } from "./admissions/follow-up-routes";
 import { registerCrmRoutes } from "./crm/routes";
 import { registerFirstOwnerRoutes } from "./lms/first-owner";
 import { registerCalendarRoutes } from "./calendar/routes";
+import { registerMetaRoutes } from "./meta/routes";
+import { safeMetaEventSourceUrl, visitorKey } from "./meta/http";
+import { parseMetaAttribution } from "./meta/attribution";
+import { saveWebsiteInquiry } from "./admissions/identity";
 import {
   sendCounsellingInquiryToN8n,
   summarizeCounsellingDeliveryResult,
@@ -28,12 +32,17 @@ export async function registerRoutes(
   registerFollowUpStatusRoute(app);
   registerCrmRoutes(app);
   registerCalendarRoutes(app);
+  registerMetaRoutes(app);
 
   app.post("/api/inquiries", async (req, res) => {
     try {
       const data = insertInquirySchema.parse(req.body);
-      const inquiry = await storage.createInquiry(data);
-      res.status(201).json(inquiry);
+      const saved = await saveWebsiteInquiry(data, new Date(), undefined, {
+        visitorKeyHash: visitorKey(req),
+        eventSourceUrl: safeMetaEventSourceUrl(req, "/"),
+        attribution: parseMetaAttribution(req.body?.attribution),
+      });
+      res.status(201).json({ ...saved.inquiry, metaEventId: saved.metaEventId });
     } catch (error) {
       if (error instanceof ZodError) {
         const validationError = fromZodError(error);
@@ -46,9 +55,14 @@ export async function registerRoutes(
 
   app.post("/api/counselling-inquiries", sameOriginCapture, captureLimit("counselling", 12), async (req, res) => {
     try {
-      const data = insertCounsellingInquirySchema.parse(req.body);
+      const { attribution: _attribution, ...formBody } = req.body ?? {};
+      const data = insertCounsellingInquirySchema.parse(formBody);
       const submittedAt = new Date();
-      const inquiry = await storage.createCounsellingInquiry(data, submittedAt);
+      const inquiry = await storage.createCounsellingInquiry(data, submittedAt, {
+        visitorKeyHash: visitorKey(req),
+        eventSourceUrl: safeMetaEventSourceUrl(req, "/counselling"),
+        attribution: parseMetaAttribution(req.body?.attribution),
+      });
       let attempt: typeof inquiry | undefined;
       try {
         attempt = await storage.startCounsellingDeliveryAttempt(inquiry.id, new Date());
@@ -84,6 +98,7 @@ export async function registerRoutes(
       res.status(201).json({
         id: inquiry.id,
         bookingStatus: "pending_availability_check",
+        metaEventId: inquiry.metaEventId ?? null,
       });
     } catch (error) {
       if (error instanceof ZodError) {

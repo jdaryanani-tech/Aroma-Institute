@@ -11,6 +11,7 @@ export type CrmStage = keyof typeof CRM_STAGES;
 export type CrmCapabilities = {
   identityTracking: boolean; videoTracking: boolean; crmPersistence: boolean;
   calendarBookingVerification: boolean; chatHistory: false;
+  metaAttribution?: boolean;
 };
 export type CrmLead = {
   id: string; leadId: string | null; name: string; phone: string; email: string;
@@ -59,6 +60,19 @@ export type CrmActivity = {
 export type CrmDetail = {
   lead: CrmLead; inquiries: CrmInquiry[]; journey: LeadJourneySummaryData | null;
   activities: CrmActivity[]; capabilities: CrmCapabilities; warnings: string[];
+  marketing: {
+    available: boolean; consentStatus: string | null; consentAt: string | null;
+    touchpoints: {
+      sourceChannel: string; source: string | null; medium: string | null; campaign: string | null;
+      campaignId: string | null; adId: string | null; adsetId: string | null; formId: string | null;
+      metaLeadId: string | null; occurredAt: string;
+    }[];
+    metaLeadLinks: { metaLeadId: string; state: string; errorCode: string | null; receivedAt: string }[];
+    capiDeliveries: {
+      eventId: string; eventName: string; state: string; attemptCount: number;
+      lastAttemptAt: string | null; responseAt: string | null; httpStatus: number | null; lastError: string | null;
+    }[];
+  };
 };
 export type CrmUpdate = {
   expectedVersion: number; stage?: CrmStage; ownerId?: number | null; followUpAt?: string | null;

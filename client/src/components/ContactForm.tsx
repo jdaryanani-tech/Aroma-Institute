@@ -4,6 +4,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "@tanstack/react-query";
 import { insertInquirySchema, type InsertInquiry } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
+import { getMarketingAttribution, trackMetaEvent } from "@/meta/tracking";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,10 +50,11 @@ export default function ContactForm() {
 
   const mutation = useMutation({
     mutationFn: async (data: InsertInquiry) => {
-      const res = await apiRequest("POST", "/api/inquiries", data);
+      const res = await apiRequest("POST", "/api/inquiries", { ...data, attribution: getMarketingAttribution() });
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
+      trackMetaEvent("Lead", result.metaEventId, { funnel_step: "enquiry_submitted" });
       toast({
         title: "Application Submitted!",
         description: "We'll get back to you within 24 hours.",

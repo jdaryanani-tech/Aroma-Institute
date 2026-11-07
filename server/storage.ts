@@ -9,7 +9,7 @@ import {
 import { db } from "./db";
 import { and, asc, desc, eq, inArray, isNotNull, lt, or, sql } from "drizzle-orm";
 import type { InsertCounsellingInquiry } from "@shared/schema";
-import { saveLinkedCounsellingInquiry } from "./admissions/identity";
+import { saveLinkedCounsellingInquiry, type MarketingCaptureContext } from "./admissions/identity";
 import { loadJourneySummaries } from "./admissions/summary";
 import type { LeadJourneySummaryData } from "@shared/admissions-schema";
 
@@ -28,7 +28,7 @@ export type CounsellingDeliveryAttemptResult = {
 
 export interface IStorage {
   createInquiry(inquiry: NewInquiry): Promise<Inquiry>;
-  createCounsellingInquiry(inquiry: InsertCounsellingInquiry, submittedAt: Date): Promise<Inquiry>;
+  createCounsellingInquiry(inquiry: InsertCounsellingInquiry, submittedAt: Date, marketing?: MarketingCaptureContext): Promise<Inquiry & { metaEventId?: string | null }>;
   startCounsellingDeliveryAttempt(id: number, attemptedAt: Date): Promise<Inquiry | undefined>;
   getInquiries(): Promise<InquiryWithDeliveryAttemptHistory[]>;
   claimCounsellingInquiryRetry(
@@ -50,8 +50,8 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
-  async createCounsellingInquiry(inquiry: InsertCounsellingInquiry, submittedAt: Date): Promise<Inquiry> {
-    return saveLinkedCounsellingInquiry(inquiry, submittedAt);
+  async createCounsellingInquiry(inquiry: InsertCounsellingInquiry, submittedAt: Date, marketing?: MarketingCaptureContext): Promise<Inquiry & { metaEventId?: string | null }> {
+    return saveLinkedCounsellingInquiry(inquiry, submittedAt, db, marketing);
   }
 
   async startCounsellingDeliveryAttempt(id: number, attemptedAt: Date): Promise<Inquiry | undefined> {

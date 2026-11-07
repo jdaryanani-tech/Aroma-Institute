@@ -81,6 +81,12 @@ export async function listCrm(db: SqlDb, filters: CrmFilters): Promise<CrmList> 
 export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
   const c = await inspectCrmSchema(db), row = await findPerson(db, c, id), lead = leadDto(row);
   const ids: number[] = row.inquiry_ids;
+  const { rows: [metaSchema] } = await db.query(`SELECT
+    to_regclass('admissions_lead_touchpoints') IS NOT NULL AS touchpoints,
+    to_regclass('admissions_marketing_consent_events') IS NOT NULL AS consent,
+    to_regclass('admissions_meta_lead_links') IS NOT NULL AS leadLinks,
+    to_regclass('admissions_meta_event_outbox') IS NOT NULL AS outbox`);
+  const marketingAvailable = !!metaSchema?.touchpoints && !!metaSchema?.consent && !!metaSchema?.leadLinks && !!metaSchema?.outbox;
   const [{ rows: inquiries }, { rows: attempts }, { rows: activities }, { rows: events }] = await Promise.all([
     db.query("SELECT to_jsonb(i) data FROM inquiries i WHERE id=ANY($1::integer[]) ORDER BY id DESC", [ids]),
     c.deliveryAttempts ? db.query("SELECT * FROM counselling_delivery_attempts WHERE inquiry_id=ANY($1::integer[]) ORDER BY attempted_at", [ids]) : Promise.resolve({rows:[]}),
@@ -89,6 +95,34 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
       WHERE inquiry_id=ANY($1::integer[]) ORDER BY occurred_at,id`, [ids]) : Promise.resolve({rows:[]}),
     c.videoTracking && lead.leadId ? db.query("SELECT * FROM admissions_vsl_events WHERE lead_id=$1 ORDER BY occurred_at,event", [lead.leadId]) : Promise.resolve({rows:[]}),
   ]);
+  const marketingRows = marketingAvailable ? await Promise.all([
+    db.query(`SELECT source_channel,source,medium,campaign,campaign_id,ad_id,adset_id,form_id,meta_lead_id,occurred_at
+      FROM admissions_lead_touchpoints WHERE lead_id=$1 OR inquiry_id=ANY($2::integer[]) ORDER BY occurred_at,id`, [lead.leadId, ids]),
+    lead.leadId ? db.query(`SELECT consent_status,occurred_at FROM admissions_marketing_consent_events
+      WHERE lead_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, [lead.leadId]) : Promise.resolve({rows:[]}),
+    db.query(`SELECT event_id,event_name,state,attempt_count,last_attempt_at,response_at,http_status,last_error
+      FROM admissions_meta_event_outbox WHERE lead_id=$1 OR inquiry_id=ANY($2::integer[])
+      ORDER BY event_time,event_id`, [lead.leadId, ids]),
+    db.query(`SELECT meta_lead_id,state,error_code,received_at FROM admissions_meta_lead_links
+      WHERE lead_id=$1 OR inquiry_id=ANY($2::integer[]) ORDER BY received_at,meta_lead_id`, [lead.leadId, ids]),
+  ]) : [{rows:[]}, {rows:[]}, {rows:[]}, {rows:[]}];
+  const marketing: CrmDetail["marketing"] = {
+    available: marketingAvailable,
+    consentStatus: marketingRows[1].rows[0]?.consent_status ?? null,
+    consentAt: iso(marketingRows[1].rows[0]?.occurred_at),
+    touchpoints: marketingRows[0].rows.map((t: any) => ({
+      sourceChannel:t.source_channel,source:t.source,medium:t.medium,campaign:t.campaign,
+      campaignId:t.campaign_id,adId:t.ad_id,adsetId:t.adset_id,formId:t.form_id,
+      metaLeadId:t.meta_lead_id,occurredAt:iso(t.occurred_at)!,
+    })),
+    metaLeadLinks: marketingRows[3].rows.map((m: any) => ({
+      metaLeadId:m.meta_lead_id,state:m.state,errorCode:m.error_code,receivedAt:iso(m.received_at)!,
+    })),
+    capiDeliveries: marketingRows[2].rows.map((e: any) => ({
+      eventId:e.event_id,eventName:e.event_name,state:e.state,attemptCount:e.attempt_count,
+      lastAttemptAt:iso(e.last_attempt_at),responseAt:iso(e.response_at),httpStatus:e.http_status,lastError:e.last_error,
+    })),
+  };
   const timeline: CrmActivity[] = activities.map(a => ({
     id:a.id,type:a.type,title:({stage:"Lifecycle changed",owner:"Owner changed",followup:"Follow-up changed",note:"Internal note"} as Record<string,string>)[a.type] || a.type,
     at:iso(a.occurred_at), actorId:a.actor_id, actorName:a.actor_name, source:"staff",body:a.body,data:a.data,
@@ -124,6 +158,24 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     at:iso(e.occurred_at),actorId:null,actorName:null,source:"verified_system",body:null,
     data:{event:e.event,positionSeconds:e.position_seconds,durationSeconds:e.duration_seconds},
   });
+  for (const t of marketing.touchpoints) timeline.push({
+    id:`touchpoint:${t.metaLeadId ?? t.occurredAt}:${t.sourceChannel}`,type:"source",
+    title:`Lead source: ${t.sourceChannel}`,at:t.occurredAt,actorId:null,actorName:null,
+    source:"verified_system",body:[t.campaign,t.medium].filter(Boolean).join(" · ") || null,
+    data:{source:t.source,campaignId:t.campaignId,adId:t.adId,formId:t.formId,metaLeadId:t.metaLeadId},
+  });
+  for (const delivery of marketing.capiDeliveries) timeline.push({
+    id:`meta-delivery:${delivery.eventId}`,type:"meta_delivery",title:`Meta CAPI ${delivery.state}: ${delivery.eventName}`,
+    at:delivery.responseAt ?? delivery.lastAttemptAt,actorId:null,actorName:null,
+    source:"verified_system",body:delivery.lastError,
+    data:{httpStatus:delivery.httpStatus,attemptCount:delivery.attemptCount},
+  });
+  if (marketing.consentStatus && marketing.consentAt) timeline.push({
+    id:`marketing-consent:${lead.leadId}`,type:"marketing_consent",
+    title:`Meta measurement consent ${marketing.consentStatus}`,at:marketing.consentAt,
+    actorId:null,actorName:null,source:"verified_system",body:"Recorded from the optional marketing measurement control.",
+    data:{policyVersion:"meta-measurement-v1"},
+  });
   let journey: CrmDetail["journey"] = null;
   if(c.identityTracking && lead.leadId) {
     const {rows:[l]} = await db.query("SELECT * FROM admissions_leads WHERE id=$1", [lead.leadId]);
@@ -140,5 +192,5 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     }
   }
   timeline.sort((a,b)=>(a.at ? new Date(a.at).getTime():0)-(b.at ? new Date(b.at).getTime():0) || a.id.localeCompare(b.id));
-  return {lead,inquiries:submissions,journey,activities:timeline,capabilities:c,warnings:schemaWarnings(c)};
+  return {lead,inquiries:submissions,journey,activities:timeline,capabilities:c,warnings:schemaWarnings(c),marketing};
 }

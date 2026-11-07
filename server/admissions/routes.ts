@@ -11,6 +11,9 @@ import { getVslDuration } from "../vsl-media";
 import { followUpSchemaReady } from "./follow-up";
 import { kickVslOutbox, startVslOutboxWorker } from "./outbox-dispatcher";
 import { VSL_WHATSAPP_CONSENT_VERSION } from "@shared/vsl-consent";
+import { enqueueMetaEvent, metaSchemaReady } from "../meta/events";
+import { safeMetaEventSourceUrl, visitorKey } from "../meta/http";
+import { parseMetaAttribution } from "../meta/attribution";
 
 declare module "express-session" {
   interface SessionData { admissionsLeadId?: string }
@@ -56,6 +59,7 @@ const registrationSchema = z.object({
   entryPath: z.enum(["/", "/vsl"]).default("/vsl"),
   whatsappAdmissionsConsent:z.boolean().default(false),
   consentVersion:z.literal(VSL_WHATSAPP_CONSENT_VERSION).optional(),
+  attribution: z.unknown().optional(),
 }).strict().refine(v=>!v.whatsappAdmissionsConsent || !!v.consentVersion);
 const eventSchema = z.object({
   playbackId: z.string().uuid(), sequence: z.number().int().min(1).max(100000),
@@ -77,12 +81,22 @@ export function registerAdmissionsRoutes(app: Express, database: AdmissionsDatab
     try {
       if(parsed.data.whatsappAdmissionsConsent && !await followUpSchemaReady(database))
         return res.status(503).json({message:"Optional consent saving is not enabled yet. You can still watch without selecting it."});
-      const lead = await registerVslLead({ ...parsed.data, entryHost: req.hostname.slice(0, 253) }, new Date(), database);
+      const registeredAt = new Date();
+      const lead = await registerVslLead(
+        { ...parsed.data, entryHost: req.hostname.slice(0, 253) },
+        registeredAt,
+        database,
+        {
+          visitorKeyHash: visitorKey(req),
+          eventSourceUrl: safeMetaEventSourceUrl(req, parsed.data.entryPath),
+          attribution: parseMetaAttribution(parsed.data.attribution),
+        },
+      );
       req.session.admissionsLeadId = lead.id;
       await new Promise<void>((resolve, reject) => req.session.save(e => e ? reject(e) : resolve()));
       // Identity is carried in an HttpOnly session. No public lead details returned.
       kickVslOutbox();
-      return res.status(201).json({ registered: true });
+      return res.status(201).json({ registered: true, metaEventId: lead.metaEventId ?? null });
     } catch { return res.status(503).json({ message: "Unable to save registration. Please try again." }); }
   });
   app.post("/api/vsl/playbacks", sameOriginCapture, captureLimit("playback", 30, database), async (req, res) => {
@@ -113,6 +127,7 @@ export function registerAdmissionsRoutes(app: Express, database: AdmissionsDatab
         const now = new Date();
         const result = observePlayback(playback, sample, now);
         if (!result.duplicate) {
+          const observedPercent = result.observedPercent ?? 0;
           await tx.update(admissionsPlaybacks).set(result.state).where(eq(admissionsPlaybacks.id, playback.id));
           const [lead] = await tx.select().from(admissionsLeads).where(eq(admissionsLeads.id,leadId)).limit(1);
           if (!lead) return { accepted:false, changed:false };
@@ -126,10 +141,29 @@ export function registerAdmissionsRoutes(app: Express, database: AdmissionsDatab
               videoCompletedAt:sql`coalesce(${admissionsLeads.videoCompletedAt}, ${now})`,
             } : {}),
           }).where(eq(admissionsLeads.id,leadId));
+          let metaEvents: { eventName: string; eventId: string; customData: Record<string, string | number | boolean> }[] = [];
           if (result.events.length) {
-            await tx.insert(admissionsVideoEvents).values(result.events.map(event => ({
+            const insertedEvents = await tx.insert(admissionsVideoEvents).values(result.events.map(event => ({
               leadId, event, occurredAt: now, positionSeconds: sample.position, durationSeconds: playback.duration,
-            }))).onConflictDoNothing();
+            }))).onConflictDoNothing().returning({ event: admissionsVideoEvents.event });
+            if (insertedEvents.length && await metaSchemaReady(tx)) {
+              const sourceUrl = safeMetaEventSourceUrl(req, "/vsl-video");
+              if (sourceUrl) {
+                for (const inserted of insertedEvents) {
+                  const completed = inserted.event === "completed";
+                  const eventName = completed ? "VslCompleted" : "VslProgress";
+                  const eventId = await enqueueMetaEvent(tx, {
+                    visitorKeyHash: visitorKey(req), leadId, eventName, eventSourceUrl: sourceUrl,
+                    customData: { milestone: inserted.event, observed_percent: observedPercent },
+                    occurredAt: now,
+                  });
+                  if (eventId) metaEvents.push({
+                    eventName, eventId,
+                    customData: { milestone: inserted.event, observed_percent: observedPercent },
+                  });
+                }
+              }
+            }
             if(await followUpSchemaReady(tx)) {
               await tx.insert(admissionsRegistrationOutbox).values(result.events.map(event=>{
                 const eventId=`vsl-progress:${leadId}:${event}`;
@@ -145,13 +179,13 @@ export function registerAdmissionsRoutes(app: Express, database: AdmissionsDatab
               })).onConflictDoNothing();
             }
           }
-          return { accepted:true, changed:result.events.length>0 };
+          return { accepted:true, changed:result.events.length>0, metaEvents };
         }
-        return { accepted:true, changed:false };
+        return { accepted:true, changed:false, metaEvents:[] };
       });
       if (!result.accepted) return res.status(403).json({ message: "Video observation is not associated with this registration." });
       if (result.changed) kickVslOutbox();
-      return res.json({ saved: true });
+      return res.json({ saved: true, metaEvents: result.metaEvents });
     } catch (error) {
       if (error instanceof Error && ["out_of_order", "invalid_media_duration", "too_many_discontinuities"].includes(error.message)) {
         return res.status(409).json({ message: "Video observation sequence is invalid." });

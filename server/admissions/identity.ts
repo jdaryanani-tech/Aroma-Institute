@@ -1,11 +1,19 @@
 import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "../db";
-import { admissionsLeads, inquiries, type InsertCounsellingInquiry } from "@shared/schema";
+import { admissionsLeadTouchpoints, admissionsMetaLeadLinks } from "@shared/admissions-schema";
+import { admissionsLeads, inquiries, type InsertCounsellingInquiry, type NewInquiry } from "@shared/schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
 import { recordRegistrationFollowUp } from "./follow-up";
+import { enqueueMetaEvent, hasMarketingConsent, linkVisitorConsentToLead, metaSchemaReady, recordLeadTouchpoint, type MetaAttribution } from "../meta/events";
+import { metaLeadIdempotencyKey, normalizeMetaFieldData } from "../meta/config";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type AdmissionsDatabase = Pick<typeof db, "transaction" | "select" | "insert" | "update" | "execute">;
+export type MarketingCaptureContext = {
+  visitorKeyHash?: string;
+  eventSourceUrl?: string | null;
+  attribution?: MetaAttribution;
+};
 
 async function latestCounsellingInquiryForPhone(tx:Transaction,canonicalPhone:string) {
   const normalized=sql<string>`regexp_replace(${inquiries.phone}, '[^0-9]', '', 'g')`;
@@ -54,7 +62,12 @@ async function resolveLead(tx: Transaction, phone: string, name: string) {
   return lead;
 }
 
-export async function registerVslLead(input: { phone: string; name: string; entryPath: string; entryHost: string; whatsappAdmissionsConsent?:boolean }, now = new Date(), database: AdmissionsDatabase = db) {
+export async function registerVslLead(
+  input: { phone: string; name: string; entryPath: string; entryHost: string; whatsappAdmissionsConsent?:boolean },
+  now = new Date(),
+  database: AdmissionsDatabase = db,
+  marketing: MarketingCaptureContext = {},
+) {
   return database.transaction(async (tx) => {
     const lead = await resolveLead(tx, input.phone, input.name);
     const [updated] = await tx.update(admissionsLeads).set({
@@ -73,11 +86,64 @@ export async function registerVslLead(input: { phone: string; name: string; entr
       message: "Requested free Aroma LEAP training from the VSL landing page",
     });
     await recordRegistrationFollowUp(tx,updated,!lead.registeredAt,input.whatsappAdmissionsConsent===true,now);
-    return updated;
+    let metaEventId: string | null = null;
+    if (await metaSchemaReady(tx)) {
+      if (marketing.visitorKeyHash) await linkVisitorConsentToLead(tx, marketing.visitorKeyHash, lead.id);
+      const consented = marketing.visitorKeyHash ? await hasMarketingConsent(tx, marketing.visitorKeyHash) : false;
+      const source = input.entryPath === "/" && !input.entryHost.startsWith("training.")
+        ? "website_home_vsl" : "website_vsl";
+      await recordLeadTouchpoint(tx, {
+        leadId: lead.id, sourceChannel: source,
+        attribution: consented ? marketing.attribution : undefined, occurredAt: now,
+      });
+      if (marketing.visitorKeyHash && marketing.eventSourceUrl) {
+        metaEventId = await enqueueMetaEvent(tx, {
+          visitorKeyHash: marketing.visitorKeyHash, leadId: lead.id,
+          eventName: "VslRegistered", eventSourceUrl: marketing.eventSourceUrl,
+          customData: { funnel_step: "vsl_registration" }, occurredAt: now,
+        });
+      }
+    }
+    return { ...updated, metaEventId };
   });
 }
 
-export async function saveLinkedCounsellingInquiry(data: InsertCounsellingInquiry, now: Date, database: AdmissionsDatabase = db) {
+export async function saveWebsiteInquiry(
+  data: NewInquiry,
+  now: Date,
+  database: AdmissionsDatabase = db,
+  marketing: MarketingCaptureContext = {},
+) {
+  return database.transaction(async (tx) => {
+    const canonicalPhone = normalizeIndianMobile(data.phone);
+    const lead = canonicalPhone ? await resolveLead(tx, data.phone, data.name) : null;
+    const [inquiry] = await tx.insert(inquiries).values({ ...data, leadId: lead?.id ?? null }).returning();
+    let metaEventId: string | null = null;
+    if (await metaSchemaReady(tx)) {
+      if (lead && marketing.visitorKeyHash) await linkVisitorConsentToLead(tx, marketing.visitorKeyHash, lead.id);
+      const consented = marketing.visitorKeyHash ? await hasMarketingConsent(tx, marketing.visitorKeyHash) : false;
+      await recordLeadTouchpoint(tx, {
+        leadId: lead?.id ?? null, inquiryId: inquiry.id, sourceChannel: "website_enquiry",
+        attribution: consented ? marketing.attribution : undefined, occurredAt: now,
+      });
+      if (marketing.visitorKeyHash && marketing.eventSourceUrl) {
+        metaEventId = await enqueueMetaEvent(tx, {
+          visitorKeyHash: marketing.visitorKeyHash, leadId: lead?.id ?? null, inquiryId: inquiry.id,
+          eventName: "Lead", eventSourceUrl: marketing.eventSourceUrl,
+          customData: { funnel_step: "enquiry_submitted" }, occurredAt: now,
+        });
+      }
+    }
+    return { inquiry, leadId: lead?.id ?? null, metaEventId };
+  });
+}
+
+export async function saveLinkedCounsellingInquiry(
+  data: InsertCounsellingInquiry,
+  now: Date,
+  database: AdmissionsDatabase = db,
+  marketing: MarketingCaptureContext = {},
+) {
   return database.transaction(async (tx) => {
     const lead = await resolveLead(tx, data.phone, data.name);
     const [inquiry] = await tx.insert(inquiries).values({
@@ -87,7 +153,68 @@ export async function saveLinkedCounsellingInquiry(data: InsertCounsellingInquir
     await tx.update(admissionsLeads).set({
       questionnaireStatus: "completed", questionnaireCompletedAt: now,
     }).where(eq(admissionsLeads.id, lead.id));
-    return inquiry;
+    let metaEventId: string | null = null;
+    if (await metaSchemaReady(tx)) {
+      if (marketing.visitorKeyHash) await linkVisitorConsentToLead(tx, marketing.visitorKeyHash, lead.id);
+      const consented = marketing.visitorKeyHash ? await hasMarketingConsent(tx, marketing.visitorKeyHash) : false;
+      await recordLeadTouchpoint(tx, {
+        leadId: lead.id, inquiryId: inquiry.id, sourceChannel: "website_counselling",
+        attribution: consented ? marketing.attribution : undefined, occurredAt: now,
+      });
+      if (marketing.visitorKeyHash && marketing.eventSourceUrl) {
+        metaEventId = await enqueueMetaEvent(tx, {
+          visitorKeyHash: marketing.visitorKeyHash, leadId: lead.id, inquiryId: inquiry.id,
+          eventName: "CounsellingSubmitted", eventSourceUrl: marketing.eventSourceUrl,
+          customData: { funnel_step: "counselling_submitted" }, occurredAt: now,
+        });
+      }
+    }
+    return { ...inquiry, metaEventId };
+  });
+}
+
+export async function saveMetaInstantLead(input: {
+  metaLeadId: string; pageId: string; formId: string | null; campaignId: string | null;
+  adId: string | null; adsetId: string | null; leadCreatedAt: Date | null; fieldData: unknown;
+}, now = new Date(), database: AdmissionsDatabase = db) {
+  const mapped = normalizeMetaFieldData(input.fieldData);
+  const safeName = mapped.name.trim().length >= 2 ? mapped.name.trim() : "Meta form lead";
+  const canonicalPhone = normalizeIndianMobile(mapped.phone);
+  const safePhone = canonicalPhone ? `+${canonicalPhone}` : "";
+  const safeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mapped.email) ? mapped.email : "";
+  return database.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${metaLeadIdempotencyKey(input.metaLeadId)}))`);
+    const [existing] = await tx.select().from(admissionsMetaLeadLinks)
+      .where(eq(admissionsMetaLeadLinks.metaLeadId, input.metaLeadId)).limit(1);
+    if (existing) return { duplicate: true, inquiryId: existing.inquiryId, leadId: existing.leadId };
+
+    const lead = canonicalPhone ? await resolveLead(tx, safePhone, safeName) : null;
+    const [inquiry] = await tx.insert(inquiries).values({
+      leadId: lead?.id ?? null,
+      name: safeName,
+      email: safeEmail,
+      phone: safePhone,
+      programInterest: mapped.programInterest,
+      message: null,
+      submissionSource: "meta_instant_form",
+      counsellingDeliveryStatus: "not_applicable",
+    }).returning();
+    await tx.insert(admissionsMetaLeadLinks).values({
+      metaLeadId: input.metaLeadId, pageId: input.pageId, formId: input.formId,
+      campaignId: input.campaignId, adId: input.adId, adsetId: input.adsetId,
+      leadCreatedAt: input.leadCreatedAt, receivedAt: now,
+      leadId: lead?.id ?? null, inquiryId: inquiry.id,
+      state: canonicalPhone ? "processed" : "review",
+      errorCode: canonicalPhone ? null : "phone_unavailable_for_identity_link",
+    });
+    await tx.insert(admissionsLeadTouchpoints).values({
+      leadId: lead?.id ?? null, inquiryId: inquiry.id,
+      sourceChannel: "meta_instant_form", source: "meta",
+      formId: input.formId, adId: input.adId, adsetId: input.adsetId,
+      campaignId: input.campaignId, metaLeadId: input.metaLeadId,
+      occurredAt: now,
+    }).onConflictDoNothing();
+    return { duplicate: false, inquiryId: inquiry.id, leadId: lead?.id ?? null };
   });
 }
 

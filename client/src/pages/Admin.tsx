@@ -7,6 +7,7 @@ import type { CrmCapabilities, CrmDetail, CrmLead, CrmStage, CrmUpdate } from "@
 import { CRM_STAGES } from "@shared/crm";
 import { CrmHttpError, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } from "@/crm/api";
 import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, formatDate, toLocalInput } from "@/crm/format";
+import MetaSetupStatus from "@/crm/MetaSetupStatus";
 
 type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; owner: string; sort: string; page: number; pageSize: number };
 type AvniHealth = {
@@ -199,6 +200,7 @@ export default function Admin() {
             {avniHealthQuery.isError&&<span className="crm-count-note">Refresh the dashboard or check the production integration settings. No secret values are displayed here.</span>}
           </div>
         </section>
+        <MetaSetupStatus />
         {leadsQuery.isError && <div className="crm-error" role="alert"><strong>Admissions records did not load.</strong> {errorText(leadsQuery.error, "Check your connection and administrator access.")}<button className="crm-text-button" type="button" onClick={() => void leadsQuery.refetch()}>Try again</button></div>}
         {overview && <section className="crm-counts" aria-label="Global admissions overview">
           <div className="crm-count"><span className="crm-count-label">Identified people</span><strong className="crm-count-value">{overview.identifiedPeople.toLocaleString()}</strong><span className="crm-count-note">{overview.unresolvedRecords.toLocaleString()} ambiguous or unmatchable records excluded</span></div>
@@ -347,6 +349,7 @@ function LeadDetail(props: {
       {detail.warnings.map((warning) => <div className="crm-warning" role="status" key={warning}><AlertTriangle size={15} /><span>{warning}</span></div>)}
       {!props.canWrite && <div className="crm-error" role="alert">Server CRM persistence is unavailable. Editing is disabled to avoid an unrecorded change.</div>}
       <JourneyPanel journey={detail.journey} />
+      <MetaAttributionPanel marketing={detail.marketing} />
       <form onSubmit={save}><div className="crm-detail-grid">
         <label className="crm-field"><span className="crm-field-label">Current stage</span><select className="crm-select" value={stage} onChange={(event) => { setStage(event.target.value as CrmStage); setSaveMessage(""); }} data-testid="crm-stage">{stages.map((item) => <option key={item} value={item} disabled={item === "counselling_booked" && lead.stage !== item}>{CRM_STAGE_LABELS[item]}{item === "counselling_booked" ? " · unavailable" : ""}</option>)}</select></label>
         <label className="crm-field"><span className="crm-field-label">Owner</span><select className="crm-select" value={owner} onChange={(event) => setOwner(event.target.value)} data-testid="crm-owner"><option value="">Unassigned</option>{props.owners.map((person) => <option key={person.id} value={String(person.id)}>{person.name}</option>)}</select></label>
@@ -394,6 +397,32 @@ function LeadDetail(props: {
       <div className="crm-info" style={{ display: "flex", gap: 8, alignItems: "center" }}><VideoOff size={15} /> Video milestones appear only when server tracking verifies them. Chat history and booking are not connected.</div>
     </div>
   </>;
+}
+
+function MetaAttributionPanel({ marketing }: { marketing: CrmDetail["marketing"] }) {
+  return <section className="crm-journey" aria-label="Marketing attribution and consent">
+    <h3>Marketing attribution & measurement</h3>
+    {!marketing.available ? <p className="crm-journey-note">Attribution tables are not installed yet. Existing lead capture continues; no Meta measurement data is exposed.</p> : <>
+      <div className="crm-journey-grid">
+        <p><span>Measurement consent</span><strong>{marketing.consentStatus ? `${marketing.consentStatus} · ${formatDate(marketing.consentAt, true)}` : "No linked consent record"}</strong></p>
+        <p><span>Source touchpoints</span><strong>{marketing.touchpoints.length}</strong></p>
+        <p><span>Meta CAPI events</span><strong>{marketing.capiDeliveries.length}</strong></p>
+      </div>
+      {marketing.touchpoints.map((touch, index) => <p className="crm-journey-note" key={`${touch.occurredAt}-${index}`}>
+        {formatDate(touch.occurredAt, true)} · {touch.sourceChannel}
+        {touch.campaign ? ` · ${touch.campaign}` : ""}
+        {touch.metaLeadId ? ` · Meta lead ${touch.metaLeadId}` : ""}
+      </p>)}
+      {marketing.metaLeadLinks.map((link) => <p className="crm-journey-note" key={`meta-link:${link.metaLeadId}`}>
+        Meta Instant Form link: {link.state}{link.errorCode ? ` · ${link.errorCode}` : ""} · received {formatDate(link.receivedAt, true)}
+      </p>)}
+      {marketing.capiDeliveries.map((delivery) => <p className="crm-journey-note" key={delivery.eventId}>
+        CAPI {delivery.eventName}: {delivery.state} · {delivery.attemptCount} attempts
+        {delivery.httpStatus ? ` · HTTP ${delivery.httpStatus}` : ""}
+        {delivery.lastError ? ` · ${delivery.lastError}` : ""}
+      </p>)}
+    </>}
+  </section>;
 }
 
 function JourneyPanel({ journey }: { journey: CrmDetail["journey"] }) {

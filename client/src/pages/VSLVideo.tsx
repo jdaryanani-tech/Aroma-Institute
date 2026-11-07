@@ -4,6 +4,7 @@ import type Hls from "hls.js";
 import vslThumbnail from "@assets/Barista_Career_in_Three_Months_1793184531131.png";
 import { createVslPlaybackTracker } from "@/lib/analytics";
 import { createDurableVslTracker } from "@/lib/vsl-capture";
+import { trackMetaEvent } from "@/meta/tracking";
 
 const VSL_PLAYLIST_URL = "/api/vsl/media/index.m3u8";
 const MEDIA_ERROR_MESSAGE = "Video load nahi ho saka. Kripya page refresh karke dobara koshish karein.";
@@ -34,7 +35,11 @@ export default function VSLVideo() {
   const [progress, setProgress] = useState(0);
   const [captureStatus, setCaptureStatus] = useState("initial");
   const durableTrackerRef = useRef<ReturnType<typeof createDurableVslTracker> | null>(null);
-  if (!durableTrackerRef.current) durableTrackerRef.current = createDurableVslTracker(setCaptureStatus);
+  if (!durableTrackerRef.current) durableTrackerRef.current = createDurableVslTracker(
+    setCaptureStatus,
+    undefined,
+    (events) => events.forEach((event) => trackMetaEvent(event.eventName, event.eventId, event.customData)),
+  );
 
   useEffect(() => {
     const handleFullscreenChange = () => {

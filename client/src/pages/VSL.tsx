@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import { useLocation } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
+import { getMarketingAttribution, trackMetaEvent } from "@/meta/tracking";
 import {
   VSL_WHATSAPP_CONSENT_TEXT,
   VSL_WHATSAPP_CONSENT_VERSION,
@@ -77,13 +78,16 @@ export default function VSL() {
 
     setIsSubmitting(true);
     try {
-      await apiRequest("POST", "/api/vsl/registrations", {
+      const response = await apiRequest("POST", "/api/vsl/registrations", {
         name: name.trim(),
         phone: phone.trim(),
         entryPath: window.location.pathname === "/" ? "/" : "/vsl",
         whatsappAdmissionsConsent: whatsappConsentAvailable && whatsappAdmissionsConsent,
         consentVersion,
+        attribution: getMarketingAttribution(),
       });
+      const result = await response.json();
+      trackMetaEvent("VslRegistered", result.metaEventId, { funnel_step: "vsl_registration" });
       setLocation("/vsl-video");
     } catch {
       setSubmissionError("Details submit nahi ho paaye. Kripya dobara koshish karein.");
