@@ -10,7 +10,7 @@ export const CRM_STAGES = {
 export type CrmStage = keyof typeof CRM_STAGES;
 export type CrmCapabilities = {
   identityTracking: boolean; videoTracking: boolean; crmPersistence: boolean;
-  calendarBookingVerification: boolean; chatHistory: false;
+  calendarBookingVerification: boolean; chatHistory: boolean;
   metaAttribution?: boolean;
 };
 export type CrmLead = {
@@ -22,6 +22,7 @@ export type CrmLead = {
   inquiryCount: number; registeredAt: string | null; questionnaireCompletedAt: string | null;
   lastActivityAt: string | null; lastVideoMilestone: string | null;
   videoCompleted: boolean; hasVerifiedForm: boolean;
+  hasVerifiedCalendarBooking: boolean; verifiedBookingReference: string | null;
   ownerId: number | null; ownerName: string | null; followUpAt: string | null; version: number;
 };
 export type CrmFilters = {
@@ -78,7 +79,7 @@ export type CrmUpdate = {
   expectedVersion: number; stage?: CrmStage; ownerId?: number | null; followUpAt?: string | null;
   note?: string; reason?: string;
   evidence?: {
-    kind: "link_sent" | "tracked_video" | "prospect_confirmation" | "staff_record" | "calcom_booking";
+    kind: "link_sent" | "tracked_video" | "prospect_confirmation" | "staff_record" | "calendar_booking";
     reference?: string; occurredAt?: string; confirmed?: boolean;
   };
 };

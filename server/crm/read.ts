@@ -87,13 +87,19 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     to_regclass('admissions_meta_lead_links') IS NOT NULL AS leadLinks,
     to_regclass('admissions_meta_event_outbox') IS NOT NULL AS outbox`);
   const marketingAvailable = !!metaSchema?.touchpoints && !!metaSchema?.consent && !!metaSchema?.leadLinks && !!metaSchema?.outbox;
-  const [{ rows: inquiries }, { rows: attempts }, { rows: activities }, { rows: events }] = await Promise.all([
+  const [{ rows: inquiries }, { rows: attempts }, { rows: activities }, { rows: events },
+    { rows: messages }, { rows: bookings }] = await Promise.all([
     db.query("SELECT to_jsonb(i) data FROM inquiries i WHERE id=ANY($1::integer[]) ORDER BY id DESC", [ids]),
     c.deliveryAttempts ? db.query("SELECT * FROM counselling_delivery_attempts WHERE inquiry_id=ANY($1::integer[]) ORDER BY attempted_at", [ids]) : Promise.resolve({rows:[]}),
     c.crmPersistence ? db.query(`SELECT a.*,coalesce(u.display_name,'Admin #'||a.actor_id) actor_name
       FROM admissions_crm_activities a JOIN lms_users u ON u.id=a.actor_id
       WHERE inquiry_id=ANY($1::integer[]) ORDER BY occurred_at,id`, [ids]) : Promise.resolve({rows:[]}),
     c.videoTracking && lead.leadId ? db.query("SELECT * FROM admissions_vsl_events WHERE lead_id=$1 ORDER BY occurred_at,event", [lead.leadId]) : Promise.resolve({rows:[]}),
+    c.chatHistory && lead.leadId ? db.query(`SELECT id,lead_id,inquiry_id,direction,message_type,body,delivery_state,occurred_at
+      FROM admissions_conversation_messages WHERE lead_id=$1 OR inquiry_id=ANY($2::integer[]) ORDER BY occurred_at,id`, [lead.leadId, ids]) : Promise.resolve({rows:[]}),
+    c.calendarBookingVerification ? db.query(`SELECT id,title,status,starts_at,ends_at,owner_id,source_type,confirmation_message_id
+      FROM calendar_events WHERE (lead_id=$1 OR inquiry_id=ANY($2::integer[])) AND source_type='counselling_booking'
+      ORDER BY starts_at,id`, [lead.leadId, ids]) : Promise.resolve({rows:[]}),
   ]);
   const marketingRows = marketingAvailable ? await Promise.all([
     db.query(`SELECT source_channel,source,medium,campaign,campaign_id,ad_id,adset_id,form_id,meta_lead_id,occurred_at
@@ -157,6 +163,21 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     id:e.id,type:"video",title:e.event==="completed" ? "Video completion observed" : `Video milestone: ${e.event}`,
     at:iso(e.occurred_at),actorId:null,actorName:null,source:"verified_system",body:null,
     data:{event:e.event,positionSeconds:e.position_seconds,durationSeconds:e.duration_seconds},
+  });
+  for (const message of messages) timeline.push({
+    id:`conversation:${message.id}`,
+    type:message.direction === "inbound" ? "conversation_inbound" : "conversation_outbound",
+    title:message.direction === "inbound" ? "WhatsApp message received" : "WhatsApp reply recorded",
+    at:iso(message.occurred_at),actorId:null,actorName:null,source:"verified_system",
+    body:message.body,
+    data:{messageType:message.message_type,deliveryState:message.delivery_state,inquiryId:message.inquiry_id},
+  });
+  for (const booking of bookings) timeline.push({
+    id:`calendar:${booking.id}`,type:"calendar_booking",
+    title:`Counselling appointment ${booking.status}`,
+    at:iso(booking.starts_at),actorId:booking.owner_id,actorName:null,source:"verified_system",
+    body:booking.status === "cancelled" ? "Cancelled in the AICHM Calendar." : "Persisted AICHM Calendar booking.",
+    data:{bookingReference:booking.id,startsAt:iso(booking.starts_at),endsAt:iso(booking.ends_at),confirmedByMessageId:booking.confirmation_message_id},
   });
   for (const t of marketing.touchpoints) timeline.push({
     id:`touchpoint:${t.metaLeadId ?? t.occurredAt}:${t.sourceChannel}`,type:"source",

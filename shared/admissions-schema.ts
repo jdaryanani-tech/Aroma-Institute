@@ -18,6 +18,7 @@ export const admissionsLeads = pgTable("admissions_leads", {
   videoLastEventAt: timestamp("video_last_event_at", { withTimezone: true }),
   videoCompletedAt: timestamp("video_completed_at", { withTimezone: true }),
   legacyMatchStatus: text("legacy_match_status").notNull().default("none"),
+  legacyProfile: jsonb("legacy_profile").$type<Record<string, unknown> | null>(),
 }, (t) => [
   check("admissions_leads_indian_phone", sql`${t.canonicalPhone} ~ '^91[6-9][0-9]{9}$'`),
   check("admissions_leads_video_observed_percent", sql`${t.videoObservedPercent} BETWEEN 0 AND 100`),

@@ -14,6 +14,8 @@ import { registerCrmRoutes } from "./crm/routes";
 import { registerFirstOwnerRoutes } from "./lms/first-owner";
 import { registerCalendarRoutes } from "./calendar/routes";
 import { registerMetaRoutes } from "./meta/routes";
+import { registerAvniIntegrationRoutes } from "./integrations/avni";
+import { registerAvniCalendarRoutes } from "./calendar/avni";
 import { safeMetaEventSourceUrl, visitorKey } from "./meta/http";
 import { parseMetaAttribution } from "./meta/attribution";
 import { saveWebsiteInquiry } from "./admissions/identity";
@@ -30,6 +32,8 @@ export async function registerRoutes(
   registerFirstOwnerRoutes(app);
   registerAdmissionsRoutes(app);
   registerFollowUpStatusRoute(app);
+  registerAvniIntegrationRoutes(app);
+  registerAvniCalendarRoutes(app);
   registerCrmRoutes(app);
   registerCalendarRoutes(app);
   registerMetaRoutes(app);

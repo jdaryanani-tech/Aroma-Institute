@@ -10,10 +10,15 @@ export async function inspectCrmSchema(db: SqlDb): Promise<CrmSchema> {
     to_regclass('admissions_vsl_events') IS NOT NULL AS video,
     to_regclass('admissions_crm_profiles') IS NOT NULL AND to_regclass('admissions_crm_activities') IS NOT NULL AS crm,
     to_regclass('counselling_delivery_attempts') IS NOT NULL AS attempts,
-    to_regclass('admissions_lead_touchpoints') IS NOT NULL AS marketing`);
+    to_regclass('admissions_lead_touchpoints') IS NOT NULL AS marketing,
+    to_regclass('admissions_conversation_messages') IS NOT NULL AS chat,
+    to_regclass('calendar_events') IS NOT NULL AND to_regclass('calendar_event_attendees') IS NOT NULL
+      AND to_regclass('calendar_integration_requests') IS NOT NULL
+      AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='calendar_events' AND column_name='confirmation_message_id') AS calendar`);
   return { identityTracking: r.identity, videoTracking: r.identity && r.video,
     crmPersistence: r.crm, deliveryAttempts: r.attempts, metaAttribution: r.marketing,
-    calendarBookingVerification: false, chatHistory: false };
+    calendarBookingVerification: r.calendar, chatHistory: r.chat };
 }
 
 /** All optional tables are selected only after capability introspection, never via startup DDL. */
@@ -35,8 +40,12 @@ export function crmModelSql(c: CrmSchema) {
   const touchpoints = c.metaAttribution
     ? `SELECT lead_id,inquiry_id,source_channel FROM admissions_lead_touchpoints`
     : `SELECT NULL::uuid lead_id,NULL::integer inquiry_id,NULL::text source_channel WHERE false`;
+  const bookings = c.calendarBookingVerification
+    ? `SELECT id,lead_id,inquiry_id,starts_at FROM calendar_events
+       WHERE source_type='counselling_booking' AND status IN ('confirmed','rescheduled')`
+    : `SELECT NULL::uuid id,NULL::uuid lead_id,NULL::integer inquiry_id,NULL::timestamptz starts_at WHERE false`;
   return `WITH lead_source AS (${leads}), video_source AS (${video}), profile_source AS (${profiles}),
-    touchpoint_source AS (${touchpoints}),
+    touchpoint_source AS (${touchpoints}), booking_source AS (${bookings}),
     normalized AS (
       SELECT i.id,i.name,i.email,i.phone,i.program_interest,i.counselling_submitted_at,
         (i.counselling_answers IS NOT NULL AND i.counselling_submitted_at IS NOT NULL) verified_form,
@@ -85,6 +94,7 @@ export function crmModelSql(c: CrmSchema) {
         l.registered_at, greatest(p.updated_at,l.last_registered_at,l.created_at,g.questionnaire_completed_at,v.last_video_at) last_activity_at,
         coalesce(v.completed,false) video_completed,coalesce(v.started,false) video_started,
         coalesce(v.watched,false) video_watched,v.milestone last_video_milestone,
+        coalesce(b.has_booking,false) has_verified_calendar_booking,b.booking_reference,
         p.inquiry_id profile_anchor
       FROM grouped g LEFT JOIN lead_source l ON l.id::text=g.lead_id
       LEFT JOIN video_source v ON v.lead_id::text=g.lead_id
@@ -92,6 +102,9 @@ export function crmModelSql(c: CrmSchema) {
         ORDER BY pp.updated_at DESC,pp.inquiry_id LIMIT 1) p ON true
       LEFT JOIN LATERAL(SELECT array_agg(DISTINCT touch.source_channel) channels FROM touchpoint_source touch
         WHERE touch.lead_id::text=g.lead_id OR touch.inquiry_id=ANY(g.inquiry_ids)) ts ON true
+      LEFT JOIN LATERAL(SELECT bool_or(true) has_booking,
+        (array_agg(bs.id::text ORDER BY bs.starts_at DESC))[1] booking_reference
+        FROM booking_source bs WHERE bs.lead_id::text=g.lead_id OR bs.inquiry_id=ANY(g.inquiry_ids)) b ON true
       LEFT JOIN lms_users u ON u.id=p.owner_id
     )`;
 }
@@ -105,6 +118,7 @@ export function leadDto(r: QueryResultRow): CrmLead {
     registeredAt: iso(r.registered_at), questionnaireCompletedAt: iso(r.questionnaire_completed_at),
     lastActivityAt: iso(r.last_activity_at), lastVideoMilestone: r.last_video_milestone,
     videoCompleted: r.video_completed, hasVerifiedForm: r.has_verified_form, ownerId: r.owner_id,
+    hasVerifiedCalendarBooking: r.has_verified_calendar_booking, verifiedBookingReference: r.booking_reference,
     ownerName: r.owner_name, followUpAt: iso(r.follow_up_at), version: r.version,
   };
 }
@@ -114,7 +128,7 @@ export function schemaWarnings(c: CrmSchema) {
     ...(!c.identityTracking ? ["Lead identity tracking migration is pending; legacy inquiry identities are shown conservatively."] : []),
     ...(!c.videoTracking ? ["Video tracking schema is unavailable; no viewing is inferred."] : []),
     ...(!c.deliveryAttempts ? ["Delivery-attempt audit schema is unavailable. Existing inquiry status is shown without inventing attempt history."] : []),
-    "Chat history is not connected. This timeline contains saved inquiries, delivery attempts and recorded activities only.",
-    "Verified Cal.com booking integration is not connected; Counselling Booked cannot be set.",
+    ...(!c.chatHistory ? ["Persisted conversation history is not available; it is not inferred from AVNI prompts."] : []),
+    ...(!c.calendarBookingVerification ? ["AICHM Calendar schema is not available; counselling bookings cannot yet be verified."] : []),
   ];
 }

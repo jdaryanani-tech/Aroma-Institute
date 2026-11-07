@@ -5,6 +5,7 @@ import {
 import { admissionsLeads } from "./admissions-schema";
 import { inquiries } from "./schema";
 import { lmsCourses, lmsLiveSessions, lmsNotifications, lmsUsers } from "./lms-schema";
+import { admissionsConversationMessages } from "./avni-schema";
 
 export const calendarResources = pgTable("calendar_resources", {
   id: serial("id").primaryKey(),
@@ -73,6 +74,7 @@ export const calendarEvents = pgTable("calendar_events", {
   sourceType: text("source_type"),
   sourceId: text("source_id"),
   idempotencyKey: text("idempotency_key"),
+  confirmationMessageId: uuid("confirmation_message_id").references(() => admissionsConversationMessages.id, { onDelete: "set null" }),
   capacity: integer("capacity"),
   recurrenceRule: jsonb("recurrence_rule").$type<{
     frequency: "daily" | "weekly" | "monthly";
@@ -93,11 +95,26 @@ export const calendarEvents = pgTable("calendar_events", {
     .where(sql`${table.sourceType} IS NOT NULL AND ${table.sourceId} IS NOT NULL`),
   uniqueIndex("calendar_events_idempotency_unique").on(table.idempotencyKey)
     .where(sql`${table.idempotencyKey} IS NOT NULL`),
+  uniqueIndex("calendar_events_confirmation_message_uq").on(table.confirmationMessageId)
+    .where(sql`${table.confirmationMessageId} IS NOT NULL`),
   index("calendar_events_time_idx").on(table.startsAt, table.endsAt),
   index("calendar_events_category_time_idx").on(table.category, table.startsAt),
   index("calendar_events_resource_time_idx").on(table.resourceId, table.startsAt),
   index("calendar_events_course_time_idx").on(table.courseId, table.startsAt),
   index("calendar_events_lead_idx").on(table.leadId, table.startsAt),
+]);
+
+/** Stores every n8n booking command so retries remain idempotent after reschedules. */
+export const calendarIntegrationRequests = pgTable("calendar_integration_requests", {
+  idempotencyKey: text("idempotency_key").primaryKey(),
+  action: text("action").notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  eventId: uuid("event_id").notNull().references(() => calendarEvents.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  check("calendar_integration_requests_action_ck", sql`${table.action} IN ('book','reschedule','cancel')`),
+  check("calendar_integration_requests_hash_ck", sql`${table.payloadHash} ~ '^[0-9a-f]{64}$'`),
+  index("calendar_integration_requests_event_idx").on(table.eventId, table.createdAt),
 ]);
 
 export const calendarEventAttendees = pgTable("calendar_event_attendees", {

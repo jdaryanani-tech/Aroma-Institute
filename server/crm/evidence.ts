@@ -9,7 +9,7 @@ export const updateCrmSchema = z.object({
   note: z.string().trim().min(1).max(4000).optional(),
   reason: z.string().trim().min(3).max(1000).optional(),
   evidence: z.object({
-    kind: z.enum(["link_sent", "tracked_video", "prospect_confirmation", "staff_record", "calcom_booking"]),
+    kind: z.enum(["link_sent", "tracked_video", "prospect_confirmation", "staff_record", "calendar_booking"]),
     reference: z.string().trim().max(1000).optional(),
     occurredAt: z.string().datetime({ offset: true }).optional(), confirmed: z.boolean().optional(),
   }).strict().optional(),
@@ -36,7 +36,12 @@ export function validateStageEvidence(lead: CrmLead, update: CrmUpdate) {
       if (!lead.hasVerifiedForm) throw new CrmError(400, "No timestamped saved questionnaire exists for this person.");
       break;
     case "counselling_booked":
-      throw new CrmError(409, "A verified successful Cal.com booking ID is required. No authenticated booking-verification path is connected; manual IDs are not accepted.");
+      if (!lead.hasVerifiedCalendarBooking || e?.kind !== "calendar_booking" || !e.confirmed
+          || !lead.verifiedBookingReference || e.reference !== lead.verifiedBookingReference
+          || !e.occurredAt || new Date(e.occurredAt).getTime() > Date.now() + 60000) {
+        throw new CrmError(409, "A persisted AICHM Calendar booking is required; a form preference or webhook receipt is not booking evidence.");
+      }
+      break;
     case "counselling_attended":
     case "enrolled":
       if (e?.kind !== "staff_record" || !e.confirmed || (e.reference?.length ?? 0) < 10)

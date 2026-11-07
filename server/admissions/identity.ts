@@ -26,7 +26,7 @@ async function latestCounsellingInquiryForPhone(tx:Transaction,canonicalPhone:st
 }
 
 /** Never rewrites historical answers or merges ambiguous historical rows. */
-async function resolveLead(tx: Transaction, phone: string, name: string) {
+export async function resolveLead(tx: Transaction, phone: string, name: string) {
   const canonicalPhone = normalizeIndianMobile(phone);
   if (!canonicalPhone) throw new Error("invalid_indian_mobile");
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`admissions:${canonicalPhone}`}))`);
@@ -60,6 +60,44 @@ async function resolveLead(tx: Transaction, phone: string, name: string) {
       .where(eq(admissionsLeads.id, lead.id)).returning();
   }
   return lead;
+}
+
+/**
+ * Creates or reuses the canonical phone-keyed lead and exactly one existing CRM
+ * inquiry anchor. It never marks VSL registration or questionnaire completion.
+ */
+export async function upsertIntegrationLead(input: {
+  phone: string;
+  name: string;
+  source?: string;
+  programInterest?: string;
+}, now = new Date(), database: AdmissionsDatabase = db) {
+  const canonicalPhone = normalizeIndianMobile(input.phone);
+  if (!canonicalPhone) throw new Error("invalid_indian_mobile");
+  return database.transaction(async (tx) => {
+    let lead = await resolveLead(tx, canonicalPhone, input.name);
+    if (!lead.entrySource && input.source) {
+      [lead] = await tx.update(admissionsLeads).set({
+        entrySource: input.source.slice(0, 80),
+      }).where(eq(admissionsLeads.id, lead.id)).returning();
+    }
+    const [existingInquiry] = await tx.select({ id: inquiries.id }).from(inquiries)
+      .where(eq(inquiries.leadId, lead.id)).orderBy(desc(inquiries.id)).limit(1);
+    let inquiryId = existingInquiry?.id ?? null;
+    if (!existingInquiry) {
+      const [inquiry] = await tx.insert(inquiries).values({
+        leadId: lead.id,
+        name: lead.name,
+        email: "",
+        phone: lead.canonicalPhone,
+        programInterest: input.programInterest?.slice(0, 200) || "Professional Barista Executive Program",
+        message: "Initial enquiry received through the WhatsApp admissions assistant.",
+        submissionSource: "avni_whatsapp",
+      }).returning({ id: inquiries.id });
+      inquiryId = inquiry.id;
+    }
+    return { lead, inquiryId, inquiryCreated: !existingInquiry, canonicalPhone };
+  });
 }
 
 export async function registerVslLead(

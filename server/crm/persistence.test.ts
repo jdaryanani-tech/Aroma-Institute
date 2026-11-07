@@ -65,7 +65,7 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       await assert.rejects(updateCrm(db,detail.lead.id,{expectedVersion:1,ownerId:3},1),/active administrator/);
       assert.equal((await listCrm(db,{stage:"contacted",owner:"2",followUp:"upcoming"})).total,1);
       assert.equal((await listCrm(db,{dateFrom:"2000-01-01",dateTo:"2099-01-01"})).total,1);
-      await assert.rejects(updateCrm(db,detail.lead.id,{expectedVersion:1,stage:"counselling_booked",reason:"Booking claim"},1),/Cal.com/);
+      await assert.rejects(updateCrm(db,detail.lead.id,{expectedVersion:1,stage:"counselling_booked",reason:"Booking claim"},1),/persisted AICHM Calendar booking/);
       await assert.rejects(updateCrm(db,detail.lead.id,{expectedVersion:1,stage:"vsl_watched",reason:"Claim",evidence:{kind:"tracked_video"}},1));
       await db.query("INSERT INTO admissions_vsl_events(lead_id,event,position_seconds,duration_seconds) VALUES($1,'50',50,100)",[l.id]);
       detail=await updateCrm(db,detail.lead.id,{expectedVersion:1,stage:"vsl_watched",reason:"Playback verified",evidence:{kind:"tracked_video"}},1);

@@ -10,7 +10,7 @@ test("CRM evidence rules never treat a shared link or webhook receipt as watched
   assert.throws(()=>validateStageEvidence(lead,update("vsl_watched",{kind:"tracked_video"})));
   assert.throws(()=>validateStageEvidence({...lead,lastVideoMilestone:"started"},update("vsl_watched",{kind:"tracked_video"})));
   assert.throws(()=>validateStageEvidence(lead,update("form_submitted")));
-  assert.throws(()=>validateStageEvidence(lead,update("counselling_booked",{kind:"calcom_booking",reference:"invented-id",confirmed:true})),/verified successful Cal.com/);
+  assert.throws(()=>validateStageEvidence(lead,update("counselling_booked",{kind:"calendar_booking",reference:"invented-id",confirmed:true})),/persisted AICHM Calendar booking/);
   assert.throws(()=>validateStageEvidence(lead,update("enrolled")));
   assert.throws(()=>validateStageEvidence(lead,{expectedVersion:0,stage:"contacted"}));
 });

@@ -64,15 +64,17 @@ function eventDto(row:any, attendeeIds:number[]=[]):any {
 class CalendarConflictError extends Error {
   constructor(readonly conflicts:string[]) { super("calendar_conflict"); }
 }
-function calendarLockKeys(input:any,actorId:number) {
+export function calendarLockKeys(input:any,actorId:number) {
   return Array.from(new Set<string>([
     ...(input.resourceId?[`resource:${input.resourceId}`]:[]),
     ...(input.trainerId?[`staff:${input.trainerId}`]:[]),
     `staff:${input.ownerId??actorId}`,
+    ...(input.leadId?[`lead:${input.leadId}`]:[]),
+    ...(input.inquiryId?[`inquiry:${input.inquiryId}`]:[]),
     ...((input.attendeeIds??[]) as number[]).map(id=>`staff:${id}`),
   ])).sort();
 }
-async function queueEventReminderJobs(tx:any,event:any,actorId:number,attendeeIds:number[],action:"created"|"updated"|"cancelled") {
+export async function queueEventReminderJobs(tx:any,event:any,actorId:number,attendeeIds:number[],action:"created"|"updated"|"cancelled") {
   const recipients=new Set<number>([actorId,...attendeeIds,...(event.ownerId?[event.ownerId]:[]),
     ...(event.trainerId?[event.trainerId]:[]),...(event.studentId?[event.studentId]:[])]);
   if(event.courseId) {
@@ -87,6 +89,7 @@ async function queueEventReminderJobs(tx:any,event:any,actorId:number,attendeeId
     assigned.forEach((row:any)=>recipients.add(row.studentId));
   }
   const roleTargets:LmsRole[]=["admin"];
+  if(event.category==="admissions") roleTargets.push("admissions");
   if(event.category==="academic") roleTargets.push("academic_coordinator");
   if(event.category==="staff"||event.category==="operations") roleTargets.push("operations");
   const roleRecipients=await tx.select({userId:lmsUserRoles.userId}).from(lmsUserRoles)
@@ -325,8 +328,9 @@ export function registerCalendarRoutes(app:Express) {
       let conflicts:string[]=[];
       const canOverride=user.roles.some(role=>["admin","academic_coordinator","operations"].includes(role));
       const [saved]=await db.transaction(async tx=>{
-        for(const key of calendarLockKeys(input,user.id)) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
-        conflicts=await findConflicts(input,user.id);
+        const conflictInput={...input,leadId:linkedLeadId};
+        for(const key of calendarLockKeys(conflictInput,user.id)) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
+        conflicts=await findConflicts(conflictInput,user.id);
         if(conflicts.length&&!(overrideReason&&canOverride)) throw new CalendarConflictError(conflicts);
         const [created]=await tx.insert(calendarEvents).values({
           ...eventFields,startsAt:new Date(input.startsAt),endsAt:input.endsAt?new Date(input.endsAt):null,
@@ -695,7 +699,7 @@ export function registerCalendarRoutes(app:Express) {
   });
 }
 
-async function findConflicts(input:any,actorId:number,ignoreId?:string) {
+export async function findConflicts(input:any,actorId:number,ignoreId?:string) {
   const start=new Date(input.startsAt);
   const end=input.endsAt?new Date(input.endsAt):new Date(start.getTime()+60*60_000);
   const attendees:number[]=input.attendeeIds??[];
@@ -705,8 +709,12 @@ async function findConflicts(input:any,actorId:number,ignoreId?:string) {
       AND ($3::uuid IS NULL OR e.id<>$3)
       AND (($4::int IS NOT NULL AND e.resource_id=$4) OR ($5::int IS NOT NULL AND e.trainer_id=$5)
         OR ($6::int IS NOT NULL AND e.owner_id=$6)
-        OR EXISTS(SELECT 1 FROM calendar_event_attendees a WHERE a.event_id=e.id AND a.user_id=ANY($7::int[])))`,
-    [start,end,ignoreId??null,input.resourceId??null,input.trainerId??null,input.ownerId??actorId,attendees]);
+        OR ($8::uuid IS NOT NULL AND e.lead_id=$8)
+        OR ($9::int IS NOT NULL AND e.inquiry_id=$9)
+        OR EXISTS(SELECT 1 FROM calendar_event_attendees a WHERE a.event_id=e.id AND (
+          a.user_id=ANY($7::int[]) OR ($8::uuid IS NOT NULL AND a.lead_id=$8)
+          OR ($9::int IS NOT NULL AND a.inquiry_id=$9))))`,
+    [start,end,ignoreId??null,input.resourceId??null,input.trainerId??null,input.ownerId??actorId,attendees,input.leadId??null,input.inquiryId??null]);
   const warnings=rows.map(()=> "The selected resource, staff member, or attendee has an overlapping event.");
   if(input.trainerId) {
     const sessions=await pool.query(`SELECT id,title,starts_at FROM lms_live_sessions

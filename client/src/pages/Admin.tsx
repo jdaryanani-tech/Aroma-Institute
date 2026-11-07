@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, Clock3, Coffee, LogOut, Mail, MessageCircleOff, Phone, Search, ShieldCheck, SlidersHorizontal, Users, VideoOff, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, Clock3, Coffee, LogOut, Mail, MessageCircle, MessageCircleOff, Phone, Search, ShieldCheck, SlidersHorizontal, Users, VideoOff, X } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
 import type { CrmCapabilities, CrmDetail, CrmLead, CrmStage, CrmUpdate } from "@shared/crm";
@@ -180,7 +180,7 @@ export default function Admin() {
     <main className="crm-app" data-testid="page-admin-dashboard">
       <header className="crm-topbar"><div className="crm-wrap crm-topbar-inner">
         <div className="crm-brand"><span className="crm-brand-mark" aria-hidden="true">A.</span><div className="crm-brand-copy"><strong>AICHM Admissions</strong><span>Prospect desk · Aroma Institute</span></div></div>
-        <div className="crm-top-actions"><a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a><span className="crm-connection-tag"><MessageCircleOff size={13} /> Chat not connected</span>
+        <div className="crm-top-actions"><a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a><span className="crm-connection-tag">{caps?.chatHistory ? <MessageCircle size={13} /> : <MessageCircleOff size={13} />}{caps?.chatHistory ? " WhatsApp history connected" : " Chat history unavailable"}</span>
           <button className="crm-button crm-button-quiet" type="button" onClick={signOut} disabled={logout.isPending} data-testid="admin-button-logout"><LogOut size={16} />{logout.isPending ? "Signing out" : "Sign out"}</button>
         </div>
       </div></header>
@@ -315,10 +315,11 @@ function LeadDetail(props: {
   const ownerChanged = owner !== (lead.ownerId === null ? "" : String(lead.ownerId));
   const followChanged = followUp !== toLocalInput(lead.followUpAt);
   const dirty = stageChanged || ownerChanged || followChanged || Boolean(note.trim());
-  const blocked = !props.canWrite || (stage === "counselling_booked" && stageChanged) || (stage === "form_submitted" && stageChanged && !lead.hasVerifiedForm);
+  const blocked = !props.canWrite || (stage === "counselling_booked" && stageChanged && !lead.hasVerifiedCalendarBooking) || (stage === "form_submitted" && stageChanged && !lead.hasVerifiedForm);
   let evidenceError = "";
   if (stageChanged && reason.trim().length < 3) evidenceError = "Add a reason of at least 3 characters for this stage change.";
   if (stageChanged && stage === "vsl_shared" && (!confirmed || reference.trim().length < 3 || !occurredAt)) evidenceError = "Confirm the link was actually sent, add an external message reference of at least 3 characters, and record when it happened.";
+  if (stageChanged && stage === "counselling_booked" && !lead.hasVerifiedCalendarBooking) evidenceError = "A persisted AICHM Calendar booking is required. A date preference or webhook receipt is not a booking.";
   if (stageChanged && stage === "vsl_watched" && evidenceKind === "tracked_video" && !reference.trim()) evidenceError = "Add the tracked video record reference. The server verifies the viewing milestone.";
   if (stageChanged && stage === "vsl_watched" && evidenceKind === "prospect_confirmation" && (reference.trim().length < 10 || !occurredAt)) evidenceError = "Record the prospect’s clear self-reported quote (at least 10 characters) and when they said it.";
   if (stageChanged && (stage === "counselling_attended" || stage === "enrolled") && (!confirmed || reference.trim().length < 10 || !occurredAt)) evidenceError = "Confirm the staff record and provide a reference of at least 10 characters and occurrence time.";
@@ -336,6 +337,10 @@ function LeadDetail(props: {
       else if (stage === "vsl_watched") patch.evidence = evidenceKind === "tracked_video"
         ? { kind: "tracked_video", reference: reference.trim() }
         : { kind: "prospect_confirmation", reference: reference.trim(), occurredAt: new Date(occurredAt).toISOString(), confirmed: true };
+      else if (stage === "counselling_booked" && lead.verifiedBookingReference) patch.evidence = {
+        kind: "calendar_booking", reference: lead.verifiedBookingReference,
+        occurredAt: new Date().toISOString(), confirmed: true,
+      };
       else if (stage === "counselling_attended" || stage === "enrolled") patch.evidence = { kind: "staff_record", reference: reference.trim(), occurredAt: new Date(occurredAt).toISOString(), confirmed: true };
     }
     props.onSave(patch); setSavingVersion(lead.version); setSaveMessage("Saving changes…");
@@ -351,7 +356,7 @@ function LeadDetail(props: {
       <JourneyPanel journey={detail.journey} />
       <MetaAttributionPanel marketing={detail.marketing} />
       <form onSubmit={save}><div className="crm-detail-grid">
-        <label className="crm-field"><span className="crm-field-label">Current stage</span><select className="crm-select" value={stage} onChange={(event) => { setStage(event.target.value as CrmStage); setSaveMessage(""); }} data-testid="crm-stage">{stages.map((item) => <option key={item} value={item} disabled={item === "counselling_booked" && lead.stage !== item}>{CRM_STAGE_LABELS[item]}{item === "counselling_booked" ? " · unavailable" : ""}</option>)}</select></label>
+        <label className="crm-field"><span className="crm-field-label">Current stage</span><select className="crm-select" value={stage} onChange={(event) => { setStage(event.target.value as CrmStage); setSaveMessage(""); }} data-testid="crm-stage">{stages.map((item) => <option key={item} value={item} disabled={item === "counselling_booked" && !lead.hasVerifiedCalendarBooking}>{CRM_STAGE_LABELS[item]}{item === "counselling_booked" && !lead.hasVerifiedCalendarBooking ? " · unavailable" : ""}</option>)}</select></label>
         <label className="crm-field"><span className="crm-field-label">Owner</span><select className="crm-select" value={owner} onChange={(event) => setOwner(event.target.value)} data-testid="crm-owner"><option value="">Unassigned</option>{props.owners.map((person) => <option key={person.id} value={String(person.id)}>{person.name}</option>)}</select></label>
         <label className="crm-field"><span className="crm-field-label">Follow-up</span><input className="crm-input" type="datetime-local" value={followUp} onChange={(event) => setFollowUp(event.target.value)} /></label>
         <div className="crm-field"><span className="crm-field-label">Next context</span><div className="crm-info" style={{ margin: 0 }}>Last activity {formatDate(lead.lastActivityAt, true)} · {lead.programs[0] || "Program not recorded"}</div></div>
@@ -366,7 +371,7 @@ function LeadDetail(props: {
           {evidenceKind === "prospect_confirmation" ? <label className="crm-field"><span className="crm-field-label">Confirmed at</span><input className="crm-input" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></label> : <p className="crm-info crm-field-wide">The server verifies the tracked record reached the required viewing milestone. A reference alone does not establish completion.</p>}
         </>}
         {stageChanged && stage === "form_submitted" && <div className={lead.hasVerifiedForm ? "crm-info crm-field-wide" : "crm-error crm-field-wide"}>{lead.hasVerifiedForm ? `Verified timestamped form record is present${lead.questionnaireCompletedAt ? ` (${formatDate(lead.questionnaireCompletedAt, true)})` : ""}.` : "Cannot mark form submitted: this person has no stored, timestamped verified form record."}</div>}
-        {stageChanged && stage === "counselling_booked" && <div className="crm-error crm-field-wide">Booking status is locked. There is no connected, verified Cal.com booking path, so do not record a booking here.</div>}
+        {stageChanged && stage === "counselling_booked" && <div className={lead.hasVerifiedCalendarBooking ? "crm-info crm-field-wide" : "crm-error crm-field-wide"}>{lead.hasVerifiedCalendarBooking ? `Verified AICHM Calendar booking ${lead.verifiedBookingReference} is available as evidence.` : "Booking status is unavailable until a persisted AICHM Calendar booking exists."}</div>}
         {stageChanged && (stage === "counselling_attended" || stage === "enrolled") && <>
           <label className="crm-field crm-field-wide"><span className="crm-field-label">Staff record reference</span><input className="crm-input" minLength={10} value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Confirmed attendance or enrollment record (at least 10 characters)" /></label>
           <label className="crm-field"><span className="crm-field-label">Occurred at</span><input className="crm-input" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></label>
@@ -394,7 +399,7 @@ function LeadDetail(props: {
           <details style={{ marginTop: 10 }}><summary className="crm-text-button" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>View counselling answers <ChevronDown size={13} /></summary><dl className="crm-answers">{Object.entries(inquiry.counsellingAnswers).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => <div key={key}><dt>{counsellingFieldLabels[key] ?? key}</dt><dd>{formatCounsellingAnswer(key, value)}</dd></div>)}</dl></details>
         </>}
       </article>)}
-      <div className="crm-info" style={{ display: "flex", gap: 8, alignItems: "center" }}><VideoOff size={15} /> Video milestones appear only when server tracking verifies them. Chat history and booking are not connected.</div>
+      <div className="crm-info" style={{ display: "flex", gap: 8, alignItems: "center" }}><VideoOff size={15} /> Video milestones require server-verified playback. {detail.capabilities.chatHistory ? "Persisted WhatsApp messages are included in the timeline." : "WhatsApp history is not yet available."} {detail.capabilities.calendarBookingVerification ? "Counselling bookings are verified from the AICHM Calendar." : "Counselling bookings are unavailable until the Calendar schema is installed."}</div>
     </div>
   </>;
 }
