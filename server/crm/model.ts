@@ -1,5 +1,6 @@
 import type { CrmCapabilities, CrmLead, CrmStage } from "@shared/crm";
 import type { QueryResultRow } from "pg";
+import { isSupabaseAvniReadConfigured } from "../db/supabase-avni-readonly";
 
 export type SqlDb = { query: (text: string, values?: any[]) => Promise<{ rows: any[] }> };
 export type CrmSchema = CrmCapabilities & { deliveryAttempts: boolean; metaAttribution: boolean };
@@ -11,14 +12,13 @@ export async function inspectCrmSchema(db: SqlDb): Promise<CrmSchema> {
     to_regclass('admissions_crm_profiles') IS NOT NULL AND to_regclass('admissions_crm_activities') IS NOT NULL AS crm,
     to_regclass('counselling_delivery_attempts') IS NOT NULL AS attempts,
     to_regclass('admissions_lead_touchpoints') IS NOT NULL AS marketing,
-    to_regclass('admissions_conversation_messages') IS NOT NULL AS chat,
     to_regclass('calendar_events') IS NOT NULL AND to_regclass('calendar_event_attendees') IS NOT NULL
       AND to_regclass('calendar_integration_requests') IS NOT NULL
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='calendar_events' AND column_name='confirmation_message_id') AS calendar`);
   return { identityTracking: r.identity, videoTracking: r.identity && r.video,
     crmPersistence: r.crm, deliveryAttempts: r.attempts, metaAttribution: r.marketing,
-    calendarBookingVerification: r.calendar, chatHistory: r.chat };
+    calendarBookingVerification: r.calendar, chatHistory: isSupabaseAvniReadConfigured() };
 }
 
 /** All optional tables are selected only after capability introspection, never via startup DDL. */
@@ -128,7 +128,7 @@ export function schemaWarnings(c: CrmSchema) {
     ...(!c.identityTracking ? ["Lead identity tracking migration is pending; legacy inquiry identities are shown conservatively."] : []),
     ...(!c.videoTracking ? ["Video tracking schema is unavailable; no viewing is inferred."] : []),
     ...(!c.deliveryAttempts ? ["Delivery-attempt audit schema is unavailable. Existing inquiry status is shown without inventing attempt history."] : []),
-    ...(!c.chatHistory ? ["Persisted conversation history is not available; it is not inferred from AVNI prompts."] : []),
+    ...(!c.chatHistory ? ["Read-only Supabase conversation history is not configured; transcript data is not stored in Replit."] : []),
     ...(!c.calendarBookingVerification ? ["AICHM Calendar schema is not available; counselling bookings cannot yet be verified."] : []),
   ];
 }

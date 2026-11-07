@@ -5,7 +5,7 @@ import { requireLmsRole, requireLmsUser } from "../lms/auth";
 import { sameOriginCapture } from "../admissions/routes";
 import { CRM_STAGES } from "@shared/crm";
 import { CrmError, updateCrmSchema } from "./evidence";
-import { detailCrm, listCrm } from "./read";
+import { detailCrm, listCrm, readCrmConversationPage } from "./read";
 import { updateCrm } from "./write";
 import { VSL_DISPATCH_ENABLED_ENV, VSL_WEBHOOK_URL_ENV, isTrustedVslWebhookUrl, isVslDispatchEnabled } from "../admissions/outbox-dispatcher";
 import { VSL_WEBHOOK_SECRET_ENV } from "../admissions/follow-up-routes";
@@ -21,6 +21,10 @@ const querySchema=z.object({
   page:z.coerce.number().int().min(1).max(100000).default(1),pageSize:z.coerce.number().int().min(1).max(100).default(20),
 }).strict().refine(q=>!q.dateFrom||!q.dateTo||q.dateFrom<=q.dateTo,"Start date must not follow end date.");
 const idSchema=z.string().regex(/^(lead:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|inquiry:[1-9]\d*)$/i);
+const conversationQuerySchema=z.object({
+  cursor:z.string().max(512).optional(),
+  limit:z.coerce.number().int().min(1).max(100).default(50),
+}).strict();
 
 // Dependency injection is used by isolated tests, never selected by a public request or environment flag.
 export function registerCrmRoutes(app: Express, dependencies = { db: pool, connectionPool: pool, authenticate: requireLmsUser }) {
@@ -41,6 +45,13 @@ export function registerCrmRoutes(app: Express, dependencies = { db: pool, conne
   }));
   app.get("/api/admin/crm/leads/:id",handle(async(req,res)=>{
     res.json(await detailCrm(dependencies.db,idSchema.parse(req.params.id)));
+  }));
+  app.get("/api/admin/crm/leads/:id/conversations",handle(async(req,res)=>{
+    res.setHeader("Cache-Control","private, no-store, max-age=0");
+    const query=conversationQuerySchema.parse(req.query);
+    res.json(await readCrmConversationPage(
+      dependencies.db,idSchema.parse(req.params.id),query.cursor,query.limit,
+    ));
   }));
   app.get("/api/admin/crm/avni-health",handle(async(_req,res)=>{
     const {rows:[schema]}=await dependencies.db.query(`SELECT

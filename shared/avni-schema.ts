@@ -1,22 +1,11 @@
 import { sql } from "drizzle-orm";
-import {
-  check,
-  index,
-  integer,
-  jsonb,
-  pgTable,
-  primaryKey,
-  text,
-  timestamp,
-  uniqueIndex,
-  uuid,
-} from "drizzle-orm/pg-core";
+import { check, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { admissionsLeads } from "./admissions-schema";
 import { inquiries } from "./schema";
 
 /**
- * One durable row per WhatsApp message. Outbound rows are written as pending
- * before AVNI sends them; a later delivery update records provider acceptance.
+ * Legacy-only Replit transcript shape. Do not create, read, or write this table:
+ * Supabase public.conversations is the authoritative transcript store.
  */
 export const admissionsConversationMessages = pgTable(
   "admissions_conversation_messages",
@@ -58,34 +47,7 @@ export const admissionsConversationMessages = pgTable(
   ],
 );
 
-/** Existing Supabase knowledge is imported with its UUID and source ID intact. */
-export const lmsCourseKnowledge = pgTable(
-  "lms_course_knowledge",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    sourceSystem: text("source_system"),
-    sourceRecordId: uuid("source_record_id"),
-    slug: text("slug").notNull(),
-    category: text("category").notNull(),
-    question: text("question"),
-    answer: text("answer").notNull(),
-    keywords: text("keywords").array().notNull().default(sql`'{}'::text[]`),
-    status: text("status").notNull().default("draft"),
-    priority: integer("priority").notNull().default(100),
-    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("lms_course_knowledge_source_uq")
-      .on(table.sourceSystem, table.sourceRecordId)
-      .where(sql`${table.sourceSystem} IS NOT NULL AND ${table.sourceRecordId} IS NOT NULL`),
-    uniqueIndex("lms_course_knowledge_slug_uq").on(table.slug),
-    index("lms_course_knowledge_status_category_idx").on(table.status, table.category, table.priority),
-  ],
-);
-
-/** Explicit Supabase-lead-to-canonical-lead crosswalk; never merge by phone alone. */
+/** Review-only crosswalk metadata; it stores no Supabase lead profile or transcript. */
 export const admissionsLegacyLeadLinks = pgTable(
   "admissions_legacy_lead_links",
   {
@@ -93,7 +55,6 @@ export const admissionsLegacyLeadLinks = pgTable(
     sourceLeadId: uuid("source_lead_id").notNull(),
     leadId: uuid("lead_id").references(() => admissionsLeads.id, { onDelete: "cascade" }),
     matchStatus: text("match_status").notNull().default("review"),
-    legacyProfile: jsonb("legacy_profile").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     reviewedBy: integer("reviewed_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

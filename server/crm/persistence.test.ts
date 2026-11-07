@@ -101,6 +101,16 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
         const admin=await fetch(origin+path,{headers:{"x-test-role":"admin"}});
         assert.equal(admin.status,200);assert.match(admin.headers.get("cache-control")!,/no-store/);
       }
+      const historyPath=`/api/admin/crm/leads/lead:${l.id}/conversations?limit=20`;
+      assert.equal((await fetch(origin+historyPath)).status,401);
+      assert.equal((await fetch(origin+historyPath,{headers:{"x-test-role":"student"}})).status,403);
+      const historyResponse=await fetch(origin+historyPath,{headers:{"x-test-role":"admin"}});
+      assert.equal(historyResponse.status,200);
+      assert.equal((await historyResponse.json()).state,"not_configured");
+      const detailResponse=await fetch(origin+`/api/admin/crm/leads/lead:${l.id}`,{headers:{"x-test-role":"admin"}});
+      const detailBody=await detailResponse.json();
+      assert.equal(detailBody.conversationHistory.state,"not_configured");
+      assert.equal(detailBody.conversationHistory.items.length,0);
       const patch=(role?:string,site=origin)=>fetch(origin+`/api/admin/crm/leads/lead:${l.id}`,{
         method:"PATCH",headers:{"Content-Type":"application/json",Origin:site,...(role?{"x-test-role":role}:{})},
         body:JSON.stringify({expectedVersion:4,note:"Test note"}),

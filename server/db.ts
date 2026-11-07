@@ -13,4 +13,13 @@ export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-export const db = drizzle(pool, { schema: { ...siteSchema, ...lmsSchema, ...calendarSchema, ...avniSchema } });
+// Transcript table types remain available only as legacy documentation; they
+// are intentionally excluded from the active application database schema.
+export const db = drizzle(pool, {
+  schema: {
+    ...siteSchema,
+    ...lmsSchema,
+    ...calendarSchema,
+    admissionsLegacyLeadLinks: avniSchema.admissionsLegacyLeadLinks,
+  },
+});

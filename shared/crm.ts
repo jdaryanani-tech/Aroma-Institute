@@ -61,6 +61,15 @@ export type CrmActivity = {
 export type CrmDetail = {
   lead: CrmLead; inquiries: CrmInquiry[]; journey: LeadJourneySummaryData | null;
   activities: CrmActivity[]; capabilities: CrmCapabilities; warnings: string[];
+  conversationHistory: {
+    state: "available" | "not_configured" | "unavailable" | "unlinked";
+    items: {
+      conversationId: string; side: "message" | "ai_response"; direction: string;
+      messageType: string; body: string; deliveryState: string | null;
+      providerMessageId: string | null; occurredAt: string;
+    }[];
+    nextCursor: string | null;
+  };
   marketing: {
     available: boolean; consentStatus: string | null; consentAt: string | null;
     touchpoints: {

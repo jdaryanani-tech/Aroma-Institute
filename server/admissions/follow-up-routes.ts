@@ -1,5 +1,5 @@
 import type { Express, RequestHandler } from "express";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { counsellingAnswersSchema } from "@shared/schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
@@ -9,10 +9,10 @@ import { admissionsIntegrationSchemaReady, followUpSchemaReady, readLeadFollowUp
 import { dispatchVslRegistrationOnce, isVslDispatchEnabled } from "./outbox-dispatcher";
 import { validateCounsellingAnswer } from "./questionnaire-validation";
 import { db } from "../db";
+import { N8N_INTEGRATION_SECRET_ENV, N8N_INTEGRATION_SECRET_HEADER, verifyN8nIntegrationSecret } from "../integrations/n8n-auth";
 
-export const VSL_WEBHOOK_SECRET_ENV = "N8N_VSL_REGISTRATION_WEBHOOK_SECRET";
-export const VSL_WEBHOOK_HEADER = "x-aichm-webhook-secret";
-const digest=(value:string)=>createHash("sha256").update(value).digest();
+export const VSL_WEBHOOK_SECRET_ENV = N8N_INTEGRATION_SECRET_ENV;
+export const VSL_WEBHOOK_HEADER = N8N_INTEGRATION_SECRET_HEADER;
 
 export function registerFollowUpStatusRoute(app:Express,options:{
   database?:FollowUpDatabase;getSecret?:()=>string|undefined;
@@ -27,7 +27,7 @@ export function registerFollowUpStatusRoute(app:Express,options:{
     const expected=(options.getSecret?.() ?? process.env[VSL_WEBHOOK_SECRET_ENV])?.trim();
     if(!expected) return void res.status(503).json({message:"Lead-status integration is not configured."});
     const supplied=req.get(VSL_WEBHOOK_HEADER) ?? "";
-    if(supplied.length>1024 || !timingSafeEqual(digest(supplied),digest(expected)))
+    if(!verifyN8nIntegrationSecret(supplied, expected))
       return void res.status(401).json({message:"Integration authentication required."});
     const key=req.ip ?? "unknown",now=Date.now();
     let bucket=buckets.get(key);

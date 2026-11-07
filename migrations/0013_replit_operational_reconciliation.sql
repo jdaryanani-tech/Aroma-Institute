@@ -15,7 +15,6 @@ ALTER TABLE admissions_leads ADD COLUMN IF NOT EXISTS video_observed_percent int
 ALTER TABLE admissions_leads ADD COLUMN IF NOT EXISTS video_last_milestone text;
 ALTER TABLE admissions_leads ADD COLUMN IF NOT EXISTS video_last_event_at timestamptz;
 ALTER TABLE admissions_leads ADD COLUMN IF NOT EXISTS video_completed_at timestamptz;
-ALTER TABLE admissions_leads ADD COLUMN IF NOT EXISTS legacy_profile jsonb;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='admissions_leads_video_observed_percent'
     AND conrelid='admissions_leads'::regclass) THEN
@@ -69,49 +68,11 @@ CREATE INDEX IF NOT EXISTS admissions_registration_outbox_due_idx
 CREATE INDEX IF NOT EXISTS admissions_registration_outbox_lead_idx
   ON admissions_registration_outbox(lead_id);
 
-CREATE TABLE IF NOT EXISTS admissions_conversation_messages (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  lead_id uuid NOT NULL REFERENCES admissions_leads(id) ON DELETE CASCADE,
-  inquiry_id integer REFERENCES inquiries(id) ON DELETE SET NULL,
-  canonical_phone text NOT NULL,
-  direction text NOT NULL,
-  message_type text NOT NULL DEFAULT 'text',
-  body text NOT NULL,
-  provider text NOT NULL DEFAULT 'whatsapp',
-  provider_message_id text,
-  idempotency_key text NOT NULL,
-  delivery_state text NOT NULL,
-  occurred_at timestamptz NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  source_system text,
-  source_record_id text,
-  source_message_side text,
-  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-  CONSTRAINT admissions_conversation_messages_direction_ck CHECK (direction IN ('inbound','outbound')),
-  CONSTRAINT admissions_conversation_messages_delivery_ck CHECK (delivery_state IN ('received','pending','sent','failed','unknown')),
-  CONSTRAINT admissions_conversation_messages_phone_ck CHECK (canonical_phone ~ '^91[6-9][0-9]{9}$'),
-  CONSTRAINT admissions_conversation_messages_type_ck CHECK (length(message_type) BETWEEN 1 AND 80),
-  CONSTRAINT admissions_conversation_messages_body_ck CHECK (length(body) <= 12000)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS admissions_conversation_messages_idempotency_uq
-  ON admissions_conversation_messages(idempotency_key);
-CREATE UNIQUE INDEX IF NOT EXISTS admissions_conversation_messages_provider_id_uq
-  ON admissions_conversation_messages(provider,provider_message_id) WHERE provider_message_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS admissions_conversation_messages_source_uq
-  ON admissions_conversation_messages(source_system,source_record_id,source_message_side)
-  WHERE source_system IS NOT NULL AND source_record_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS admissions_conversation_messages_lead_time_idx
-  ON admissions_conversation_messages(lead_id,occurred_at,id);
-CREATE INDEX IF NOT EXISTS admissions_conversation_messages_phone_time_idx
-  ON admissions_conversation_messages(canonical_phone,occurred_at);
-
 CREATE TABLE IF NOT EXISTS admissions_legacy_lead_links (
   source_system text NOT NULL,
   source_lead_id uuid NOT NULL,
   lead_id uuid REFERENCES admissions_leads(id) ON DELETE CASCADE,
   match_status text NOT NULL DEFAULT 'review',
-  legacy_profile jsonb NOT NULL DEFAULT '{}'::jsonb,
   reviewed_at timestamptz,
   reviewed_by integer,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -119,28 +80,6 @@ CREATE TABLE IF NOT EXISTS admissions_legacy_lead_links (
   CONSTRAINT admissions_legacy_lead_links_source_pk PRIMARY KEY(source_system,source_lead_id)
 );
 CREATE INDEX IF NOT EXISTS admissions_legacy_lead_links_lead_idx ON admissions_legacy_lead_links(lead_id);
-
-CREATE TABLE IF NOT EXISTS lms_course_knowledge (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  source_system text,
-  source_record_id uuid,
-  slug text NOT NULL,
-  category text NOT NULL,
-  question text,
-  answer text NOT NULL,
-  keywords text[] NOT NULL DEFAULT '{}'::text[],
-  status text NOT NULL DEFAULT 'draft',
-  priority integer NOT NULL DEFAULT 100,
-  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE UNIQUE INDEX IF NOT EXISTS lms_course_knowledge_source_uq
-  ON lms_course_knowledge(source_system,source_record_id)
-  WHERE source_system IS NOT NULL AND source_record_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS lms_course_knowledge_slug_uq ON lms_course_knowledge(slug);
-CREATE INDEX IF NOT EXISTS lms_course_knowledge_status_category_idx
-  ON lms_course_knowledge(status,category,priority);
 
 -- Existing Calendar schema definitions (migration 0010) are intentionally
 -- restated here because none of those tables exist in the audited production
@@ -213,7 +152,9 @@ CREATE TABLE IF NOT EXISTS calendar_events (
   resource_id integer REFERENCES calendar_resources(id) ON DELETE SET NULL,
   lms_live_session_id integer UNIQUE REFERENCES lms_live_sessions(id) ON DELETE SET NULL,
   source_type text, source_id text, idempotency_key text,
-  confirmation_message_id uuid REFERENCES admissions_conversation_messages(id) ON DELETE SET NULL,
+  -- UUID of the explicit confirmation message in Supabase public.conversations.
+  -- It is intentionally not a cross-database foreign key.
+  confirmation_message_id uuid,
   capacity integer, recurrence_rule jsonb, version integer NOT NULL DEFAULT 1,
   created_by integer NOT NULL REFERENCES lms_users(id),
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
@@ -222,8 +163,7 @@ CREATE TABLE IF NOT EXISTS calendar_events (
   CONSTRAINT calendar_events_range CHECK (ends_at IS NULL OR ends_at>starts_at),
   CONSTRAINT calendar_events_capacity CHECK (capacity IS NULL OR capacity>0)
 );
-ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS confirmation_message_id uuid
-  REFERENCES admissions_conversation_messages(id) ON DELETE SET NULL;
+ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS confirmation_message_id uuid;
 CREATE UNIQUE INDEX IF NOT EXISTS calendar_events_source_unique
   ON calendar_events(source_type,source_id) WHERE source_type IS NOT NULL AND source_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS calendar_events_idempotency_unique

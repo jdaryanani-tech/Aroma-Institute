@@ -27,6 +27,17 @@ export function useCrmDetail(id: string | null, enabled: boolean) {
     enabled: enabled && Boolean(id), retry: false, staleTime: 0,
   });
 }
+export type CrmConversationPage = {
+  state: "available" | "not_configured" | "unavailable" | "unlinked";
+  items: NonNullable<CrmDetail["conversationHistory"]>["items"];
+  nextCursor: string | null;
+};
+export function fetchCrmConversationPage(id: string, cursor: string, limit = 50) {
+  const query = new URLSearchParams({ cursor, limit: String(limit) });
+  return request<CrmConversationPage>(
+    `/api/admin/crm/leads/${encodeURIComponent(id)}/conversations?${query}`,
+  );
+}
 export function useCrmUpdate() {
   const client = useQueryClient();
   return useMutation({

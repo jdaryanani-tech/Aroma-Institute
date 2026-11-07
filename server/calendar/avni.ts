@@ -3,7 +3,6 @@ import { and, eq, inArray, lt, gt, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { admissionsLeads } from "@shared/admissions-schema";
-import { admissionsConversationMessages } from "@shared/avni-schema";
 import { admissionsCrmActivities, admissionsCrmProfiles, inquiries } from "@shared/schema";
 import {
   availabilityExceptions, calendarActivity, calendarEventAttendees, calendarEvents, calendarIntegrationRequests,
@@ -12,6 +11,7 @@ import {
 import { lmsLiveSessions, lmsUserRoles, lmsUsers } from "@shared/lms-schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
 import { db, pool } from "../db";
+import { verifySupabaseAvniConfirmation } from "../db/supabase-avni-readonly";
 import { calendarLockKeys, findConflicts, queueEventReminderJobs } from "./routes";
 import { avniIntegrationAuth } from "../integrations/avni";
 
@@ -117,8 +117,7 @@ async function calendarIntegrationSchemaReady() {
     to_regclass('calendar_event_attendees') IS NOT NULL AND
     to_regclass('staff_availability') IS NOT NULL AND
     to_regclass('availability_exceptions') IS NOT NULL AND
-    to_regclass('calendar_reminder_jobs') IS NOT NULL AND
-    to_regclass('admissions_conversation_messages') IS NOT NULL AS ready`);
+    to_regclass('calendar_reminder_jobs') IS NOT NULL AS ready`);
   return row?.ready === true;
 }
 
@@ -140,16 +139,7 @@ async function findEligibleLead(phone: string) {
 }
 
 async function requireConfirmation(leadId: string, messageId: string, type: "booking_confirmation" | "booking_cancellation") {
-  const [message] = await db.select({
-    id: admissionsConversationMessages.id,
-    direction: admissionsConversationMessages.direction,
-    messageType: admissionsConversationMessages.messageType,
-    leadId: admissionsConversationMessages.leadId,
-  }).from(admissionsConversationMessages).where(and(
-    eq(admissionsConversationMessages.id, messageId),
-    eq(admissionsConversationMessages.leadId, leadId),
-  )).limit(1);
-  if (!explicitStudentConfirmation(message ?? null, type)) {
+  if (!await verifySupabaseAvniConfirmation(leadId, messageId, type)) {
     throw new Error("explicit_confirmation_required");
   }
 }

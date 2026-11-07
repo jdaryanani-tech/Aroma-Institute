@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AICHM_MIGRATION_ORDER,
+  assertOperationalDataCopyMode,
   FUTURE_CALENDAR_TABLES,
   assertDryRunOnly,
   buildMigrationDryRunPlan,
@@ -37,6 +38,12 @@ test("migration planning defaults to dry-run and refuses apply mode", () => {
   assert.doesNotThrow(() => assertDryRunOnly(["--dry-run"]));
   assert.throws(() => assertDryRunOnly(["--apply"]), /Apply mode is not implemented/);
   assert.throws(() => assertDryRunOnly(["--production"]), /Only the default dry-run/);
+});
+
+test("the old operational Replit-to-Supabase data-copy apply path is disabled by the two-database architecture", () => {
+  assert.doesNotThrow(() => assertOperationalDataCopyMode("snapshot"));
+  assert.doesNotThrow(() => assertOperationalDataCopyMode("live-dry-run"));
+  assert.throws(() => assertOperationalDataCopyMode("apply"), /disabled under the approved two-database architecture/);
 });
 
 test("migration order is deterministic and respects every declared foreign-key dependency", () => {

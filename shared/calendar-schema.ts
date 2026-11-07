@@ -5,7 +5,6 @@ import {
 import { admissionsLeads } from "./admissions-schema";
 import { inquiries } from "./schema";
 import { lmsCourses, lmsLiveSessions, lmsNotifications, lmsUsers } from "./lms-schema";
-import { admissionsConversationMessages } from "./avni-schema";
 
 export const calendarResources = pgTable("calendar_resources", {
   id: serial("id").primaryKey(),
@@ -74,7 +73,8 @@ export const calendarEvents = pgTable("calendar_events", {
   sourceType: text("source_type"),
   sourceId: text("source_id"),
   idempotencyKey: text("idempotency_key"),
-  confirmationMessageId: uuid("confirmation_message_id").references(() => admissionsConversationMessages.id, { onDelete: "set null" }),
+  // This is an external Supabase conversation UUID, not a Replit transcript FK.
+  confirmationMessageId: uuid("confirmation_message_id"),
   capacity: integer("capacity"),
   recurrenceRule: jsonb("recurrence_rule").$type<{
     frequency: "daily" | "weekly" | "monthly";

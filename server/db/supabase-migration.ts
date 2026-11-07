@@ -25,7 +25,7 @@ function requiredValue(value: string | undefined, name: string): string {
   return trimmed;
 }
 
-function validateCertificate(certificate: string): string {
+export function normalizeSupabaseCaCertificate(certificate: string): string {
   const blockPattern = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/g;
   const blocks = Array.from(certificate.matchAll(blockPattern), (match) => match[1]);
   const remainder = certificate.replace(blockPattern, "");
@@ -148,7 +148,7 @@ export function buildSupabaseMigrationPoolConfig(
     environment.SUPABASE_DATABASE_URL,
     "SUPABASE_DATABASE_URL",
   );
-  const certificate = validateCertificate(
+  const certificate = normalizeSupabaseCaCertificate(
     requiredValue(environment.SUPABASE_DB_SSL_CA, "SUPABASE_DB_SSL_CA"),
   );
   const parsedUrl = validateConnectionUrl(connectionString);

@@ -1,6 +1,7 @@
 import { CRM_STAGES, type CrmActivity, type CrmDetail, type CrmFilters, type CrmList, type CrmOverview } from "@shared/crm";
 import { crmModelSql, inspectCrmSchema, iso, leadDto, schemaWarnings, type CrmSchema, type SqlDb } from "./model";
 import { CrmError } from "./evidence";
+import { readSupabaseConversationPage } from "../db/supabase-avni-readonly";
 
 export async function findPerson(db: SqlDb, c: CrmSchema, id: string) {
   // Inquiry aliases continue resolving after an unambiguous registration links the record.
@@ -88,15 +89,13 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     to_regclass('admissions_meta_event_outbox') IS NOT NULL AS outbox`);
   const marketingAvailable = !!metaSchema?.touchpoints && !!metaSchema?.consent && !!metaSchema?.leadLinks && !!metaSchema?.outbox;
   const [{ rows: inquiries }, { rows: attempts }, { rows: activities }, { rows: events },
-    { rows: messages }, { rows: bookings }] = await Promise.all([
+    { rows: bookings }] = await Promise.all([
     db.query("SELECT to_jsonb(i) data FROM inquiries i WHERE id=ANY($1::integer[]) ORDER BY id DESC", [ids]),
     c.deliveryAttempts ? db.query("SELECT * FROM counselling_delivery_attempts WHERE inquiry_id=ANY($1::integer[]) ORDER BY attempted_at", [ids]) : Promise.resolve({rows:[]}),
     c.crmPersistence ? db.query(`SELECT a.*,coalesce(u.display_name,'Admin #'||a.actor_id) actor_name
       FROM admissions_crm_activities a JOIN lms_users u ON u.id=a.actor_id
       WHERE inquiry_id=ANY($1::integer[]) ORDER BY occurred_at,id`, [ids]) : Promise.resolve({rows:[]}),
     c.videoTracking && lead.leadId ? db.query("SELECT * FROM admissions_vsl_events WHERE lead_id=$1 ORDER BY occurred_at,event", [lead.leadId]) : Promise.resolve({rows:[]}),
-    c.chatHistory && lead.leadId ? db.query(`SELECT id,lead_id,inquiry_id,direction,message_type,body,delivery_state,occurred_at
-      FROM admissions_conversation_messages WHERE lead_id=$1 OR inquiry_id=ANY($2::integer[]) ORDER BY occurred_at,id`, [lead.leadId, ids]) : Promise.resolve({rows:[]}),
     c.calendarBookingVerification ? db.query(`SELECT id,title,status,starts_at,ends_at,owner_id,source_type,confirmation_message_id
       FROM calendar_events WHERE (lead_id=$1 OR inquiry_id=ANY($2::integer[])) AND source_type='counselling_booking'
       ORDER BY starts_at,id`, [lead.leadId, ids]) : Promise.resolve({rows:[]}),
@@ -164,14 +163,6 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     at:iso(e.occurred_at),actorId:null,actorName:null,source:"verified_system",body:null,
     data:{event:e.event,positionSeconds:e.position_seconds,durationSeconds:e.duration_seconds},
   });
-  for (const message of messages) timeline.push({
-    id:`conversation:${message.id}`,
-    type:message.direction === "inbound" ? "conversation_inbound" : "conversation_outbound",
-    title:message.direction === "inbound" ? "WhatsApp message received" : "WhatsApp reply recorded",
-    at:iso(message.occurred_at),actorId:null,actorName:null,source:"verified_system",
-    body:message.body,
-    data:{messageType:message.message_type,deliveryState:message.delivery_state,inquiryId:message.inquiry_id},
-  });
   for (const booking of bookings) timeline.push({
     id:`calendar:${booking.id}`,type:"calendar_booking",
     title:`Counselling appointment ${booking.status}`,
@@ -213,5 +204,43 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     }
   }
   timeline.sort((a,b)=>(a.at ? new Date(a.at).getTime():0)-(b.at ? new Date(b.at).getTime():0) || a.id.localeCompare(b.id));
-  return {lead,inquiries:submissions,journey,activities:timeline,capabilities:c,warnings:schemaWarnings(c),marketing};
+  let conversationHistory: CrmDetail["conversationHistory"] = {
+    state: lead.leadId ? (c.chatHistory ? "unavailable" : "not_configured") : "unlinked",
+    items: [], nextCursor: null,
+  };
+  if (lead.leadId && c.chatHistory) {
+    try {
+      conversationHistory = {
+        state: "available",
+        ...await readSupabaseConversationPage(lead.leadId, undefined, 50),
+      };
+    } catch {
+      conversationHistory = { state: "unavailable", items: [], nextCursor: null };
+    }
+  }
+  const capabilities = { ...c, chatHistory: conversationHistory.state === "available" };
+  const warnings = schemaWarnings({ ...c, chatHistory: conversationHistory.state !== "not_configured" });
+  if (conversationHistory.state === "unavailable") warnings.push("Supabase conversation history could not be reached; Replit remains the operational database.");
+  return {lead,inquiries:submissions,journey,activities:timeline,capabilities,warnings,conversationHistory,marketing};
+}
+
+export async function readCrmConversationPage(
+  db: SqlDb,
+  id: string,
+  cursor: string | undefined,
+  limit: number,
+) {
+  const c = await inspectCrmSchema(db);
+  const row = await findPerson(db, c, id);
+  const lead = leadDto(row);
+  if (!lead.leadId) return { state: "unlinked" as const, items: [], nextCursor: null };
+  if (!c.chatHistory) return { state: "not_configured" as const, items: [], nextCursor: null };
+  try {
+    return { state: "available" as const, ...await readSupabaseConversationPage(lead.leadId, cursor, limit) };
+  } catch (error) {
+    if (error instanceof Error && error.message === "invalid_conversation_cursor") {
+      throw new CrmError(400, "Conversation history cursor is invalid.");
+    }
+    throw new CrmError(503, "Supabase conversation history is unavailable.");
+  }
 }

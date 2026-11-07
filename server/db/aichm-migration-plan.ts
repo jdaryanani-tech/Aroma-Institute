@@ -24,6 +24,12 @@ export const FUTURE_CALENDAR_TABLES = [
   "calendar_activity",
 ] as const;
 
+export function assertOperationalDataCopyMode(mode: "snapshot" | "live-dry-run" | "apply") {
+  if (mode === "apply") {
+    throw new Error("Operational-data copy to Supabase is disabled under the approved two-database architecture.");
+  }
+}
+
 export const AICHM_MIGRATION_ORDER: MigrationTable[] = [
   { table: "lms_users", dependsOn: [] },
   { table: "lms_user_roles", dependsOn: ["lms_users"] },

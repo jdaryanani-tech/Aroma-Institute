@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, Clock3, Coffee, LogOut, Mail, MessageCircle, MessageCircleOff, Phone, Search, ShieldCheck, SlidersHorizontal, Users, VideoOff, X } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
 import type { CrmCapabilities, CrmDetail, CrmLead, CrmStage, CrmUpdate } from "@shared/crm";
 import { CRM_STAGES } from "@shared/crm";
-import { CrmHttpError, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } from "@/crm/api";
+import { CrmHttpError, fetchCrmConversationPage, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } from "@/crm/api";
 import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, formatDate, toLocalInput } from "@/crm/format";
 import MetaSetupStatus from "@/crm/MetaSetupStatus";
 
@@ -180,7 +180,7 @@ export default function Admin() {
     <main className="crm-app" data-testid="page-admin-dashboard">
       <header className="crm-topbar"><div className="crm-wrap crm-topbar-inner">
         <div className="crm-brand"><span className="crm-brand-mark" aria-hidden="true">A.</span><div className="crm-brand-copy"><strong>AICHM Admissions</strong><span>Prospect desk · Aroma Institute</span></div></div>
-        <div className="crm-top-actions"><a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a><span className="crm-connection-tag">{caps?.chatHistory ? <MessageCircle size={13} /> : <MessageCircleOff size={13} />}{caps?.chatHistory ? " WhatsApp history connected" : " Chat history unavailable"}</span>
+        <div className="crm-top-actions"><a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a><span className="crm-connection-tag">{caps?.chatHistory ? <MessageCircle size={13} /> : <MessageCircleOff size={13} />}{caps?.chatHistory ? " WhatsApp history configured" : " Supabase reader setup needed"}</span>
           <button className="crm-button crm-button-quiet" type="button" onClick={signOut} disabled={logout.isPending} data-testid="admin-button-logout"><LogOut size={16} />{logout.isPending ? "Signing out" : "Sign out"}</button>
         </div>
       </div></header>
@@ -304,9 +304,19 @@ function LeadDetail(props: {
   const [confirmed, setConfirmed] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [savingVersion, setSavingVersion] = useState<number | null>(null);
+  const [olderConversationHistoryRequested, setOlderConversationHistoryRequested] = useState(false);
+  const conversationHistoryQuery = useInfiniteQuery({
+    queryKey: ["admin-crm", "conversation-pages", lead.id, detail.conversationHistory.nextCursor],
+    initialPageParam: detail.conversationHistory.nextCursor ?? "",
+    queryFn: ({ pageParam }) => fetchCrmConversationPage(lead.id, pageParam),
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    enabled: olderConversationHistoryRequested && Boolean(detail.conversationHistory.nextCursor),
+    retry: false,
+  });
   useEffect(() => {
     setStage(lead.stage); setOwner(lead.ownerId === null ? "" : String(lead.ownerId)); setFollowUp(toLocalInput(lead.followUpAt));
     setNote(""); setReason(""); setEvidenceKind(props.capabilities.videoTracking ? "tracked_video" : "prospect_confirmation"); setReference(""); setOccurredAt(""); setConfirmed(false); setSaveMessage(""); setSavingVersion(null);
+    setOlderConversationHistoryRequested(false);
   }, [lead.id, lead.version, props.capabilities.videoTracking]);
   useEffect(() => {
     if (savingVersion !== null && lead.version !== savingVersion) { setSaveMessage("Saved and recorded in the activity log."); setNote(""); setReason(""); setSavingVersion(null); }
@@ -346,6 +356,11 @@ function LeadDetail(props: {
     props.onSave(patch); setSavingVersion(lead.version); setSaveMessage("Saving changes…");
   };
   const deliveryLabel = (status: string) => ({ acknowledged: "Acknowledged", sent: "Sent (acknowledgement not verified)", failed: "Failed", pending: "Pending", untracked: "Not tracked", not_applicable: "Not applicable", sending: "Sending", retrying: "Retrying" }[status] || status);
+  const conversationItems = [...detail.conversationHistory.items, ...(conversationHistoryQuery.data?.pages.flatMap((page) => page.items) ?? [])]
+    .filter((item, index, rows) => rows.findIndex((candidate) =>
+      candidate.conversationId === item.conversationId && candidate.side === item.side) === index)
+    .sort((left, right) => new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime()
+      || left.conversationId.localeCompare(right.conversationId) || left.side.localeCompare(right.side));
   return <>
       <div className="crm-detail-top"><div className="crm-detail-toprow"><div><p className="crm-eyebrow">Prospect record · {lead.inquiryCount} {lead.inquiryCount === 1 ? "enquiry" : "enquiries"}</p><h2 className="crm-detail-name" id="crm-detail-title" tabIndex={-1}>{lead.name || "Name not recorded"}</h2><div className="crm-detail-contact">{lead.phone && <a href={`tel:${lead.phone}`}><Phone size={13} /> {lead.phone}</a>}{lead.email && <a href={`mailto:${lead.email}`}><Mail size={13} /> {lead.email}</a>}<span>{lead.ownerName || "Unassigned"}</span></div></div>
       <div style={{ display: "flex", gap: 7, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "flex-end" }}><span className="crm-identity" data-identity={lead.identityStatus}>{identityText(lead.identityStatus)}</span><span className="crm-stage-source crm-stage-source-detail">{stageOrigin(lead)}</span><button className="crm-icon-button crm-mobile-close" type="button" aria-label="Close prospect detail" onClick={props.onClose}><X size={18} /></button></div>
@@ -384,6 +399,30 @@ function LeadDetail(props: {
         {props.updateError && <div className="crm-error" role="alert">{props.updateError}</div>}
         <div className="crm-save-row"><span className="crm-save-status" role="status">{saveMessage || (dirty ? "Changes are not saved yet." : `Record version ${lead.version} · nothing pending`)}</span><button className="crm-button crm-button-primary" type="submit" disabled={!dirty || props.pending || blocked || Boolean(evidenceError)} data-testid="crm-save">{props.pending ? "Saving" : <><Check size={15} /> Save changes</>}</button></div>
       </form>
+      <h3 className="crm-section-heading"><MessageCircle size={15} /> WhatsApp conversation history</h3>
+      {detail.conversationHistory.state === "not_configured"
+        ? <p className="crm-results-caption">Read-only Supabase access is not configured. Transcript data is not stored in Replit.</p>
+        : detail.conversationHistory.state === "unlinked"
+          ? <p className="crm-results-caption">This lead has no reviewed Supabase conversation link.</p>
+          : detail.conversationHistory.state === "unavailable"
+            ? <p className="crm-results-caption" role="status">Supabase conversation history is temporarily unavailable.</p>
+            : <>
+              {conversationItems.length ? <ol className="crm-timeline">{conversationItems.map((item) => <li className="crm-timeline-item" key={`${item.conversationId}:${item.side}`}>
+                <div className="crm-timeline-title">{item.direction === "inbound" ? "WhatsApp message received" : item.direction === "outbound" ? "WhatsApp reply" : "Conversation entry"}</div>
+                <div className="crm-timeline-meta">{formatDate(item.occurredAt, true)} · {item.messageType}{item.deliveryState ? ` · ${item.deliveryState}` : ""}{item.providerMessageId ? ` · ${item.providerMessageId}` : ""}</div>
+                <div className="crm-timeline-body">{item.body}</div>
+              </li>)}</ol> : <p className="crm-results-caption">No linked conversation messages are available.</p>}
+              {detail.conversationHistory.nextCursor && (!olderConversationHistoryRequested || conversationHistoryQuery.hasNextPage || conversationHistoryQuery.isError) && <button className="crm-button" type="button"
+                disabled={conversationHistoryQuery.isFetching}
+                onClick={() => {
+                  if (!olderConversationHistoryRequested) setOlderConversationHistoryRequested(true);
+                  else if (conversationHistoryQuery.isError) void conversationHistoryQuery.refetch();
+                  else if (conversationHistoryQuery.hasNextPage) void conversationHistoryQuery.fetchNextPage();
+                }}>
+                {conversationHistoryQuery.isFetching ? "Loading messages" : conversationHistoryQuery.isError ? "Retry loading messages" : "Load older messages"}
+              </button>}
+              {conversationHistoryQuery.isError && <p className="crm-error" role="alert">Older messages could not be loaded.</p>}
+            </>}
       <h3 className="crm-section-heading"><Clock3 size={15} /> Activity timeline</h3>
       {detail.activities.length ? <ol className="crm-timeline">{detail.activities.map((item) => <li className="crm-timeline-item" key={item.id}><div className="crm-timeline-title">{item.title}</div><div className="crm-timeline-meta">{formatDate(item.at, true)} · {item.actorName || (item.source === "verified_system" ? "Verified system" : "Enquiry record")}</div>{item.body && <div className="crm-timeline-body">{item.body}</div>}</li>)}</ol> : <p className="crm-results-caption">No activity has been recorded for this person yet.</p>}
       <h3 className="crm-section-heading"><Users size={15} /> Enquiry history</h3>
@@ -399,7 +438,7 @@ function LeadDetail(props: {
           <details style={{ marginTop: 10 }}><summary className="crm-text-button" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>View counselling answers <ChevronDown size={13} /></summary><dl className="crm-answers">{Object.entries(inquiry.counsellingAnswers).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => <div key={key}><dt>{counsellingFieldLabels[key] ?? key}</dt><dd>{formatCounsellingAnswer(key, value)}</dd></div>)}</dl></details>
         </>}
       </article>)}
-      <div className="crm-info" style={{ display: "flex", gap: 8, alignItems: "center" }}><VideoOff size={15} /> Video milestones require server-verified playback. {detail.capabilities.chatHistory ? "Persisted WhatsApp messages are included in the timeline." : "WhatsApp history is not yet available."} {detail.capabilities.calendarBookingVerification ? "Counselling bookings are verified from the AICHM Calendar." : "Counselling bookings are unavailable until the Calendar schema is installed."}</div>
+      <div className="crm-info" style={{ display: "flex", gap: 8, alignItems: "center" }}><VideoOff size={15} /> Video milestones require server-verified playback. {detail.capabilities.chatHistory ? "WhatsApp history is viewed read-only from Supabase." : "WhatsApp history requires a least-privilege Supabase reader setup."} {detail.capabilities.calendarBookingVerification ? "Counselling bookings are verified from the AICHM Calendar." : "Counselling bookings are unavailable until the Calendar schema is installed."}</div>
     </div>
   </>;
 }

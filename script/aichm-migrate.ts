@@ -18,7 +18,9 @@ import {
   type SchemaVersionManifest,
   type SignedDocument,
 } from "../server/db/aichm-migration-engine";
-import { buildMigrationDryRunPlan, type InventorySnapshot } from "../server/db/aichm-migration-plan";
+import {
+  assertOperationalDataCopyMode, buildMigrationDryRunPlan, type InventorySnapshot,
+} from "../server/db/aichm-migration-plan";
 
 type Arguments = {
   mode: "snapshot" | "live-dry-run" | "apply";
@@ -64,6 +66,7 @@ function parseArguments(args: string[]): Arguments {
       fail("Unsupported migration argument.");
     }
   }
+  assertOperationalDataCopyMode(result.mode);
   if (result.mode === "apply" && !result.productionCutover) {
     fail("Apply requires the distinct --production-cutover approval flag.");
   }
@@ -71,9 +74,7 @@ function parseArguments(args: string[]): Arguments {
     fail("--production-cutover can only be used together with --apply.");
   }
   if (result.mode === "apply") {
-    if (!result.runId || !result.backupManifest || !result.reconciliationManifest || !result.schemaVersionManifest || !result.ownerApproval) {
-      fail("Apply requires a run ID and all four reviewed manifest files.");
-    }
+    fail("Operational-data copy to Supabase is disabled under the approved two-database architecture.");
   }
   return result;
 }
@@ -103,9 +104,7 @@ function usage(): string {
     "AICHM migration tool",
     "  default / --dry-run      Snapshot-only plan; no database connections",
     "  --live-dry-run           Live metadata/row comparison; read-only opt-in",
-    "  --apply --production-cutover --run-id <id> --backup-manifest <file>",
-    "      --reconciliation-manifest <file> --schema-version-manifest <file>",
-    "      --owner-approval <file>",
+    "  --apply                   disabled: operational records remain in Replit PostgreSQL",
   ].join("\n");
 }
 
