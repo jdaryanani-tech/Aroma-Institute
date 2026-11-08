@@ -6,6 +6,9 @@ import {
   createSupabaseAvniReader,
   decodeConversationCursor,
   isSupabaseAvniReadConfigured,
+  runSupabaseAvniReadDiagnostics,
+  type SupabaseAvniDiagnosticConnector,
+  type SupabaseAvniDiagnosticSession,
 } from "./supabase-avni-readonly";
 
 const CA = `-----BEGIN CERTIFICATE-----
@@ -120,4 +123,112 @@ test("invalid history cursors are rejected", () => {
   assert.throws(() => decodeConversationCursor(Buffer.from(JSON.stringify({
     at: "2026-11-07T10:00:00.000Z", conversationId: "bad", side: "message",
   })).toString("base64url")), /invalid_conversation_cursor/);
+});
+
+function diagnosticConnector(options: {
+  tls?: SupabaseAvniDiagnosticSession["tls"];
+  conversationError?: boolean;
+  confirmationError?: boolean;
+  publicSelectAllowed?: boolean;
+  identity?: { database_name: string; role_name: string; read_only: string };
+} = {}): SupabaseAvniDiagnosticConnector {
+  return async () => ({
+    tls: options.tls ?? {
+      encrypted: true,
+      authorized: true,
+      authorizationErrorPresent: false,
+      servername: "aws-0-ap-northeast-1.pooler.supabase.com",
+    },
+    async query(text, values) {
+      if (text.includes("current_database()")) {
+        return { rows: [options.identity ?? {
+          database_name: "postgres",
+          role_name: "aichm_crm_reader",
+          read_only: "on",
+        }] };
+      }
+      if (text.includes("aichm_crm_conversations_for_replit_lead")) {
+        assert.match(String(values?.[0]), /^[0-9a-f-]{36}$/i);
+        if (options.conversationError) throw new Error("test-only failure");
+        return { rows: [{ message_count: 0 }] };
+      }
+      if (text.includes("aichm_crm_verify_confirmation")) {
+        assert.match(String(values?.[0]), /^[0-9a-f-]{36}$/i);
+        assert.match(String(values?.[1]), /^[0-9a-f-]{36}$/i);
+        if (options.confirmationError) throw new Error("test-only failure");
+        return { rows: [{ verified: false }] };
+      }
+      if (text.includes("has_table_privilege")) {
+        const allowed = options.publicSelectAllowed ?? false;
+        return { rows: [{ leads_select: allowed, conversations_select: allowed }] };
+      }
+      throw new Error("unexpected diagnostic query");
+    },
+    async close() {},
+  });
+}
+
+test("read-only diagnostics pass strict TLS, synthetic RPC, role and privilege checks", async () => {
+  const checks = await runSupabaseAvniReadDiagnostics({
+    SUPABASE_AVNI_READONLY_DATABASE_URL: URI,
+    SUPABASE_DB_SSL_CA: CA,
+  }, diagnosticConnector());
+  assert.ok(Object.values(checks).every((value) => value === true));
+});
+
+test("read-only diagnostics fail closed when URL or CA is missing or invalid", async () => {
+  const unusedConnector = async () => {
+    throw new Error("connector must not be called for invalid configuration");
+  };
+  const noUri = await runSupabaseAvniReadDiagnostics({ SUPABASE_DB_SSL_CA: CA }, unusedConnector);
+  assert.equal(noUri.readerUrlPresent, false);
+  assert.equal(noUri.readerUrlValid, false);
+
+  const noCa = await runSupabaseAvniReadDiagnostics({ SUPABASE_AVNI_READONLY_DATABASE_URL: URI }, unusedConnector);
+  assert.equal(noCa.readerCaPresent, false);
+  assert.equal(noCa.readerCaAccepted, false);
+
+  const invalidCa = await runSupabaseAvniReadDiagnostics({
+    SUPABASE_AVNI_READONLY_DATABASE_URL: URI,
+    SUPABASE_DB_SSL_CA: "not a certificate",
+  }, unusedConnector);
+  assert.equal(invalidCa.readerCaPresent, true);
+  assert.equal(invalidCa.readerCaAccepted, false);
+});
+
+test("read-only diagnostics fail TLS verification without exposing connection errors", async () => {
+  const checks = await runSupabaseAvniReadDiagnostics({
+    SUPABASE_AVNI_READONLY_DATABASE_URL: URI,
+    SUPABASE_DB_SSL_CA: CA,
+  }, diagnosticConnector({
+    tls: {
+      encrypted: true,
+      authorized: false,
+      authorizationErrorPresent: true,
+      servername: "wrong.example",
+    },
+  }));
+  assert.equal(checks.tlsConnected, true);
+  assert.equal(checks.tlsChainVerified, false);
+  assert.equal(checks.tlsHostnameVerified, false);
+});
+
+test("read-only diagnostics fail private-function checks without returning driver details", async () => {
+  const checks = await runSupabaseAvniReadDiagnostics({
+    SUPABASE_AVNI_READONLY_DATABASE_URL: URI,
+    SUPABASE_DB_SSL_CA: CA,
+  }, diagnosticConnector({ conversationError: true, confirmationError: true }));
+  assert.equal(checks.conversationsRpcExecutes, false);
+  assert.equal(checks.confirmationRpcExecutes, false);
+  assert.equal(checks.syntheticConversationIsEmpty, false);
+  assert.equal(checks.syntheticConfirmationIsFalse, false);
+});
+
+test("read-only diagnostics fail when either public table grants direct SELECT", async () => {
+  const checks = await runSupabaseAvniReadDiagnostics({
+    SUPABASE_AVNI_READONLY_DATABASE_URL: URI,
+    SUPABASE_DB_SSL_CA: CA,
+  }, diagnosticConnector({ publicSelectAllowed: true }));
+  assert.equal(checks.publicLeadsSelectDenied, false);
+  assert.equal(checks.publicConversationsSelectDenied, false);
 });

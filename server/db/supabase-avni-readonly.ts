@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { checkServerIdentity, type ConnectionOptions } from "node:tls";
 import { Pool, type PoolConfig } from "pg";
 import { z } from "zod";
@@ -13,6 +14,37 @@ type QueryResult = { rows: Record<string, unknown>[] };
 export type ReadonlyQueryable = {
   query(text: string, values?: unknown[]): Promise<QueryResult>;
 };
+export type SupabaseAvniDiagnosticChecks = {
+  readerUrlPresent: boolean;
+  readerUrlValid: boolean;
+  readerCaPresent: boolean;
+  readerCaAccepted: boolean;
+  tlsConfigStrict: boolean;
+  tlsConnected: boolean;
+  tlsChainVerified: boolean;
+  tlsHostnameVerified: boolean;
+  readerDatabaseIsPostgres: boolean;
+  readerRoleIsDedicated: boolean;
+  readerSessionIsReadOnly: boolean;
+  conversationsRpcExecutes: boolean;
+  syntheticConversationIsEmpty: boolean;
+  confirmationRpcExecutes: boolean;
+  syntheticConfirmationIsFalse: boolean;
+  publicLeadsSelectDenied: boolean;
+  publicConversationsSelectDenied: boolean;
+};
+export type SupabaseAvniDiagnosticSession = ReadonlyQueryable & {
+  tls: {
+    encrypted: boolean;
+    authorized: boolean;
+    authorizationErrorPresent: boolean;
+    servername: string | null;
+  };
+  close(): Promise<void>;
+};
+export type SupabaseAvniDiagnosticConnector = (
+  config: PoolConfig,
+) => Promise<SupabaseAvniDiagnosticSession>;
 export type ConversationCursor = {
   at: string;
   conversationId: string;
@@ -107,6 +139,173 @@ export function buildSupabaseAvniReadPoolConfig(
     application_name: "aichm-crm-supabase-readonly",
     max: 4,
   });
+}
+
+async function connectSupabaseAvniDiagnostic(config: PoolConfig): Promise<SupabaseAvniDiagnosticSession> {
+  const pool = new Pool(config);
+  pool.on("error", () => {
+    // Diagnostic failures are represented by booleans; never log driver output.
+  });
+  try {
+    const client = await pool.connect();
+    const stream = (client as unknown as {
+      connection?: {
+        stream?: {
+          encrypted?: boolean;
+          authorized?: boolean;
+          authorizationError?: Error | string | null;
+          servername?: string;
+        };
+      };
+    }).connection?.stream;
+    return {
+      query: async (text, values) => {
+        const result = await client.query(text, values);
+        return { rows: result.rows as Record<string, unknown>[] };
+      },
+      tls: {
+        encrypted: stream?.encrypted === true,
+        authorized: stream?.authorized === true,
+        authorizationErrorPresent: Boolean(stream?.authorizationError),
+        servername: stream?.servername ?? null,
+      },
+      close: async () => {
+        client.release();
+        await pool.end();
+      },
+    };
+  } catch (error) {
+    await pool.end().catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Read-only runtime diagnostic. It deliberately returns only booleans and
+ * uses an aggregate RPC result plus privilege checks so no message rows or
+ * public-table records are returned to the application.
+ */
+export async function runSupabaseAvniReadDiagnostics(
+  environment: SupabaseAvniReadEnvironment = process.env,
+  connector: SupabaseAvniDiagnosticConnector = connectSupabaseAvniDiagnostic,
+): Promise<SupabaseAvniDiagnosticChecks> {
+  const uri = environment[URI_SECRET];
+  const caValue = environment[CA_SECRET];
+  const checks: SupabaseAvniDiagnosticChecks = {
+    readerUrlPresent: Boolean(uri?.trim()),
+    readerUrlValid: false,
+    readerCaPresent: Boolean(caValue?.trim()),
+    readerCaAccepted: false,
+    tlsConfigStrict: false,
+    tlsConnected: false,
+    tlsChainVerified: false,
+    tlsHostnameVerified: false,
+    readerDatabaseIsPostgres: false,
+    readerRoleIsDedicated: false,
+    readerSessionIsReadOnly: false,
+    conversationsRpcExecutes: false,
+    syntheticConversationIsEmpty: false,
+    confirmationRpcExecutes: false,
+    syntheticConfirmationIsFalse: false,
+    publicLeadsSelectDenied: false,
+    publicConversationsSelectDenied: false,
+  };
+
+  if (checks.readerUrlPresent) {
+    try {
+      validateUrl(required(uri, URI_SECRET));
+      checks.readerUrlValid = true;
+    } catch {
+      checks.readerUrlValid = false;
+    }
+  }
+  if (checks.readerCaPresent) {
+    try {
+      normalizeSupabaseCaCertificate(required(caValue, CA_SECRET));
+      checks.readerCaAccepted = true;
+    } catch {
+      checks.readerCaAccepted = false;
+    }
+  }
+  if (!checks.readerUrlValid || !checks.readerCaAccepted) return checks;
+
+  let config: PoolConfig;
+  try {
+    config = buildSupabaseAvniReadPoolConfig(environment);
+    const ssl = config.ssl;
+    checks.tlsConfigStrict = Boolean(
+      ssl
+      && typeof ssl === "object"
+      && ssl.rejectUnauthorized === true
+      && ssl.checkServerIdentity === checkServerIdentity
+      && Boolean(ssl.ca)
+      && config.options?.includes("default_transaction_read_only=on"),
+    );
+  } catch {
+    return checks;
+  }
+  if (!checks.tlsConfigStrict) return checks;
+
+  let session: SupabaseAvniDiagnosticSession | undefined;
+  try {
+    session = await connector(config);
+    checks.tlsConnected = session.tls.encrypted;
+    checks.tlsChainVerified = session.tls.authorized && !session.tls.authorizationErrorPresent;
+    checks.tlsHostnameVerified = checks.tlsChainVerified && session.tls.servername === POOLER_HOST;
+
+    const identity = await session.query(
+      `SELECT current_database() AS database_name, current_user AS role_name,
+        current_setting('default_transaction_read_only') AS read_only`,
+    );
+    checks.readerDatabaseIsPostgres = identity.rows[0]?.database_name === "postgres";
+    checks.readerRoleIsDedicated = identity.rows[0]?.role_name === "aichm_crm_reader";
+    checks.readerSessionIsReadOnly = identity.rows[0]?.read_only === "on";
+
+    try {
+      const rows = await session.query(
+        `SELECT count(*)::int AS message_count
+         FROM aichm_private.aichm_crm_conversations_for_replit_lead(
+           $1::uuid,NULL::timestamptz,NULL::uuid,NULL::text,$2::integer
+         )`,
+        [randomUUID(), 5],
+      );
+      checks.conversationsRpcExecutes = true;
+      checks.syntheticConversationIsEmpty = rows.rows[0]?.message_count === 0;
+    } catch {
+      checks.conversationsRpcExecutes = false;
+    }
+
+    try {
+      const rows = await session.query(
+        `SELECT aichm_private.aichm_crm_verify_confirmation(
+          $1::uuid,$2::uuid,$3::text
+        ) AS verified`,
+        [randomUUID(), randomUUID(), "booking_confirmation"],
+      );
+      checks.confirmationRpcExecutes = true;
+      checks.syntheticConfirmationIsFalse = rows.rows[0]?.verified === false;
+    } catch {
+      checks.confirmationRpcExecutes = false;
+    }
+
+    try {
+      const rows = await session.query(
+        `SELECT
+          has_table_privilege(current_user,'public.leads','SELECT') AS leads_select,
+          has_table_privilege(current_user,'public.conversations','SELECT') AS conversations_select`,
+      );
+      checks.publicLeadsSelectDenied = rows.rows[0]?.leads_select === false;
+      checks.publicConversationsSelectDenied = rows.rows[0]?.conversations_select === false;
+    } catch {
+      checks.publicLeadsSelectDenied = false;
+      checks.publicConversationsSelectDenied = false;
+    }
+  } catch {
+    // Do not expose network, authentication, certificate, or driver details.
+  } finally {
+    await session?.close().catch(() => {});
+  }
+  return checks;
 }
 
 let sharedPool: Pool | undefined;

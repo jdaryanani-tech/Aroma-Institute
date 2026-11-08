@@ -9,6 +9,7 @@ import { upsertIntegrationLead } from "../admissions/identity";
 import { admissionsIntegrationSchemaReady, readLeadFollowUpByPhone, readLeadFollowUpStatus } from "../admissions/follow-up";
 import { requireLmsRole, requireLmsUser } from "../lms/auth";
 import { isSupabaseAvniReadConfigured } from "../db/supabase-avni-readonly";
+import { createAvniDiagnosticsHandler } from "./avni-diagnostics";
 import {
   N8N_INTEGRATION_SECRET_ENV, N8N_INTEGRATION_SECRET_HEADER, verifyN8nIntegrationSecret,
 } from "./n8n-auth";
@@ -92,6 +93,13 @@ export function registerAvniIntegrationRoutes(app: Express) {
       supabaseRuntimeBusinessData: false,
     });
   });
+
+  app.get(
+    "/api/integrations/n8n/diagnostics",
+    createAvniDiagnosticsHandler({
+      checkOperationalApiReady: () => admissionsIntegrationSchemaReady(db),
+    }),
+  );
 
   app.get("/api/integrations/n8n/health", avniIntegrationAuth, async (_req, res) => {
     try {
