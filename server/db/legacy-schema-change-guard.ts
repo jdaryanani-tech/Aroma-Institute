@@ -16,7 +16,7 @@ const SOCKET_TEST_DATABASES = new Set([
   "first_owner_test",
   "follow_up_test",
 ]);
-const DEVELOPMENT_DATABASE = /^aichm_(?:dev|development)_[a-z0-9_]+$/;
+const DEVELOPMENT_DATABASES = new Set(["aichm_dev_local"]);
 const LOOPBACK_TEST_DATABASE = /^aichm_test_[a-z0-9_]+$/;
 
 function fail(code: string): never {
@@ -126,7 +126,7 @@ export function validateLegacySchemaChangeTarget(
   validateLocalQuery(url);
   requireLocalPort(url.port || undefined);
 
-  if (intent === "development" && !DEVELOPMENT_DATABASE.test(database)) {
+  if (intent === "development" && !DEVELOPMENT_DATABASES.has(database)) {
     fail("SCHEMA_GUARD_UNKNOWN_DEVELOPMENT_DATABASE");
   }
   if (intent === "disposable-test") {

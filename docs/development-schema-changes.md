@@ -1,58 +1,46 @@
 # Guarded development schema changes
 
-The application runtime continues to use `DATABASE_URL`. Schema-changing
-commands must not use that ambient value.
+Application runtime configuration continues to use `DATABASE_URL`. Legacy
+Drizzle schema commands never use that variable. They require both an explicit
+intent and `AICHM_DEVELOPMENT_DATABASE_URL`; only local loopback targets with
+an allowlisted development database name are accepted. Remote development
+databases are intentionally unsupported because a URL alone cannot establish
+that a remote target is not production.
 
-## Development database setup
+## Explicit local development workflow
 
-Configure these values in the Replit **Development** environment only:
-
-- `AICHM_DEVELOPMENT_DATABASE_URL`: a dedicated development database connection.
-- `AICHM_SOURCE_PROD_DATABASE_URL`: the existing authoritative production-source
-  connection, used only by the guard for a strict-TLS, read-only identity check.
-- `AICHM_DEVELOPMENT_DATABASE_ID`: the identity fingerprint emitted by the
-  read-only identification command below.
-
-No connection string or credential is printed by the guard.
+Start a local PostgreSQL database and create the explicitly allowlisted
+database `aichm_dev_local`. Then run the guarded command with that database's
+dedicated URL:
 
 ```sh
-AICHM_SCHEMA_CHANGE_INTENT=development npm run db:identify:development
+AICHM_SCHEMA_CHANGE_INTENT=development \
+AICHM_DEVELOPMENT_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/aichm_dev_local' \
+npm run db:push
 ```
 
-Copy the printed fingerprint to `AICHM_DEVELOPMENT_DATABASE_ID` in the
-Development environment. The fingerprint covers the connected database, role,
-server address/port/version, and configured endpoint. It is not a credential.
-Repeat identification after the development database identity changes.
+`npm run db:migrate` uses the same guard. Do not set the dedicated URL to a
+remote host or to a production database. The guard rejects production runtime,
+missing intent, missing dedicated URL, unknown database names, non-loopback
+hosts, custom Drizzle config overrides, and unsupported URL parameters. It
+never reads or falls back to `DATABASE_URL`, and the Drizzle child process
+receives only the dedicated local URL and the minimum required environment.
 
-## Apply an approved development schema change
+The default Drizzle config independently applies the same validation, so
+invoking `drizzle-kit migrate` or `drizzle-kit push` directly without the
+explicit development intent and dedicated local URL also fails closed.
+`db:generate` is non-mutating and uses `drizzle.generate.config.ts`.
 
-```sh
-AICHM_SCHEMA_CHANGE_INTENT=development npm run db:push
-AICHM_SCHEMA_CHANGE_INTENT=development npm run db:migrate
-```
+## Tests and post-merge behavior
 
-Both commands require the explicit intent, dedicated development URL, valid
-allowlisted identity fingerprint, and a successful strict-TLS read-only check
-of the configured production primary. The guard rejects an unknown target,
-production identity, replica, missing production identity, missing allowlist,
-and production runtime. The Drizzle child process receives the dedicated
-development URL and verified identity only; it does not receive `DATABASE_URL`
-or the production connection secret.
+Disposable integration tests may use `AICHM_SCHEMA_CHANGE_INTENT=disposable-test`
+with `NODE_ENV=test` and their dedicated database URL. TCP targets must be
+loopback and named `aichm_test_*`. Existing socket-only tests are limited to the
+known test database names and socket paths under `generated-artifacts/`.
 
-`db:generate` is non-mutating and uses `drizzle.generate.config.ts`, which has
-no database credentials. The default `drizzle.config.ts` refuses to load unless
-invoked by the guarded wrapper. The AICHM forward-only baseline remains on its
-separate scratch-only configuration.
+The Replit post-merge hook never runs a schema command. It prints a skip message
+and continues with typechecking, tests, and build.
 
-The post-merge hook skips schema synchronization unless
-`AICHM_SCHEMA_CHANGE_INTENT=development` is explicitly set. If it is set but
-any identity check fails, the guarded command exits non-zero before Drizzle is
-started.
-
-## Disposable socket-only integration tests
-
-The first-owner, counselling follow-up, and LMS admin integration scripts create
-temporary PostgreSQL clusters under `generated-artifacts/`, bind only through
-Unix sockets, and use the explicit `disposable-test` intent. The guard still
-checks the production primary read-only and permits only their known test
-database names and generated-artifacts socket paths.
+The separate AICHM forward-baseline runner is not a legacy Drizzle path. It
+retains its own explicit scratch-only target validation and does not accept
+`DATABASE_URL`.

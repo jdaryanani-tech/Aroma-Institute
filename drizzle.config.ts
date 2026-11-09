@@ -1,7 +1,7 @@
 import { defineConfig } from "drizzle-kit";
-import { buildGuardedDrizzleConfigUrl } from "./server/db/legacy-schema-change-guard";
+import { requireGuardedDrizzleConfigUrl } from "./server/db/legacy-schema-change-guard";
 
-const url = buildGuardedDrizzleConfigUrl(process.env);
+const url = requireGuardedDrizzleConfigUrl(process.env);
 
 export default defineConfig({
   out: "./migrations",

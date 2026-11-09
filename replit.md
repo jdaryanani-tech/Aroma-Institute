@@ -52,7 +52,7 @@ The Home page (`client/src/pages/Home.tsx`) is composed of these sections in ord
 - **ORM**: Drizzle ORM with `drizzle-orm/node-postgres`
 - **Schema**: Inquiry definitions in `shared/schema.ts`; additive LMS definitions in `shared/lms-schema.ts`
 - **LMS tables**: Users and roles, courses, modules, chapters, lessons, enrollments, invitations, progress, assessment versions/attempts, trainer assignments, live sessions, attendance, certificates, notifications, audit records, OTP challenges, password setup tokens, auth rate limits, and PostgreSQL sessions
-- **Schema Push**: Use `npm run db:push` (runs `drizzle-kit push`) to sync schema to database
+- **Schema Changes**: Legacy Drizzle `db:push` and `db:migrate` require the explicit guarded local-development workflow in `docs/development-schema-changes.md`; they never use ambient `DATABASE_URL`. Post-merge schema sync is disabled.
 - **Migrations**: Output directory is `./migrations` (configured in `drizzle.config.ts`)
 
 ### Shared Code
@@ -78,8 +78,8 @@ The Home page (`client/src/pages/Home.tsx`) is composed of these sections in ord
 - `npm test` — LMS/server unit tests; database and browser integration cases are opt-in
 - `npm run test:lms-admin` — builds the app and verifies admin login, reload, logout, and password auth against a disposable local PostgreSQL cluster
 - `npm run db:generate` — generate a Drizzle migration from both schemas
-- `npm run db:migrate` — replay tracked migrations only on a database with verified matching migration history; existing development databases use schema push instead
-- `npm run db:push` — push Drizzle schema to database
+- `npm run db:migrate` — guarded; requires explicit intent and an allowlisted loopback development database
+- `npm run db:push` — guarded; requires explicit intent and an allowlisted loopback development database
 - `npm run lms:bootstrap-admin` — create the first admin account interactively
 
 For isolated admin browser verification, PostgreSQL server/client tools must be installed. Install Chromium and run with the same browser cache path:

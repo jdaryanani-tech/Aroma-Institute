@@ -62,7 +62,7 @@ The separate migration pool connected successfully with the CA normalized in mem
 - Issuer `CN=Supabase Intermediate 2021 CA, O=Supabase Inc, C=US`
 - SHA-256 fingerprint `03:70:9C:A4:4D:1B:06:E4:50:4D:A0:A8:3B:6C:A0:65:76:1E:DC:70:4C:D5:63:4B:CC:38:94:FD:5C:7B:32:48`; validity 2025-03-12 through 2030-03-11
 
-The connection read only database identity, catalogs, and exact table counts. The separate factory is not used by the normal app; `server/db.ts` and `drizzle.config.ts` still use `DATABASE_URL`.
+The connection read only database identity, catalogs, and exact table counts. The separate factory is not used by the normal app; `server/db.ts` uses `DATABASE_URL` for application runtime, while `drizzle.config.ts` now requires the guarded development-only connection variables.
 
 ## Preparation files
 
