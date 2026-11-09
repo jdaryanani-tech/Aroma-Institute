@@ -4,7 +4,6 @@ import { CRM_STAGES, type CrmLead, type CrmUpdate } from "@shared/crm";
 export const updateCrmSchema = z.object({
   expectedVersion: z.number().int().nonnegative(),
   stage: z.enum(Object.keys(CRM_STAGES) as [keyof typeof CRM_STAGES, ...(keyof typeof CRM_STAGES)[]]).optional(),
-  ownerId: z.number().int().positive().nullable().optional(),
   followUpAt: z.string().datetime({ offset: true }).nullable().optional(),
   note: z.string().trim().min(1).max(4000).optional(),
   reason: z.string().trim().min(3).max(1000).optional(),
@@ -13,7 +12,7 @@ export const updateCrmSchema = z.object({
     reference: z.string().trim().max(1000).optional(),
     occurredAt: z.string().datetime({ offset: true }).optional(), confirmed: z.boolean().optional(),
   }).strict().optional(),
-}).strict().refine(v => ["stage", "ownerId", "followUpAt", "note"].some(k => k in v), "No changes supplied.");
+}).strict().refine(v => ["stage", "followUpAt", "note"].some(k => k in v), "No changes supplied.");
 
 export class CrmError extends Error {
   constructor(public status: number, message: string) { super(message); }

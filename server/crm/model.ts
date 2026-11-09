@@ -10,6 +10,8 @@ export async function inspectCrmSchema(db: SqlDb): Promise<CrmSchema> {
     to_regclass('admissions_leads') IS NOT NULL AS identity,
     to_regclass('admissions_vsl_events') IS NOT NULL AS video,
     to_regclass('admissions_crm_profiles') IS NOT NULL AND to_regclass('admissions_crm_activities') IS NOT NULL AS crm,
+    to_regclass('admissions_lead_assignments') IS NOT NULL
+      AND to_regclass('admissions_lead_assignment_history') IS NOT NULL AS assignments,
     to_regclass('counselling_delivery_attempts') IS NOT NULL AS attempts,
     to_regclass('admissions_lead_touchpoints') IS NOT NULL AS marketing,
     to_regclass('calendar_events') IS NOT NULL AND to_regclass('calendar_event_attendees') IS NOT NULL
@@ -18,11 +20,12 @@ export async function inspectCrmSchema(db: SqlDb): Promise<CrmSchema> {
         AND table_name='calendar_events' AND column_name='confirmation_message_id') AS calendar`);
   return { identityTracking: r.identity, videoTracking: r.identity && r.video,
     crmPersistence: r.crm, deliveryAttempts: r.attempts, metaAttribution: r.marketing,
-    calendarBookingVerification: r.calendar, chatHistory: isSupabaseAvniReadConfigured() };
+    calendarBookingVerification: r.calendar, chatHistory: isSupabaseAvniReadConfigured(),
+    canonicalAssignments: r.assignments };
 }
 
 /** All optional tables are selected only after capability introspection, never via startup DDL. */
-export function crmModelSql(c: CrmSchema) {
+export function crmModelSql(c: CrmSchema, admissionsUserParam?: number) {
   const leads = c.identityTracking
     ? `SELECT id,name,canonical_phone,created_at,registered_at,last_registered_at,entry_source,legacy_match_status FROM admissions_leads`
     : `SELECT NULL::uuid id,NULL::text name,NULL::text canonical_phone,NULL::timestamptz created_at,NULL::timestamptz registered_at,NULL::timestamptz last_registered_at,NULL::text entry_source,NULL::text legacy_match_status WHERE false`;
@@ -37,6 +40,10 @@ export function crmModelSql(c: CrmSchema) {
     ? `SELECT * FROM admissions_crm_profiles`
     : `SELECT NULL::integer inquiry_id,NULL::text stage,NULL::jsonb stage_evidence,NULL::integer owner_id,
        NULL::timestamptz follow_up_at,NULL::timestamptz updated_at,NULL::integer updated_by,NULL::integer version WHERE false`;
+  const assignments = c.canonicalAssignments
+    ? `SELECT lead_id,assignee_user_id,assigned_by,updated_at,version FROM admissions_lead_assignments`
+    : `SELECT NULL::uuid lead_id,NULL::integer assignee_user_id,NULL::integer assigned_by,
+        NULL::timestamptz updated_at,NULL::integer version WHERE false`;
   const touchpoints = c.metaAttribution
     ? `SELECT lead_id,inquiry_id,source_channel FROM admissions_lead_touchpoints`
     : `SELECT NULL::uuid lead_id,NULL::integer inquiry_id,NULL::text source_channel WHERE false`;
@@ -44,7 +51,18 @@ export function crmModelSql(c: CrmSchema) {
     ? `SELECT id,lead_id,inquiry_id,starts_at FROM calendar_events
        WHERE source_type='counselling_booking' AND status IN ('confirmed','rescheduled')`
     : `SELECT NULL::uuid id,NULL::uuid lead_id,NULL::integer inquiry_id,NULL::timestamptz starts_at WHERE false`;
+  const scopedKeyed = admissionsUserParam ? `,
+     scoped_keyed AS (
+       SELECT k.* FROM keyed k
+       WHERE k.resolved_lead_id IS NOT NULL AND EXISTS(
+         SELECT 1 FROM admissions_lead_assignments authorized_assignment
+         WHERE authorized_assignment.lead_id=k.resolved_lead_id
+           AND authorized_assignment.assignee_user_id=$${admissionsUserParam}::integer
+       )
+     )` : "";
+  const groupingInput = admissionsUserParam ? "scoped_keyed" : "keyed";
   return `WITH lead_source AS (${leads}), video_source AS (${video}), profile_source AS (${profiles}),
+     assignment_source AS (${assignments}),
     touchpoint_source AS (${touchpoints}), booking_source AS (${bookings}),
     normalized AS (
       SELECT i.id,i.name,i.email,i.phone,i.program_interest,i.counselling_submitted_at,
@@ -70,7 +88,7 @@ export function crmModelSql(c: CrmSchema) {
     ), keyed AS (
       SELECT *,CASE WHEN resolved_lead_id IS NOT NULL THEN 'lead:'||resolved_lead_id ELSE 'inquiry:'||id END person_key
       FROM associated
-    ), grouped AS (
+     ${scopedKeyed}, grouped AS (
       SELECT person_key id,max(resolved_lead_id::text) lead_id,array_agg(id ORDER BY id) inquiry_ids,
         (array_agg(name ORDER BY id DESC))[1] name,(array_agg(phone ORDER BY id DESC))[1] phone,
         coalesce((array_agg(email ORDER BY id DESC) FILTER(WHERE email<>''))[1],'') email,
@@ -82,14 +100,21 @@ export function crmModelSql(c: CrmSchema) {
              WHEN bool_or(identity_status='unique_phone') THEN 'unique_phone' ELSE 'unmatchable' END identity_status,
         count(*)::integer inquiry_count,bool_or(verified_form) has_verified_form,
         max(counselling_submitted_at) questionnaire_completed_at
-      FROM keyed GROUP BY person_key
+       FROM ${groupingInput} GROUP BY person_key
     ), model AS (
       SELECT g.*,coalesce(l.name,g.name) display_name,
         ARRAY_REMOVE(ARRAY[l.entry_source,CASE WHEN g.has_verified_form THEN 'counselling' ELSE 'website_enquiry' END],NULL)
           || coalesce(ts.channels,ARRAY[]::text[]) sources,
         coalesce(p.stage,CASE WHEN g.has_verified_form THEN 'form_submitted' WHEN v.watched THEN 'vsl_watched' ELSE 'new_enquiry' END) stage,
         CASE WHEN p.stage IS NOT NULL THEN 'admin' WHEN g.has_verified_form THEN 'verified_form' WHEN v.watched THEN 'verified_video' ELSE 'new' END stage_source,
-        p.stage_evidence,p.owner_id,u.display_name owner_name,p.follow_up_at,
+        p.stage_evidence,p.owner_id legacy_owner_id,legacy_owner.display_name legacy_owner_name,p.follow_up_at,
+        assignment.assignee_user_id assignee_user_id,assignee.display_name assignee_name,
+        coalesce(assignment.version,0)::integer assignment_version,
+        CASE WHEN assignment.assignee_user_id IS NULL THEN false
+             ELSE NOT (coalesce(assignee.is_active,false)
+               AND EXISTS(SELECT 1 FROM lms_user_roles ar
+                 WHERE ar.user_id=assignee.id AND ar.role::text='admissions'))
+        END assignee_needs_reassignment,
         coalesce((SELECT sum(version)::integer FROM profile_source pp WHERE pp.inquiry_id=ANY(g.inquiry_ids)),0) version,
         l.registered_at, greatest(p.updated_at,l.last_registered_at,l.created_at,g.questionnaire_completed_at,v.last_video_at) last_activity_at,
         coalesce(v.completed,false) video_completed,coalesce(v.started,false) video_started,
@@ -100,12 +125,14 @@ export function crmModelSql(c: CrmSchema) {
       LEFT JOIN video_source v ON v.lead_id::text=g.lead_id
       LEFT JOIN LATERAL(SELECT * FROM profile_source pp WHERE pp.inquiry_id=ANY(g.inquiry_ids)
         ORDER BY pp.updated_at DESC,pp.inquiry_id LIMIT 1) p ON true
+       LEFT JOIN assignment_source assignment ON assignment.lead_id::text=g.lead_id
       LEFT JOIN LATERAL(SELECT array_agg(DISTINCT touch.source_channel) channels FROM touchpoint_source touch
         WHERE touch.lead_id::text=g.lead_id OR touch.inquiry_id=ANY(g.inquiry_ids)) ts ON true
       LEFT JOIN LATERAL(SELECT bool_or(true) has_booking,
         (array_agg(bs.id::text ORDER BY bs.starts_at DESC))[1] booking_reference
         FROM booking_source bs WHERE bs.lead_id::text=g.lead_id OR bs.inquiry_id=ANY(g.inquiry_ids)) b ON true
-      LEFT JOIN lms_users u ON u.id=p.owner_id
+       LEFT JOIN lms_users legacy_owner ON legacy_owner.id=p.owner_id
+       LEFT JOIN lms_users assignee ON assignee.id=assignment.assignee_user_id
     )`;
 }
 
@@ -117,14 +144,16 @@ export function leadDto(r: QueryResultRow): CrmLead {
     stageEvidence: r.stage_evidence, identityStatus: r.identity_status, inquiryCount: r.inquiry_count,
     registeredAt: iso(r.registered_at), questionnaireCompletedAt: iso(r.questionnaire_completed_at),
     lastActivityAt: iso(r.last_activity_at), lastVideoMilestone: r.last_video_milestone,
-    videoCompleted: r.video_completed, hasVerifiedForm: r.has_verified_form, ownerId: r.owner_id,
+    videoCompleted: r.video_completed, hasVerifiedForm: r.has_verified_form, assigneeUserId: r.assignee_user_id,
     hasVerifiedCalendarBooking: r.has_verified_calendar_booking, verifiedBookingReference: r.booking_reference,
-    ownerName: r.owner_name, followUpAt: iso(r.follow_up_at), version: r.version,
+    assigneeName: r.assignee_name, assigneeNeedsReassignment: r.assignee_needs_reassignment === true,
+    assignmentVersion: r.assignment_version ?? 0, followUpAt: iso(r.follow_up_at), version: r.version,
   };
 }
 export function schemaWarnings(c: CrmSchema) {
   return [
     ...(!c.crmPersistence ? ["CRM metadata migration is pending. Leads are available read-only; editing is disabled."] : []),
+    ...(!c.canonicalAssignments ? ["Canonical CRM assignments are unavailable; admissions access and assignment changes are disabled."] : []),
     ...(!c.identityTracking ? ["Lead identity tracking migration is pending; legacy inquiry identities are shown conservatively."] : []),
     ...(!c.videoTracking ? ["Video tracking schema is unavailable; no viewing is inferred."] : []),
     ...(!c.deliveryAttempts ? ["Delivery-attempt audit schema is unavailable. Existing inquiry status is shown without inventing attempt history."] : []),

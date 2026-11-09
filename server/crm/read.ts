@@ -2,19 +2,53 @@ import { CRM_STAGES, type CrmActivity, type CrmDetail, type CrmFilters, type Crm
 import { crmModelSql, inspectCrmSchema, iso, leadDto, schemaWarnings, type CrmSchema, type SqlDb } from "./model";
 import { CrmError } from "./evidence";
 import { readSupabaseConversationPage } from "../db/supabase-avni-readonly";
+import {
+  canReadCanonicalLead,
+  crmAccessLevel,
+  recordCrmDeniedAttempt,
+  requireCrmAccess,
+  type CrmPrincipal,
+} from "./authorization";
 
-export async function findPerson(db: SqlDb, c: CrmSchema, id: string) {
+export async function findPerson(db: SqlDb, c: CrmSchema, id: string, principal: CrmPrincipal) {
+  const access = requireCrmAccess(principal);
+  if (access === "admissions" && !c.canonicalAssignments) {
+    throw new CrmError(503, "Canonical CRM assignments are unavailable.");
+  }
   // Inquiry aliases continue resolving after an unambiguous registration links the record.
-  const { rows: [row] } = await db.query(`${crmModelSql(c)} SELECT * FROM model WHERE id=$1
-    OR EXISTS(SELECT 1 FROM unnest(inquiry_ids) a(inquiry_id) WHERE 'inquiry:'||a.inquiry_id=$1) LIMIT 1`, [id]);
-  if (!row) throw new CrmError(404, "Lead not found.");
+  const modelSql = crmModelSql(c, access === "admissions" ? 2 : undefined);
+  const scope = access === "admissions" ? "AND lead_id IS NOT NULL AND assignee_user_id=$2::integer" : "";
+  const values = access === "admissions" ? [id, principal.id] : [id];
+  const { rows: [row] } = await db.query(`${modelSql} SELECT * FROM model WHERE
+    (id=$1 OR EXISTS(SELECT 1 FROM unnest(inquiry_ids) a(inquiry_id) WHERE 'inquiry:'||a.inquiry_id=$1))
+    ${scope} LIMIT 1`, values);
+  if (!row) {
+    if (access === "admissions") await recordCrmDeniedAttempt(db, principal, "lead_detail");
+    throw new CrmError(404, "Lead not found.");
+  }
+  if (crmAccessLevel(principal) === "admissions") {
+    if (!c.canonicalAssignments) throw new CrmError(503, "Canonical CRM assignments are unavailable.");
+    if (!canReadCanonicalLead(principal, row.lead_id, row.assignee_user_id)) {
+      await recordCrmDeniedAttempt(db, principal, "lead_detail");
+      throw new CrmError(404, "Lead not found.");
+    }
+  }
   return row;
 }
 
-export async function listCrm(db: SqlDb, filters: CrmFilters): Promise<CrmList> {
+export async function listCrm(db: SqlDb, filters: CrmFilters, principal: CrmPrincipal): Promise<CrmList> {
+  const access = requireCrmAccess(principal);
   const c = await inspectCrmSchema(db);
-  const sql = crmModelSql(c);
-  const values: unknown[] = [];
+  if (access === "admissions" && !c.canonicalAssignments) {
+    throw new CrmError(503, "Canonical CRM assignments are unavailable.");
+  }
+  if (access === "admissions" && filters.assignee !== undefined) {
+    await recordCrmDeniedAttempt(db, principal, "assignee_filter");
+    throw new CrmError(403, "Admissions users cannot query another assignee.");
+  }
+  const sql = crmModelSql(c, access === "admissions" ? 1 : undefined);
+  const scopeValues: unknown[] = access === "admissions" ? [principal.id] : [];
+  const values: unknown[] = [...scopeValues];
   const where: string[] = [];
   const add = (expression: string, value: unknown) => { values.push(value); where.push(expression.replace("?", `$${values.length}`)); };
   if (filters.q) {
@@ -30,8 +64,8 @@ export async function listCrm(db: SqlDb, filters: CrmFilters): Promise<CrmList> 
   if (filters.source) add("?=ANY(sources)", filters.source);
   if (filters.dateFrom) add("(last_activity_at AT TIME ZONE 'Asia/Kolkata')::date>=?::date", filters.dateFrom);
   if (filters.dateTo) add("(last_activity_at AT TIME ZONE 'Asia/Kolkata')::date<=?::date", filters.dateTo);
-  if (filters.owner === "unassigned") where.push("owner_id IS NULL");
-  else if (filters.owner) add("owner_id=?::integer", filters.owner);
+  if (filters.assignee === "unassigned") where.push("assignee_user_id IS NULL");
+  else if (filters.assignee) add("assignee_user_id=?::integer", filters.assignee);
   if (filters.followUp === "none") where.push("follow_up_at IS NULL");
   if (filters.followUp === "overdue") where.push("follow_up_at<now()");
   if (filters.followUp === "upcoming") where.push("follow_up_at>now()");
@@ -40,7 +74,7 @@ export async function listCrm(db: SqlDb, filters: CrmFilters): Promise<CrmList> 
   const sort = ({ recent: "last_activity_at DESC NULLS LAST", oldest: "last_activity_at ASC NULLS LAST",
     name: "lower(display_name) ASC", followup: "follow_up_at ASC NULLS LAST" } as Record<string, string>)[filters.sort || "recent"];
   const page = filters.page || 1, pageSize = filters.pageSize || 20;
-  const [items, total, stats, counts, options, owners] = await Promise.all([
+  const [items, total, stats, counts, options, assignees] = await Promise.all([
     db.query(`${sql} SELECT * FROM model ${filter} ORDER BY ${sort},id LIMIT $${values.length+1} OFFSET $${values.length+2}`,
       [...values, pageSize, (page-1)*pageSize]),
     db.query(`${sql} SELECT count(*)::integer total FROM model ${filter}`, values),
@@ -54,13 +88,20 @@ export async function listCrm(db: SqlDb, filters: CrmFilters): Promise<CrmList> 
       count(*) FILTER(WHERE identity_status IN ('linked','unique_phone') AND has_verified_form)::integer verified_forms,
       count(*) FILTER(WHERE identity_status IN ('linked','unique_phone') AND registered_at IS NOT NULL AND has_verified_form)::integer registered_with_form,
       count(*) FILTER(WHERE identity_status IN ('linked','unique_phone') AND registered_at IS NOT NULL AND NOT has_verified_form)::integer registered_without_form
-      FROM model`),
-    db.query(`${sql} SELECT stage,count(*)::integer count FROM model WHERE identity_status IN ('linked','unique_phone') GROUP BY stage`),
+      FROM model`, scopeValues),
+    db.query(`${sql} SELECT stage,count(*)::integer count FROM model
+      WHERE identity_status IN ('linked','unique_phone') GROUP BY stage`, scopeValues),
     db.query(`${sql} SELECT
-      ARRAY(SELECT DISTINCT unnest(programs) FROM model ORDER BY 1) programs,
-      ARRAY(SELECT DISTINCT unnest(sources) FROM model ORDER BY 1) sources`),
-    db.query(`SELECT u.id,coalesce(u.display_name,'Admin #'||u.id) name FROM lms_users u
-      JOIN lms_user_roles r ON r.user_id=u.id AND r.role='admin' WHERE u.is_active ORDER BY name`),
+      ARRAY(SELECT DISTINCT p.value FROM model m CROSS JOIN LATERAL unnest(m.programs) AS p(value) ORDER BY p.value) programs,
+      ARRAY(SELECT DISTINCT s.value FROM model m CROSS JOIN LATERAL unnest(m.sources) AS s(value) ORDER BY s.value) sources`,
+      scopeValues),
+    access === "admin"
+      ? db.query(`SELECT u.id,coalesce(u.display_name,'Admissions #'||u.id) name FROM lms_users u
+          JOIN lms_user_roles r ON r.user_id=u.id AND r.role::text='admissions'
+          WHERE u.is_active AND NOT EXISTS(
+            SELECT 1 FROM lms_user_roles admin_role WHERE admin_role.user_id=u.id AND admin_role.role::text='admin'
+          ) ORDER BY name`)
+      : Promise.resolve({ rows: [] }),
   ]);
   const s = stats.rows[0];
   const stageCounts = Object.fromEntries(Object.keys(CRM_STAGES).map(k => [k, 0])) as CrmOverview["stageCounts"];
@@ -74,13 +115,14 @@ export async function listCrm(db: SqlDb, filters: CrmFilters): Promise<CrmList> 
       registeredWithForm:s.registered_with_form, registeredWithoutForm:s.registered_without_form,
       registeredToFormPercent:s.registered_people ? Math.round(100*s.registered_with_form/s.registered_people) : null,
       enrolledPercent:s.identified_people ? Math.round(100*stageCounts.enrolled/s.identified_people) : null },
-    options: { ...options.rows[0], owners:owners.rows },
+    options: { ...options.rows[0], assignees:assignees.rows },
     capabilities:c, warnings:schemaWarnings(c),
   };
 }
 
-export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
-  const c = await inspectCrmSchema(db), row = await findPerson(db, c, id), lead = leadDto(row);
+export async function detailCrm(db: SqlDb, id: string, principal: CrmPrincipal): Promise<CrmDetail> {
+  const access = requireCrmAccess(principal);
+  const c = await inspectCrmSchema(db), row = await findPerson(db, c, id, principal), lead = leadDto(row);
   const ids: number[] = row.inquiry_ids;
   const { rows: [metaSchema] } = await db.query(`SELECT
     to_regclass('admissions_lead_touchpoints') IS NOT NULL AS touchpoints,
@@ -89,16 +131,29 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
     to_regclass('admissions_meta_event_outbox') IS NOT NULL AS outbox`);
   const marketingAvailable = !!metaSchema?.touchpoints && !!metaSchema?.consent && !!metaSchema?.leadLinks && !!metaSchema?.outbox;
   const [{ rows: inquiries }, { rows: attempts }, { rows: activities }, { rows: events },
-    { rows: bookings }] = await Promise.all([
+    { rows: bookings }, { rows: legacyOwners }, { rows: assignmentHistory }] = await Promise.all([
     db.query("SELECT to_jsonb(i) data FROM inquiries i WHERE id=ANY($1::integer[]) ORDER BY id DESC", [ids]),
     c.deliveryAttempts ? db.query("SELECT * FROM counselling_delivery_attempts WHERE inquiry_id=ANY($1::integer[]) ORDER BY attempted_at", [ids]) : Promise.resolve({rows:[]}),
-    c.crmPersistence ? db.query(`SELECT a.*,coalesce(u.display_name,'Admin #'||a.actor_id) actor_name
+    c.crmPersistence ? db.query(`SELECT a.*,coalesce(u.display_name,'Staff #'||a.actor_id) actor_name
       FROM admissions_crm_activities a JOIN lms_users u ON u.id=a.actor_id
-      WHERE inquiry_id=ANY($1::integer[]) ORDER BY occurred_at,id`, [ids]) : Promise.resolve({rows:[]}),
+      WHERE inquiry_id=ANY($1::integer[]) AND ($2::boolean OR a.type<>'owner') ORDER BY occurred_at,id`,
+      [ids, access === "admin"]) : Promise.resolve({rows:[]}),
     c.videoTracking && lead.leadId ? db.query("SELECT * FROM admissions_vsl_events WHERE lead_id=$1 ORDER BY occurred_at,event", [lead.leadId]) : Promise.resolve({rows:[]}),
     c.calendarBookingVerification ? db.query(`SELECT id,title,status,starts_at,ends_at,owner_id,source_type,confirmation_message_id
       FROM calendar_events WHERE (lead_id=$1 OR inquiry_id=ANY($2::integer[])) AND source_type='counselling_booking'
       ORDER BY starts_at,id`, [lead.leadId, ids]) : Promise.resolve({rows:[]}),
+    access === "admin" && c.crmPersistence ? db.query(`SELECT p.inquiry_id,p.owner_id,u.display_name owner_name
+      FROM admissions_crm_profiles p LEFT JOIN lms_users u ON u.id=p.owner_id
+      WHERE p.inquiry_id=ANY($1::integer[]) AND p.owner_id IS NOT NULL ORDER BY p.inquiry_id`, [ids])
+      : Promise.resolve({rows:[]}),
+    access === "admin" && c.canonicalAssignments ? db.query(`SELECT h.*,actor.display_name actor_name,
+        previous_assignee.display_name previous_assignee_name,new_assignee.display_name new_assignee_name
+      FROM admissions_lead_assignment_history h
+      LEFT JOIN lms_users actor ON actor.id=h.actor_user_id
+      LEFT JOIN lms_users previous_assignee ON previous_assignee.id=h.previous_assignee_user_id
+      LEFT JOIN lms_users new_assignee ON new_assignee.id=h.new_assignee_user_id
+      WHERE h.lead_id=$1 ORDER BY h.changed_at DESC,h.id DESC LIMIT 100`, [lead.leadId])
+      : Promise.resolve({rows:[]}),
   ]);
   const marketingRows = marketingAvailable ? await Promise.all([
     db.query(`SELECT source_channel,source,medium,campaign,campaign_id,ad_id,adset_id,form_id,meta_lead_id,occurred_at
@@ -221,7 +276,35 @@ export async function detailCrm(db: SqlDb, id: string): Promise<CrmDetail> {
   const capabilities = { ...c, chatHistory: conversationHistory.state === "available" };
   const warnings = schemaWarnings({ ...c, chatHistory: conversationHistory.state !== "not_configured" });
   if (conversationHistory.state === "unavailable") warnings.push("Supabase conversation history could not be reached; Replit remains the operational database.");
-  return {lead,inquiries:submissions,journey,activities:timeline,capabilities,warnings,conversationHistory,marketing};
+  return {
+    lead,
+    inquiries:submissions,
+    journey,
+    activities:timeline,
+    capabilities,
+    warnings,
+    conversationHistory,
+    marketing,
+    legacyInquiryAssignments: legacyOwners.map(owner => ({
+      inquiryId: owner.inquiry_id,
+      ownerId: owner.owner_id,
+      ownerName: owner.owner_name,
+    })),
+    assignmentHistory: assignmentHistory.map(event => ({
+      id: event.id,
+      previousAssigneeUserId: event.previous_assignee_user_id,
+      newAssigneeUserId: event.new_assignee_user_id,
+      previousAssigneeName: event.previous_assignee_name,
+      newAssigneeName: event.new_assignee_name,
+      actorUserId: event.actor_user_id,
+      actorName: event.actor_name,
+      changedAt: iso(event.changed_at)!,
+      reason: event.reason,
+      source: event.source,
+      requestId: event.request_id,
+      assignmentVersion: event.assignment_version,
+    })),
+  };
 }
 
 export async function readCrmConversationPage(
@@ -229,9 +312,10 @@ export async function readCrmConversationPage(
   id: string,
   cursor: string | undefined,
   limit: number,
+  principal: CrmPrincipal,
 ) {
   const c = await inspectCrmSchema(db);
-  const row = await findPerson(db, c, id);
+  const row = await findPerson(db, c, id, principal);
   const lead = leadDto(row);
   if (!lead.leadId) return { state: "unlinked" as const, items: [], nextCursor: null };
   if (!c.chatHistory) return { state: "not_configured" as const, items: [], nextCursor: null };

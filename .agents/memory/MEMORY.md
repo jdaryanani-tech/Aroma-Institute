@@ -16,3 +16,4 @@
 - [AICHM appointment source of truth](aichm-calendar-booking.md) — Use the in-app Calendar for confirmed counselling bookings; questionnaire preferences remain requests until an eligible, explicitly confirmed slot is committed.
 - [Replit production pg_dump TLS](replit-production-pgdump-tls.md) — libpq 17.6 verified the production source with `PGSSLROOTCERT=system` and `verify-full`; no downloadable source CA was documented.
 - [AICHM operational database](aichm-operational-database.md) — Replit PostgreSQL is the sole live data store; Supabase is a read-only legacy import source until a reviewed migration is approved.
+- [Canonical CRM assignment policy](canonical-crm-assignment-policy.md) — Admins see all leads; admissions sees only assigned leads; legacy inquiry owners are review-only, never auto-backfilled.

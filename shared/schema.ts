@@ -248,6 +248,40 @@ export const admissionsCrmActivities = pgTable("admissions_crm_activities", {
   data: jsonb("data").$type<Record<string, unknown>>(),
 }, t => [index("admissions_crm_activity_inquiry_idx").on(t.inquiryId, t.occurredAt)]);
 
+// Canonical ownership is one assignment per person, not one owner per inquiry.
+// Existing admissions_crm_profiles.owner_id values remain inquiry-level legacy metadata.
+export const admissionsLeadAssignments = pgTable("admissions_lead_assignments", {
+  leadId: uuid("lead_id").primaryKey().references(() => admissionsLeads.id, { onDelete: "restrict" }),
+  assigneeUserId: integer("assignee_user_id").references(() => lmsUsers.id, { onDelete: "restrict" }),
+  assignedBy: integer("assigned_by").notNull().references(() => lmsUsers.id, { onDelete: "restrict" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  version: integer("version").notNull().default(1),
+}, t => [
+  index("admissions_lead_assignments_assignee_idx").on(t.assigneeUserId, t.leadId),
+  check("admissions_lead_assignments_version_ck", sql`${t.version} > 0`),
+]);
+
+export const admissionsLeadAssignmentHistory = pgTable("admissions_lead_assignment_history", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  leadId: uuid("lead_id").notNull().references(() => admissionsLeads.id, { onDelete: "restrict" }),
+  previousAssigneeUserId: integer("previous_assignee_user_id").references(() => lmsUsers.id, { onDelete: "restrict" }),
+  newAssigneeUserId: integer("new_assignee_user_id").references(() => lmsUsers.id, { onDelete: "restrict" }),
+  actorUserId: integer("actor_user_id").notNull().references(() => lmsUsers.id, { onDelete: "restrict" }),
+  changedAt: timestamp("changed_at", { withTimezone: true }).defaultNow().notNull(),
+  reason: text("reason").notNull(),
+  source: text("source").notNull(),
+  requestId: uuid("request_id").notNull().unique(),
+  assignmentVersion: integer("assignment_version").notNull(),
+}, t => [
+  index("admissions_lead_assignment_history_lead_time_idx").on(t.leadId, t.changedAt),
+  index("admissions_lead_assignment_history_assignee_time_idx").on(t.newAssigneeUserId, t.changedAt),
+ uniqueIndex("admissions_lead_assignment_history_lead_version_uidx").on(t.leadId, t.assignmentVersion),
+  check("admissions_lead_assignment_history_reason_ck", sql`length(btrim(${t.reason})) BETWEEN 3 AND 1000`),
+  check("admissions_lead_assignment_history_source_ck", sql`${t.source} IN ('admin_ui')`),
+  check("admissions_lead_assignment_history_version_ck", sql`${t.assignmentVersion} > 0`),
+  check("admissions_lead_assignment_history_changed_ck", sql`${t.previousAssigneeUserId} IS DISTINCT FROM ${t.newAssigneeUserId}`),
+]);
+
 export const insertInquirySchema = createInsertSchema(inquiries).omit({
   id: true,
   leadId: true,

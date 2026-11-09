@@ -3,19 +3,21 @@ import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-quer
 import { AlertTriangle, ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, Clock3, Coffee, LogOut, Mail, MessageCircle, MessageCircleOff, Phone, Search, ShieldCheck, SlidersHorizontal, Users, VideoOff, X } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
-import type { CrmCapabilities, CrmDetail, CrmLead, CrmStage, CrmUpdate } from "@shared/crm";
+import type { CrmAssignmentUpdate, CrmCapabilities, CrmDetail, CrmLead, CrmStage, CrmUpdate } from "@shared/crm";
 import { CRM_STAGES } from "@shared/crm";
-import { CrmHttpError, fetchCrmConversationPage, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } from "@/crm/api";
+import { ADMISSIONS_MANUAL_CRM_STAGES } from "@shared/crm";
+import { CrmHttpError, fetchCrmConversationPage, useCrmAssignment, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } from "@/crm/api";
 import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, formatDate, toLocalInput } from "@/crm/format";
+import { crmUiPermissions } from "@/crm/permissions";
 import MetaSetupStatus from "@/crm/MetaSetupStatus";
 
-type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; owner: string; sort: string; page: number; pageSize: number };
+type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; assignee: string; sort: string; page: number; pageSize: number };
 type AvniHealth = {
   schema: Record<string,boolean> & {ready:boolean};
   webhook: {urlPresent:boolean;urlValid:boolean;secretPresent:boolean;dispatchRequested:boolean;dispatcherActive:boolean};
   outbox: Record<string,number> | null;
 };
-const defaultFilters: Filters = { q: "", stage: "", program: "", source: "", dateFrom: "", dateTo: "", followUp: "", owner: "", sort: "recent", page: 1, pageSize: 12 };
+const defaultFilters: Filters = { q: "", stage: "", program: "", source: "", dateFrom: "", dateTo: "", followUp: "", assignee: "", sort: "recent", page: 1, pageSize: 12 };
 const stages = Object.keys(CRM_STAGES) as CrmStage[];
 const stageHelp = "Rates describe funnel records; they do not establish that one step caused another.";
 
@@ -42,8 +44,10 @@ export default function Admin() {
   const logout = useLmsLogout();
   const client = useQueryClient();
   const [, setLocation] = useLocation();
-  const isAdmin = Boolean(session.data?.roles.includes("admin"));
-  const hadAdmin = useRef(false);
+  const permissions = crmUiPermissions(session.data?.roles);
+  const isAdmin = permissions.canManageAssignments;
+  const isAdmissions = permissions.canUseCrm && !isAdmin;
+  const hasCrmAccess = permissions.canUseCrm;
   const retryDialogRef = useRef<HTMLElement | null>(null);
   const detailReturnFocus = useRef<HTMLButtonElement | null>(null);
   const detailDialogOpen = useRef(false);
@@ -55,8 +59,10 @@ export default function Admin() {
   const [retryConfirmed, setRetryConfirmed] = useState(false);
   const [retryPersonConfirmed, setRetryPersonConfirmed] = useState(false);
   const [retryError, setRetryError] = useState("");
-  const leadsQuery = useCrmLeads(filters, isAdmin && !accessCheckBlocked);
-  const detailQuery = useCrmDetail(selectedId, isAdmin && !accessCheckBlocked);
+  const crmScope = isAdmin ? "admin" : `admissions:${session.data?.id ?? "unknown"}`;
+  const previousCrmScope = useRef(crmScope);
+  const leadsQuery = useCrmLeads(filters, hasCrmAccess && !accessCheckBlocked, crmScope);
+  const detailQuery = useCrmDetail(selectedId, hasCrmAccess && !accessCheckBlocked, crmScope);
   const avniHealthQuery=useQuery<AvniHealth>({
     queryKey:["admin-crm","avni-health"],
     enabled:isAdmin&&!accessCheckBlocked,
@@ -69,6 +75,7 @@ export default function Admin() {
     },
   });
   const update = useCrmUpdate();
+  const assignment = useCrmAssignment();
   const retry = useCrmRetry();
   const leads = leadsQuery.data?.items ?? [];
   const lead = detailQuery.data?.lead;
@@ -77,26 +84,25 @@ export default function Admin() {
   );
 
   useEffect(() => {
-    if (isAdmin) { hadAdmin.current = true; return; }
-    if (hadAdmin.current) {
-      clearPrivateCache(client);
-      setSelectedId(null);
-      setMobileDetail(false);
-      hadAdmin.current = false;
-    }
-  }, [isAdmin, client]);
+    if (previousCrmScope.current === crmScope) return;
+    clearPrivateCache(client);
+    setSelectedId(null);
+    setMobileDetail(false);
+    if (!isAdmin) setFilters((current) => ({ ...current, assignee: "" }));
+    previousCrmScope.current = crmScope;
+  }, [crmScope, isAdmin, client]);
   useEffect(() => {
     if (!selectedId && leads.length) setSelectedId(leads[0].id);
     else if (selectedId && leads.length && !leads.some((item) => item.id === selectedId) && !detailQuery.isLoading) setSelectedId(leads[0].id);
   }, [leads, selectedId, detailQuery.isLoading]);
   useEffect(() => {
-    if (!isAdmin || !crmForbidden || accessCheckBlocked) return;
+    if (!hasCrmAccess || !crmForbidden || accessCheckBlocked) return;
     setAccessCheckBlocked(true);
     clearPrivateCache(client);
     setSelectedId(null);
     setMobileDetail(false);
     void session.refetch();
-  }, [isAdmin, crmForbidden, accessCheckBlocked, client, session.refetch]);
+  }, [hasCrmAccess, crmForbidden, accessCheckBlocked, client, session.refetch]);
   useEffect(() => {
     if (retryTarget === null) return;
     const dialog = retryDialogRef.current;
@@ -154,10 +160,10 @@ export default function Admin() {
     setMobileDetail(window.matchMedia("(max-width: 800px)").matches);
   };
   if (session.isLoading) return <main className="crm-app"><div className="crm-empty" aria-live="polite"><div className="crm-skeleton" /><strong>Checking admissions access</strong><p>Keeping prospect information private.</p></div></main>;
-  if (session.isError || !session.data || !isAdmin) return (
+  if (session.isError || !session.data || !hasCrmAccess) return (
     <main className="crm-app" data-testid="page-admin-login"><section className="crm-empty" style={{ minHeight: "100dvh", justifyContent: "center" }}>
       <span className="crm-brand-mark">A.</span><p className="crm-eyebrow" style={{ marginTop: 18 }}>Aroma Institute</p><strong>Admissions access</strong>
-      <p role={session.data && !isAdmin ? "alert" : undefined}>{session.isError ? "We could not verify your session." : session.data ? "Access denied. This account does not have Leads Dashboard administrator access." : "Sign in with your Aroma Institute administrator account to continue."}</p>
+      <p role={session.data && !hasCrmAccess ? "alert" : undefined}>{session.isError ? "We could not verify your session." : session.data ? "Access denied. This account does not have CRM access." : "Sign in with your Aroma Institute account to continue."}</p>
       <a className="crm-button crm-button-primary" href="/admin/login" style={{ marginTop: 14, textDecoration: "none" }}>Continue to sign in</a>
     </section></main>
   );
@@ -180,14 +186,14 @@ export default function Admin() {
     <main className="crm-app" data-testid="page-admin-dashboard">
       <header className="crm-topbar"><div className="crm-wrap crm-topbar-inner">
         <div className="crm-brand"><span className="crm-brand-mark" aria-hidden="true">A.</span><div className="crm-brand-copy"><strong>AICHM Admissions</strong><span>Prospect desk · Aroma Institute</span></div></div>
-        <div className="crm-top-actions"><a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a><span className="crm-connection-tag">{caps?.chatHistory ? <MessageCircle size={13} /> : <MessageCircleOff size={13} />}{caps?.chatHistory ? " WhatsApp history configured" : " Supabase reader setup needed"}</span>
+        <div className="crm-top-actions">{isAdmin && <a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a>}<span className="crm-connection-tag">{caps?.chatHistory ? <MessageCircle size={13} /> : <MessageCircleOff size={13} />}{caps?.chatHistory ? " WhatsApp history configured" : " Supabase reader setup needed"}</span>
           <button className="crm-button crm-button-quiet" type="button" onClick={signOut} disabled={logout.isPending} data-testid="admin-button-logout"><LogOut size={16} />{logout.isPending ? "Signing out" : "Sign out"}</button>
         </div>
       </div></header>
       <div className="crm-wrap crm-main">
-        <section className="crm-heading-row"><div><p className="crm-eyebrow">Admissions workspace</p><h1 className="crm-heading">People, not just enquiries.</h1><p className="crm-subheading">Keep the next conversation clear, grounded, and easy to pick up. Counts cover all records, independent of filters.</p></div><a className="crm-connection-tag" href="/admin/calendar"><CalendarClock size={13} /> Open internal calendar</a></section>
+        <section className="crm-heading-row"><div><p className="crm-eyebrow">{isAdmin ? "Admissions workspace" : "Assigned admissions workspace"}</p><h1 className="crm-heading">People, not just enquiries.</h1><p className="crm-subheading">{isAdmin ? "Keep the next conversation clear, grounded, and easy to pick up. Counts cover all records, independent of filters." : "Work only with leads assigned to your account. Counts and search results are limited to those assignments."}</p></div>{isAdmin && <a className="crm-connection-tag" href="/admin/calendar"><CalendarClock size={13} /> Open internal calendar</a>}</section>
         {logout.isError && <div className="crm-error" role="alert">Sign out did not complete. Your administrator session may still be active; try again before leaving this device.</div>}
-        <section className="crm-counts" aria-labelledby="avni-health-title" data-testid="avni-integration-health">
+        {isAdmin && <section className="crm-counts" aria-labelledby="avni-health-title" data-testid="avni-integration-health">
           <div className="crm-count" style={{gridColumn:"1 / -1"}}>
             <span className="crm-count-label">AVNI integration</span>
             <strong id="avni-health-title" className="crm-count-value" style={{fontSize:"1.25rem"}}>
@@ -199,22 +205,23 @@ export default function Admin() {
             </span>}
             {avniHealthQuery.isError&&<span className="crm-count-note">Refresh the dashboard or check the production integration settings. No secret values are displayed here.</span>}
           </div>
-        </section>
-        <MetaSetupStatus />
+        </section>}
+        {isAdmin && <MetaSetupStatus />}
         {leadsQuery.isError && <div className="crm-error" role="alert"><strong>Admissions records did not load.</strong> {errorText(leadsQuery.error, "Check your connection and administrator access.")}<button className="crm-text-button" type="button" onClick={() => void leadsQuery.refetch()}>Try again</button></div>}
-        {overview && <section className="crm-counts" aria-label="Global admissions overview">
+        {overview && <section className="crm-counts" aria-label={isAdmin ? "Global admissions overview" : "Assigned leads overview"}>
           <div className="crm-count"><span className="crm-count-label">Identified people</span><strong className="crm-count-value">{overview.identifiedPeople.toLocaleString()}</strong><span className="crm-count-note">{overview.unresolvedRecords.toLocaleString()} ambiguous or unmatchable records excluded</span></div>
           <div className="crm-count"><span className="crm-count-label">Total enquiries</span><strong className="crm-count-value">{overview.totalEnquiries.toLocaleString()}</strong><span className="crm-count-note">All recorded submissions</span></div>
           <div className="crm-count"><span className="crm-count-label">Video watched</span><strong className="crm-count-value">{overview.videoWatched.toLocaleString()}</strong><span className="crm-count-note">Observed playback milestones; not a stage label</span></div>
           <div className="crm-count"><span className="crm-count-label">Verified forms</span><strong className="crm-count-value">{overview.verifiedForms.toLocaleString()}</strong><span className="crm-count-note">{overview.registeredWithoutForm.toLocaleString()} registered; form not yet recorded</span></div>
           <div className="crm-count"><span className="crm-count-label">Enrolled stage</span><strong className="crm-count-value">{overview.stageCounts.enrolled.toLocaleString()}</strong><span className="crm-count-note crm-rate">{overview.enrolledPercent === null ? "Rate unavailable" : `${overview.enrolledPercent.toFixed(1)}% descriptive rate`}</span></div>
         </section>}
-        {overview && <p className="crm-results-caption" style={{ margin: "-12px 0 18px" }}>{stageHelp}{overview.registeredToFormPercent !== null && <> Registered-to-form: {overview.registeredToFormPercent.toFixed(1)}% descriptive rate.</>}</p>}
+        {overview && <p className="crm-results-caption" style={{ margin: "-12px 0 18px" }}>{isAdmin ? stageHelp : "Counts cover only leads assigned to your account."}{overview.registeredToFormPercent !== null && <> Registered-to-form: {overview.registeredToFormPercent.toFixed(1)}% descriptive rate.</>}</p>}
         {(leadsQuery.data?.warnings ?? []).map((warning, index) => <div className="crm-warning" role="status" key={`${index}-${warning}`}><AlertTriangle size={16} /><span>{warning}</span></div>)}
-        {caps && (!caps.identityTracking || !caps.videoTracking || !caps.crmPersistence || !caps.calendarBookingVerification) && <div className="crm-warning" role="status"><ShieldCheck size={16} /><span>{[
+        {caps && (!caps.identityTracking || !caps.videoTracking || !caps.crmPersistence || !caps.calendarBookingVerification || !caps.canonicalAssignments) && <div className="crm-warning" role="status"><ShieldCheck size={16} /><span>{[
           !caps.identityTracking && "Identity linking is unavailable; similar submissions may remain unresolved.",
           !caps.videoTracking && "VSL milestones are not connected; video-watch transitions require the prospect's exact confirmation.",
           !caps.crmPersistence && "CRM persistence is unavailable. Profile writes are disabled.",
+          !caps.canonicalAssignments && "Canonical assignment schema is unavailable; admissions access is disabled until it is installed.",
           !caps.calendarBookingVerification && "Counselling booking cannot be verified. Do not mark a booking based on an unverified calendar.",
         ].filter(Boolean).join(" ")}</span></div>}
         <div className="crm-workspace">
@@ -229,7 +236,7 @@ export default function Admin() {
                     <select className="crm-select" aria-label="Filter by program" value={filters.program} onChange={(event) => setFilter("program", event.target.value)}><option value="">Every program</option>{(leadsQuery.data?.options.programs ?? []).map((item) => <option value={item} key={item}>{item}</option>)}</select>
                     <select className="crm-select" aria-label="Filter by source" value={filters.source} onChange={(event) => setFilter("source", event.target.value)}><option value="">Every source</option>{(leadsQuery.data?.options.sources ?? []).map((item) => <option value={item} key={item}>{item}</option>)}</select>
                     <select className="crm-select" aria-label="Follow-up status" value={filters.followUp} onChange={(event) => setFilter("followUp", event.target.value)} data-testid="crm-followup"><option value="">Any follow-up</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="upcoming">Upcoming</option><option value="none">No follow-up</option></select>
-                    <select className="crm-select" aria-label="Filter by owner" value={filters.owner} onChange={(event) => setFilter("owner", event.target.value)} data-testid="crm-owner"><option value="">Every owner</option><option value="unassigned">Unassigned</option>{(leadsQuery.data?.options.owners ?? []).map((item) => <option value={String(item.id)} key={item.id}>{item.name}</option>)}</select>
+                     {isAdmin && <select className="crm-select" aria-label="Filter by assignee" value={filters.assignee} onChange={(event) => setFilter("assignee", event.target.value)} data-testid="crm-assignee-filter"><option value="">Every assignee</option><option value="unassigned">Unassigned</option>{(leadsQuery.data?.options.assignees ?? []).map((item) => <option value={String(item.id)} key={item.id}>{item.name}</option>)}</select>}
                     <select className="crm-select" aria-label="Sort leads" value={filters.sort} onChange={(event) => setFilter("sort", event.target.value)}><option value="recent">Recently active</option><option value="oldest">Oldest first</option><option value="name">Name A–Z</option><option value="followup">Follow-up soonest</option></select>
                   </div>
                   <details style={{ marginTop: 8 }}><summary className="crm-text-button" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}><SlidersHorizontal size={14} /> Date range <ChevronDown size={13} /></summary>
@@ -240,10 +247,10 @@ export default function Admin() {
               <div className="crm-filter-actions"><span className="crm-results-caption">{leadsQuery.data ? `${leadsQuery.data.total.toLocaleString()} matches` : "Loading matches"}</span><button className="crm-text-button" type="button" onClick={reset}>Clear filters</button></div>
             </div>
             <div className="crm-lead-list" aria-live="polite">
-              {leadsQuery.isLoading ? <><div className="crm-skeleton" /><div className="crm-skeleton" /><div className="crm-skeleton" /></> : leadsQuery.data && !leads.length ? <div className="crm-empty"><Users size={23} /><strong>No people match these filters</strong><p>Try another stage, owner, or search. New enquiries appear here when recorded.</p><button type="button" className="crm-button" onClick={reset}>Show all records</button></div> : leads.map((item) => (
+              {leadsQuery.isLoading ? <><div className="crm-skeleton" /><div className="crm-skeleton" /><div className="crm-skeleton" /></> : leadsQuery.data && !leads.length ? <div className="crm-empty"><Users size={23} /><strong>No people match these filters</strong><p>{isAdmin ? "Try another stage, assignee, or search. New enquiries appear here when recorded." : "Only leads assigned to your account are shown here."}</p><button type="button" className="crm-button" onClick={reset}>Show assigned leads</button></div> : leads.map((item) => (
                 <button className="crm-lead-card" type="button" key={item.id} onClick={(event) => selectLead(item.id, event.currentTarget)} aria-current={item.id === selectedId} data-testid="crm-lead-card">
                   <span className="crm-lead-card-head"><span><span className="crm-lead-name">{item.name || "Name not recorded"}</span><span className="crm-lead-meta">{item.phone || item.email || "No contact details"}{item.phone && item.email ? ` · ${item.email}` : ""}</span></span>{item.followUpAt && <span className="crm-follow-flag"><Clock3 size={13} />{formatDate(item.followUpAt)}</span>}</span>
-                  <span className="crm-lead-foot"><span className="crm-stage-pill" data-stage={item.stage}>{CRM_STAGE_LABELS[item.stage]}</span><span className="crm-stage-source">{stageOrigin(item)}</span><span className="crm-card-program">{item.programs[0] || "Program not recorded"} · {item.ownerName || "Unassigned"}</span></span>
+                  <span className="crm-lead-foot"><span className="crm-stage-pill" data-stage={item.stage}>{CRM_STAGE_LABELS[item.stage]}</span><span className="crm-stage-source">{stageOrigin(item)}</span><span className="crm-card-program">{item.programs[0] || "Program not recorded"} · {isAdmin ? item.assigneeName || "Unassigned" : "Assigned to you"}</span></span>
                 </button>
               ))}
             </div>
@@ -263,9 +270,15 @@ export default function Admin() {
             data-testid="crm-detail"
           >
             {detailQuery.isLoading ? <div className="crm-empty"><button className="crm-button crm-mobile-close" type="button" onClick={() => setMobileDetail(false)}><X size={16} /> Close prospect detail</button><div className="crm-skeleton" /><strong>Opening prospect record</strong></div> : detailQuery.isError ? <div className="crm-empty"><button className="crm-button crm-mobile-close" type="button" onClick={() => setMobileDetail(false)}><X size={16} /> Close prospect detail</button><AlertTriangle size={22} /><strong>Could not open this record</strong><p>{errorText(detailQuery.error, "Try loading it again.")}</p><button className="crm-button" type="button" onClick={() => void detailQuery.refetch()}>Try again</button></div> : lead && detailQuery.data ? <LeadDetail
-              lead={lead} detail={detailQuery.data} owners={leadsQuery.data?.options.owners ?? []} capabilities={detailQuery.data.capabilities} canWrite={canWrite && detailQuery.data.capabilities.crmPersistence}
+              lead={lead} detail={detailQuery.data} assignees={leadsQuery.data?.options.assignees ?? []} capabilities={detailQuery.data.capabilities} canWrite={canWrite && detailQuery.data.capabilities.crmPersistence}
+              scopeKey={crmScope}
+              isAdmin={isAdmin} isAdmissions={isAdmissions}
               pending={update.isPending} updateError={update.isError ? errorText(update.error, "The profile could not be saved.") : ""}
               onSave={(patch) => update.mutate({ id: lead.id, update: patch })}
+              assignmentPending={assignment.isPending} assignmentError={assignment.isError ? errorText(assignment.error, "The assignment could not be saved.") : ""}
+              onAssign={(update) => {
+                if (lead.leadId) assignment.mutate({ leadId: lead.leadId, update });
+              }}
               onRetry={(id) => { setRetryTarget(id); setRetryConfirmed(false); setRetryPersonConfirmed(false); setRetryError(""); }}
               retryPending={retry.isPending} retryError={retryError || (retry.isError ? errorText(retry.error, "Retry could not be started.") : "")}
               retryId={retry.variables} onClose={() => setMobileDetail(false)}
@@ -273,7 +286,7 @@ export default function Admin() {
           </section>
         </div>
       </div>
-      {retryTarget !== null && <div className="crm-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !retry.isPending) setRetryTarget(null); }}>
+      {isAdmin && retryTarget !== null && <div className="crm-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !retry.isPending) setRetryTarget(null); }}>
         <section ref={retryDialogRef} className="crm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="retry-title" aria-describedby="retry-copy">
           <h2 id="retry-title">Verify before resending</h2><p id="retry-copy">This resends the saved counselling inquiry using its existing submission ID; it will not create another inquiry. Check AVNI/Supabase first. Continue only if the correct prospect’s submission has not already arrived.</p>
           <label className="crm-checkline"><input type="checkbox" checked={retryPersonConfirmed} onChange={(event) => setRetryPersonConfirmed(event.target.checked)} /><span>I confirmed this is the correct prospect and inquiry.</span></label>
@@ -289,12 +302,16 @@ export default function Admin() {
 }
 
 function LeadDetail(props: {
-  lead: CrmLead; detail: CrmDetail; owners: { id: number; name: string }[]; capabilities: CrmCapabilities; canWrite: boolean; pending: boolean; updateError: string;
+  lead: CrmLead; detail: CrmDetail; assignees: { id: number; name: string }[]; capabilities: CrmCapabilities;
+  isAdmin: boolean; isAdmissions: boolean; scopeKey: string; canWrite: boolean; pending: boolean; updateError: string;
+  assignmentPending: boolean; assignmentError: string; onAssign: (update: CrmAssignmentUpdate) => void;
   onSave: (patch: CrmUpdate) => void; onRetry: (id: number) => void; retryPending: boolean; retryError: string; retryId: number | undefined; onClose: () => void;
 }) {
   const { lead, detail } = props;
   const [stage, setStage] = useState<CrmStage>(lead.stage);
-  const [owner, setOwner] = useState(lead.ownerId === null ? "" : String(lead.ownerId));
+  const [assignee, setAssignee] = useState(lead.assigneeUserId === null ? "" : String(lead.assigneeUserId));
+  const [assignmentReason, setAssignmentReason] = useState("");
+  const assignmentRequestId = useRef<string | null>(null);
   const [followUp, setFollowUp] = useState(toLocalInput(lead.followUpAt));
   const [note, setNote] = useState("");
   const [reason, setReason] = useState("");
@@ -306,7 +323,7 @@ function LeadDetail(props: {
   const [savingVersion, setSavingVersion] = useState<number | null>(null);
   const [olderConversationHistoryRequested, setOlderConversationHistoryRequested] = useState(false);
   const conversationHistoryQuery = useInfiniteQuery({
-    queryKey: ["admin-crm", "conversation-pages", lead.id, detail.conversationHistory.nextCursor],
+    queryKey: ["admin-crm", props.scopeKey, "conversation-pages", lead.id, detail.conversationHistory.nextCursor],
     initialPageParam: detail.conversationHistory.nextCursor ?? "",
     queryFn: ({ pageParam }) => fetchCrmConversationPage(lead.id, pageParam),
     getNextPageParam: (page) => page.nextCursor ?? undefined,
@@ -314,17 +331,23 @@ function LeadDetail(props: {
     retry: false,
   });
   useEffect(() => {
-    setStage(lead.stage); setOwner(lead.ownerId === null ? "" : String(lead.ownerId)); setFollowUp(toLocalInput(lead.followUpAt));
+    setStage(lead.stage); setAssignee(lead.assigneeUserId === null ? "" : String(lead.assigneeUserId)); setAssignmentReason(""); setFollowUp(toLocalInput(lead.followUpAt));
     setNote(""); setReason(""); setEvidenceKind(props.capabilities.videoTracking ? "tracked_video" : "prospect_confirmation"); setReference(""); setOccurredAt(""); setConfirmed(false); setSaveMessage(""); setSavingVersion(null);
     setOlderConversationHistoryRequested(false);
   }, [lead.id, lead.version, props.capabilities.videoTracking]);
   useEffect(() => {
+    setAssignee(lead.assigneeUserId === null ? "" : String(lead.assigneeUserId));
+    setAssignmentReason("");
+    assignmentRequestId.current = null;
+  }, [lead.id, lead.assignmentVersion, lead.assigneeUserId]);
+  useEffect(() => {
     if (savingVersion !== null && lead.version !== savingVersion) { setSaveMessage("Saved and recorded in the activity log."); setNote(""); setReason(""); setSavingVersion(null); }
   }, [lead.version, savingVersion]);
   const stageChanged = stage !== lead.stage;
-  const ownerChanged = owner !== (lead.ownerId === null ? "" : String(lead.ownerId));
   const followChanged = followUp !== toLocalInput(lead.followUpAt);
-  const dirty = stageChanged || ownerChanged || followChanged || Boolean(note.trim());
+  const dirty = stageChanged || followChanged || Boolean(note.trim());
+  const selectableStages = props.isAdmin ? stages : ADMISSIONS_MANUAL_CRM_STAGES as readonly CrmStage[];
+  const selectableStageSet = new Set<CrmStage>(selectableStages);
   const blocked = !props.canWrite || (stage === "counselling_booked" && stageChanged && !lead.hasVerifiedCalendarBooking) || (stage === "form_submitted" && stageChanged && !lead.hasVerifiedForm);
   let evidenceError = "";
   if (stageChanged && reason.trim().length < 3) evidenceError = "Add a reason of at least 3 characters for this stage change.";
@@ -338,7 +361,6 @@ function LeadDetail(props: {
     if (!dirty || blocked || evidenceError) return;
     const patch: CrmUpdate = { expectedVersion: lead.version };
     if (stageChanged) patch.stage = stage;
-    if (ownerChanged) patch.ownerId = owner ? Number(owner) : null;
     if (followChanged) patch.followUpAt = followUp ? new Date(followUp).toISOString() : null;
     if (note.trim()) patch.note = note.trim();
     if (stageChanged) {
@@ -355,6 +377,17 @@ function LeadDetail(props: {
     }
     props.onSave(patch); setSavingVersion(lead.version); setSaveMessage("Saving changes…");
   };
+  const assignmentChanged = assignee !== (lead.assigneeUserId === null ? "" : String(lead.assigneeUserId));
+  const submitAssignment = (event: FormEvent) => {
+    event.preventDefault();
+    if (!props.isAdmin || !lead.leadId || !assignmentChanged || assignmentReason.trim().length < 3) return;
+    props.onAssign({
+      expectedVersion: lead.assignmentVersion,
+      assigneeUserId: assignee ? Number(assignee) : null,
+      reason: assignmentReason.trim(),
+      requestId: assignmentRequestId.current ??= crypto.randomUUID(),
+    });
+  };
   const deliveryLabel = (status: string) => ({ acknowledged: "Acknowledged", sent: "Sent (acknowledgement not verified)", failed: "Failed", pending: "Pending", untracked: "Not tracked", not_applicable: "Not applicable", sending: "Sending", retrying: "Retrying" }[status] || status);
   const conversationItems = [...detail.conversationHistory.items, ...(conversationHistoryQuery.data?.pages.flatMap((page) => page.items) ?? [])]
     .filter((item, index, rows) => rows.findIndex((candidate) =>
@@ -362,7 +395,7 @@ function LeadDetail(props: {
     .sort((left, right) => new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime()
       || left.conversationId.localeCompare(right.conversationId) || left.side.localeCompare(right.side));
   return <>
-      <div className="crm-detail-top"><div className="crm-detail-toprow"><div><p className="crm-eyebrow">Prospect record · {lead.inquiryCount} {lead.inquiryCount === 1 ? "enquiry" : "enquiries"}</p><h2 className="crm-detail-name" id="crm-detail-title" tabIndex={-1}>{lead.name || "Name not recorded"}</h2><div className="crm-detail-contact">{lead.phone && <a href={`tel:${lead.phone}`}><Phone size={13} /> {lead.phone}</a>}{lead.email && <a href={`mailto:${lead.email}`}><Mail size={13} /> {lead.email}</a>}<span>{lead.ownerName || "Unassigned"}</span></div></div>
+      <div className="crm-detail-top"><div className="crm-detail-toprow"><div><p className="crm-eyebrow">Prospect record · {lead.inquiryCount} {lead.inquiryCount === 1 ? "enquiry" : "enquiries"}</p><h2 className="crm-detail-name" id="crm-detail-title" tabIndex={-1}>{lead.name || "Name not recorded"}</h2><div className="crm-detail-contact">{lead.phone && <a href={`tel:${lead.phone}`}><Phone size={13} /> {lead.phone}</a>}{lead.email && <a href={`mailto:${lead.email}`}><Mail size={13} /> {lead.email}</a>}<span>{props.isAdmin ? lead.assigneeName || "Unassigned" : "Assigned to you"}</span></div></div>
       <div style={{ display: "flex", gap: 7, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "flex-end" }}><span className="crm-identity" data-identity={lead.identityStatus}>{identityText(lead.identityStatus)}</span><span className="crm-stage-source crm-stage-source-detail">{stageOrigin(lead)}</span><button className="crm-icon-button crm-mobile-close" type="button" aria-label="Close prospect detail" onClick={props.onClose}><X size={18} /></button></div>
     </div></div>
     <div className="crm-detail-content">
@@ -370,9 +403,51 @@ function LeadDetail(props: {
       {!props.canWrite && <div className="crm-error" role="alert">Server CRM persistence is unavailable. Editing is disabled to avoid an unrecorded change.</div>}
       <JourneyPanel journey={detail.journey} />
       <MetaAttributionPanel marketing={detail.marketing} />
+      {props.isAdmin && <section className="crm-info crm-field-wide" aria-label="Canonical lead assignment">
+        <strong>Canonical lead assignment</strong>
+        <p style={{ margin: "6px 0 10px" }}>Assignment applies to this canonical lead, not to individual inquiries.</p>
+        {!lead.leadId && <div className="crm-warning" role="status">This record has no canonical admissions lead yet and cannot be assigned.</div>}
+        {lead.assigneeNeedsReassignment && <div className="crm-warning" role="status">The current assignee is inactive or no longer has the admissions role. Reassign or unassign this lead.</div>}
+        {lead.leadId && <form onSubmit={submitAssignment} className="crm-detail-grid">
+          <label className="crm-field">
+            <span className="crm-field-label">Admissions assignee</span>
+            <select className="crm-select" value={assignee} onChange={(event) => setAssignee(event.target.value)} data-testid="crm-assignee">
+              <option value="">Unassigned</option>
+              {lead.assigneeUserId !== null && !props.assignees.some((person) => person.id === lead.assigneeUserId) &&
+                <option value={String(lead.assigneeUserId)} disabled>{lead.assigneeName || `Inactive user #${lead.assigneeUserId}`} · inactive</option>}
+              {props.assignees.map((person) => <option key={person.id} value={String(person.id)}>{person.name}</option>)}
+            </select>
+          </label>
+          <label className="crm-field">
+            <span className="crm-field-label">Assignment reason</span>
+            <input className="crm-input" minLength={3} maxLength={1000} required value={assignmentReason}
+              onChange={(event) => setAssignmentReason(event.target.value)} placeholder="Why this lead is being assigned or changed" />
+          </label>
+          {props.assignmentError && <div className="crm-error crm-field-wide" role="alert">{props.assignmentError}</div>}
+          <div className="crm-field-wide"><button className="crm-button crm-button-primary" type="submit"
+            disabled={!props.capabilities.canonicalAssignments || !assignmentChanged || assignmentReason.trim().length < 3 || props.assignmentPending}
+            data-testid="crm-assignment-save">{props.assignmentPending ? "Saving assignment…" : assignee ? "Save assignment" : "Unassign lead"}</button></div>
+        </form>}
+        {detail.assignmentHistory.length > 0 && <div style={{ marginTop: 12 }}>
+          <strong>Assignment history</strong>
+          <ul className="crm-timeline">{detail.assignmentHistory.map((event) => <li key={event.id}>
+            <span><strong>{event.previousAssigneeName || (event.previousAssigneeUserId ? `User #${event.previousAssigneeUserId}` : "Unassigned")} → {event.newAssigneeName || (event.newAssigneeUserId ? `User #${event.newAssigneeUserId}` : "Unassigned")}</strong> · {event.actorName || `Admin #${event.actorUserId}`}</span>
+            <span>{formatDate(event.changedAt, true)} · {event.reason}</span>
+          </li>)}</ul>
+        </div>}
+        {detail.legacyInquiryAssignments.length > 0 && <div style={{ marginTop: 12 }}>
+          <strong>Legacy inquiry-level owner values · review only</strong>
+          <p style={{ margin: "6px 0" }}>These are retained historical per-inquiry values; they were not copied into canonical assignments.</p>
+          <ul>{detail.legacyInquiryAssignments.map((legacy) => <li key={legacy.inquiryId}>
+            Inquiry #{legacy.inquiryId}: {legacy.ownerName || `User #${legacy.ownerId}`}
+          </li>)}</ul>
+        </div>}
+      </section>}
       <form onSubmit={save}><div className="crm-detail-grid">
-        <label className="crm-field"><span className="crm-field-label">Current stage</span><select className="crm-select" value={stage} onChange={(event) => { setStage(event.target.value as CrmStage); setSaveMessage(""); }} data-testid="crm-stage">{stages.map((item) => <option key={item} value={item} disabled={item === "counselling_booked" && !lead.hasVerifiedCalendarBooking}>{CRM_STAGE_LABELS[item]}{item === "counselling_booked" && !lead.hasVerifiedCalendarBooking ? " · unavailable" : ""}</option>)}</select></label>
-        <label className="crm-field"><span className="crm-field-label">Owner</span><select className="crm-select" value={owner} onChange={(event) => setOwner(event.target.value)} data-testid="crm-owner"><option value="">Unassigned</option>{props.owners.map((person) => <option key={person.id} value={String(person.id)}>{person.name}</option>)}</select></label>
+        <label className="crm-field"><span className="crm-field-label">Current stage</span><select className="crm-select" value={stage} onChange={(event) => { setStage(event.target.value as CrmStage); setSaveMessage(""); }} data-testid="crm-stage">
+          {!selectableStageSet.has(lead.stage) && <option value={lead.stage} disabled>{CRM_STAGE_LABELS[lead.stage]} · system/evidence controlled</option>}
+          {selectableStages.map((item) => <option key={item} value={item} disabled={item === "counselling_booked" && !lead.hasVerifiedCalendarBooking}>{CRM_STAGE_LABELS[item]}{item === "counselling_booked" && !lead.hasVerifiedCalendarBooking ? " · unavailable" : ""}</option>)}
+        </select></label>
         <label className="crm-field"><span className="crm-field-label">Follow-up</span><input className="crm-input" type="datetime-local" value={followUp} onChange={(event) => setFollowUp(event.target.value)} /></label>
         <div className="crm-field"><span className="crm-field-label">Next context</span><div className="crm-info" style={{ margin: 0 }}>Last activity {formatDate(lead.lastActivityAt, true)} · {lead.programs[0] || "Program not recorded"}</div></div>
         {stageChanged && stage === "vsl_shared" && <>
@@ -432,9 +507,9 @@ function LeadDetail(props: {
         {inquiry.counsellingAnswers && <>
           <p><strong>Form delivery:</strong> {deliveryLabel(inquiry.counsellingDeliveryStatus)} · {inquiry.counsellingDeliveryAttempts} attempt{inquiry.counsellingDeliveryAttempts === 1 ? "" : "s"}</p>
           {inquiry.counsellingDeliveryLastResult && <p>Latest recorded result: {inquiry.counsellingDeliveryLastResult}</p>}
-          {inquiry.counsellingDeliveryStatus === "failed" && <button type="button" className="crm-button" style={{ marginTop: 9 }} disabled={props.retryPending} onClick={() => props.onRetry(inquiry.id)}>{props.retryPending && props.retryId === inquiry.id ? "Retrying" : "Review & retry delivery"}</button>}
+          {props.isAdmin && inquiry.counsellingDeliveryStatus === "failed" && <button type="button" className="crm-button" style={{ marginTop: 9 }} disabled={props.retryPending} onClick={() => props.onRetry(inquiry.id)}>{props.retryPending && props.retryId === inquiry.id ? "Retrying" : "Review & retry delivery"}</button>}
           {inquiry.counsellingDeliveryStatus === "untracked" && <p>Delivery was not tracked for this older inquiry. Do not resend an untracked submission.</p>}
-          {props.retryError && props.retryId === inquiry.id && <p role="alert" className="crm-error">{props.retryError}</p>}
+          {props.isAdmin && props.retryError && props.retryId === inquiry.id && <p role="alert" className="crm-error">{props.retryError}</p>}
           <details style={{ marginTop: 10 }}><summary className="crm-text-button" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>View counselling answers <ChevronDown size={13} /></summary><dl className="crm-answers">{Object.entries(inquiry.counsellingAnswers).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => <div key={key}><dt>{counsellingFieldLabels[key] ?? key}</dt><dd>{formatCounsellingAnswer(key, value)}</dd></div>)}</dl></details>
         </>}
       </article>)}

@@ -1,7 +1,7 @@
 import type { Express, RequestHandler } from "express";
 import { z, ZodError } from "zod";
 import { pool } from "../db";
-import { requireLmsRole, requireLmsUser } from "../lms/auth";
+import { requireLmsUser } from "../lms/auth";
 import { sameOriginCapture } from "../admissions/routes";
 import { CRM_STAGES } from "@shared/crm";
 import { CrmError, updateCrmSchema } from "./evidence";
@@ -9,6 +9,8 @@ import { detailCrm, listCrm, readCrmConversationPage } from "./read";
 import { updateCrm } from "./write";
 import { VSL_DISPATCH_ENABLED_ENV, VSL_WEBHOOK_URL_ENV, isTrustedVslWebhookUrl, isVslDispatchEnabled } from "../admissions/outbox-dispatcher";
 import { VSL_WEBHOOK_SECRET_ENV } from "../admissions/follow-up-routes";
+import { crmAccessLevel, recordCrmDeniedAttempt, type CrmPrincipal } from "./authorization";
+import { assignCrmLead, crmAssignmentUpdateSchema } from "./assignment";
 
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>!Number.isNaN(new Date(v).getTime())&&new Date(v).toISOString().slice(0,10)===v);
 const querySchema=z.object({
@@ -16,11 +18,12 @@ const querySchema=z.object({
   stage:z.enum(Object.keys(CRM_STAGES) as [keyof typeof CRM_STAGES,...(keyof typeof CRM_STAGES)[]]).optional(),
   program:z.string().max(200).optional(),source:z.string().max(100).optional(),
   dateFrom:date.optional(),dateTo:date.optional(),followUp:z.enum(["overdue","today","upcoming","none"]).optional(),
-  owner:z.string().regex(/^(unassigned|[1-9]\d*)$/).optional(),
+  assignee:z.string().regex(/^(unassigned|[1-9]\d*)$/).optional(),
   sort:z.enum(["recent","oldest","name","followup"]).default("recent"),
   page:z.coerce.number().int().min(1).max(100000).default(1),pageSize:z.coerce.number().int().min(1).max(100).default(20),
 }).strict().refine(q=>!q.dateFrom||!q.dateTo||q.dateFrom<=q.dateTo,"Start date must not follow end date.");
 const idSchema=z.string().regex(/^(lead:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|inquiry:[1-9]\d*)$/i);
+const canonicalLeadIdSchema=z.string().uuid();
 const conversationQuerySchema=z.object({
   cursor:z.string().max(512).optional(),
   limit:z.coerce.number().int().min(1).max(100).default(50),
@@ -31,7 +34,18 @@ export function registerCrmRoutes(app: Express, dependencies = { db: pool, conne
   app.use("/api/admin/crm", (_req,res,next)=>{
     res.setHeader("Cache-Control","private, no-store, max-age=0");
     res.vary("Cookie"); next();
-  },dependencies.authenticate,requireLmsRole("admin"));
+  },dependencies.authenticate,async(req,res,next)=>{
+    const user=req.lmsUser as CrmPrincipal|undefined;
+    const access=crmAccessLevel(user);
+    if(access!=="denied") return next();
+    await recordCrmDeniedAttempt(dependencies.db,user,"crm_route");
+    return res.status(user?403:401).json({message:"CRM access denied."});
+  });
+  const requireAdmin:RequestHandler=async(req,res,next)=>{
+    if(req.lmsUser?.roles.includes("admin")) return next();
+    await recordCrmDeniedAttempt(dependencies.db,req.lmsUser as CrmPrincipal|undefined,"crm_admin_route");
+    return res.status(req.lmsUser?403:401).json({message:"Administrator access required."});
+  };
   const handle=(fn:RequestHandler):RequestHandler=>async(req,res,next)=>{
     try { await fn(req,res,next); } catch(error) {
       if(error instanceof ZodError) return res.status(400).json({message:"Invalid CRM request. Check the supplied fields."});
@@ -41,19 +55,19 @@ export function registerCrmRoutes(app: Express, dependencies = { db: pool, conne
     }
   };
   app.get("/api/admin/crm/leads",handle(async(req,res)=>{
-    res.json(await listCrm(dependencies.db,querySchema.parse(req.query)));
+    res.json(await listCrm(dependencies.db,querySchema.parse(req.query),req.lmsUser as CrmPrincipal));
   }));
   app.get("/api/admin/crm/leads/:id",handle(async(req,res)=>{
-    res.json(await detailCrm(dependencies.db,idSchema.parse(req.params.id)));
+    res.json(await detailCrm(dependencies.db,idSchema.parse(req.params.id),req.lmsUser as CrmPrincipal));
   }));
   app.get("/api/admin/crm/leads/:id/conversations",handle(async(req,res)=>{
     res.setHeader("Cache-Control","private, no-store, max-age=0");
     const query=conversationQuerySchema.parse(req.query);
     res.json(await readCrmConversationPage(
-      dependencies.db,idSchema.parse(req.params.id),query.cursor,query.limit,
+      dependencies.db,idSchema.parse(req.params.id),query.cursor,query.limit,req.lmsUser as CrmPrincipal,
     ));
   }));
-  app.get("/api/admin/crm/avni-health",handle(async(_req,res)=>{
+  app.get("/api/admin/crm/avni-health",requireAdmin,handle(async(_req,res)=>{
     const {rows:[schema]}=await dependencies.db.query(`SELECT
       to_regclass('admissions_leads') IS NOT NULL AS lead_identity,
       to_regclass('admissions_vsl_playbacks') IS NOT NULL AS playback_sessions,
@@ -84,6 +98,21 @@ export function registerCrmRoutes(app: Express, dependencies = { db: pool, conne
     });
   }));
   app.patch("/api/admin/crm/leads/:id",sameOriginCapture,handle(async(req,res)=>{
-    res.json(await updateCrm(dependencies.connectionPool,idSchema.parse(req.params.id),updateCrmSchema.parse(req.body),req.lmsUser!.id));
+    res.json(await updateCrm(
+      dependencies.connectionPool,
+      idSchema.parse(req.params.id),
+      updateCrmSchema.parse(req.body),
+      req.lmsUser as CrmPrincipal,
+    ));
+  }));
+  app.put("/api/admin/crm/leads/:leadId/assignment",sameOriginCapture,requireAdmin,handle(async(req,res)=>{
+    const leadId=canonicalLeadIdSchema.parse(req.params.leadId);
+    const input=crmAssignmentUpdateSchema.parse(req.body);
+    res.json(await assignCrmLead(
+      dependencies.connectionPool,
+      leadId,
+      input,
+      req.lmsUser as CrmPrincipal,
+    ));
   }));
 }

@@ -8,9 +8,18 @@ export const CRM_STAGES = {
   counselling_attended: "Counselling Attended", enrolled: "Enrolled", nurture: "Nurture", lost: "Lost",
 } as const;
 export type CrmStage = keyof typeof CRM_STAGES;
+export const ADMISSIONS_MANUAL_CRM_STAGES = [
+  "contacted",
+  "qualified",
+  "vsl_shared",
+  "counselling_pending",
+  "nurture",
+  "lost",
+] as const satisfies readonly CrmStage[];
 export type CrmCapabilities = {
   identityTracking: boolean; videoTracking: boolean; crmPersistence: boolean;
   calendarBookingVerification: boolean; chatHistory: boolean;
+  canonicalAssignments: boolean;
   metaAttribution?: boolean;
 };
 export type CrmLead = {
@@ -23,11 +32,12 @@ export type CrmLead = {
   lastActivityAt: string | null; lastVideoMilestone: string | null;
   videoCompleted: boolean; hasVerifiedForm: boolean;
   hasVerifiedCalendarBooking: boolean; verifiedBookingReference: string | null;
-  ownerId: number | null; ownerName: string | null; followUpAt: string | null; version: number;
+  assigneeUserId: number | null; assigneeName: string | null; assigneeNeedsReassignment: boolean;
+  assignmentVersion: number; followUpAt: string | null; version: number;
 };
 export type CrmFilters = {
   q?: string; stage?: string; program?: string; source?: string; dateFrom?: string;
-  dateTo?: string; followUp?: string; owner?: string; sort?: string; page?: number; pageSize?: number;
+  dateTo?: string; followUp?: string; assignee?: string; sort?: string; page?: number; pageSize?: number;
 };
 export type CrmOverview = {
   identifiedPeople: number; unresolvedRecords: number; totalEnquiries: number;
@@ -39,7 +49,7 @@ export type CrmOverview = {
 export type CrmList = {
   items: CrmLead[]; page: number; pageSize: number; total: number; totalPages: number;
   overview: CrmOverview; options: {
-    programs: string[]; sources: string[]; owners: { id: number; name: string }[];
+    programs: string[]; sources: string[]; assignees: { id: number; name: string }[];
   }; capabilities: CrmCapabilities; warnings: string[];
 };
 export type CrmInquiry = {
@@ -61,6 +71,13 @@ export type CrmActivity = {
 export type CrmDetail = {
   lead: CrmLead; inquiries: CrmInquiry[]; journey: LeadJourneySummaryData | null;
   activities: CrmActivity[]; capabilities: CrmCapabilities; warnings: string[];
+  legacyInquiryAssignments: { inquiryId: number; ownerId: number; ownerName: string | null }[];
+  assignmentHistory: {
+    id: string; previousAssigneeUserId: number | null; newAssigneeUserId: number | null;
+    previousAssigneeName: string | null; newAssigneeName: string | null;
+    actorUserId: number; actorName: string | null; changedAt: string; reason: string;
+    source: string; requestId: string; assignmentVersion: number;
+  }[];
   conversationHistory: {
     state: "available" | "not_configured" | "unavailable" | "unlinked";
     items: {
@@ -85,10 +102,17 @@ export type CrmDetail = {
   };
 };
 export type CrmUpdate = {
-  expectedVersion: number; stage?: CrmStage; ownerId?: number | null; followUpAt?: string | null;
+  expectedVersion: number; stage?: CrmStage; followUpAt?: string | null;
   note?: string; reason?: string;
   evidence?: {
     kind: "link_sent" | "tracked_video" | "prospect_confirmation" | "staff_record" | "calendar_booking";
     reference?: string; occurredAt?: string; confirmed?: boolean;
   };
+};
+
+export type CrmAssignmentUpdate = {
+  expectedVersion: number;
+  assigneeUserId: number | null;
+  reason: string;
+  requestId: string;
 };
