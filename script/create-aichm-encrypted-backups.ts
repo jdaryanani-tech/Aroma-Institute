@@ -29,6 +29,10 @@ import {
   type PgDumpDiagnostic,
 } from "../server/db/pg-dump-diagnostic";
 import { selectDumpScopes, selectRestoreBackups } from "../server/db/aichm-backup-restore-policy";
+import {
+  stopConfirmAndRemoveScratchPostgres,
+  type ScratchPostgresState,
+} from "../server/db/aichm-scratch-postgres-cleanup";
 
 const EXPECTED_SOURCE_DATABASE = "neondb";
 const EXPECTED_SUPABASE_DATABASE = "postgres";
@@ -807,13 +811,14 @@ async function restoreAll(
   backups: Array<{ manifest: DumpManifest; manifestPath: string; artifactPath: string }>,
   key: Buffer,
   policyRolesByScope: Record<Scope, string[]>,
-): Promise<Array<{ target: string; errorCode: string }>> {
+): Promise<{
+  failures: Array<{ target: string; errorCode: string }>;
+  scratchRemoved: boolean;
+  scratchPreservedPath?: string;
+}> {
   const scratchRoot = await mkdtemp("/dev/shm/aichm-restore-");
-  await chmod(scratchRoot, 0o700);
   const dataDir = path.join(scratchRoot, "data");
   const socketDir = path.join(scratchRoot, "socket");
-  await mkdir(socketDir, { mode: 0o700 });
-  const port = await chooseLocalPort();
   const localEnv: NodeJS.ProcessEnv = {
     PATH: process.env.PATH,
     HOME: scratchRoot,
@@ -823,6 +828,9 @@ async function restoreAll(
   };
   const failures: Array<{ target: string; errorCode: string }> = [];
   try {
+    await chmod(scratchRoot, 0o700);
+    await mkdir(socketDir, { mode: 0o700 });
+    const port = await chooseLocalPort();
     await runQuiet(
       "initdb",
       ["--pgdata", dataDir, "--username=postgres", "--auth-local=trust", "--auth-host=trust", "--no-instructions"],
@@ -857,15 +865,63 @@ async function restoreAll(
         });
       }
     }
-  } finally {
-    await runQuiet(
-      "pg_ctl",
-      ["--pgdata", dataDir, "--mode=fast", "--wait", "stop"],
-      localEnv,
-    ).catch(() => undefined);
-    await rm(scratchRoot, { recursive: true, force: true });
+  } catch (error) {
+    failures.push({ target: "isolated_restore", errorCode: safeCode(error) });
   }
-  return failures;
+
+  const cleanup = await stopConfirmAndRemoveScratchPostgres({
+    inspectState: () => inspectScratchPostgresState(dataDir, localEnv),
+    stop: async () => {
+      await runQuiet(
+        "pg_ctl",
+        ["--pgdata", dataDir, "--mode=fast", "--wait", "stop"],
+        localEnv,
+      );
+    },
+    removeScratch: async () => {
+      await rm(scratchRoot, { recursive: true, force: true });
+    },
+  });
+  if (!cleanup.ok) {
+    failures.push({ target: "isolated_restore_cleanup", errorCode: cleanup.errorCode });
+    return {
+      failures,
+      scratchRemoved: false,
+      ...(cleanup.scratchPreserved ? { scratchPreservedPath: scratchRoot } : {}),
+    };
+  }
+
+  return { failures, scratchRemoved: true };
+}
+
+async function inspectScratchPostgresState(
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+): Promise<ScratchPostgresState> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (state: ScratchPostgresState) => {
+      if (settled) return;
+      settled = true;
+      resolve(state);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("pg_ctl", ["--pgdata", dataDir, "status"], {
+        env,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch {
+      settle("unknown");
+      return;
+    }
+    child.once("error", () => settle("unknown"));
+    child.once("close", (code) => {
+      if (code === 0) settle("running");
+      else if (code === 3) settle("stopped");
+      else settle("unknown");
+    });
+  });
 }
 
 async function verifyConnectionIdentities(
@@ -936,6 +992,8 @@ async function main(): Promise<void> {
   let backupsToRestore: Array<{ manifest: DumpManifest; manifestPath: string; artifactPath: string }> = [];
   const failures: Array<{ target: string; errorCode: string }> = [];
   const diagnostics: PgDumpDiagnostic[] = [];
+  let scratchRemoved = true;
+  let scratchPreservedPath: string | undefined;
   try {
     await assertOutputProtection();
     if (resumeFailedSteps || resumeSourceBackup || refreshSupabaseBackup || verifySourceRestore) {
@@ -1121,7 +1179,10 @@ async function main(): Promise<void> {
       }
     if (backupsToRestore.length) {
       try {
-        failures.push(...(await restoreAll(backupsToRestore, key, policyRolesByScope)));
+        const restoreResult = await restoreAll(backupsToRestore, key, policyRolesByScope);
+        failures.push(...restoreResult.failures);
+        scratchRemoved = restoreResult.scratchRemoved;
+        scratchPreservedPath = restoreResult.scratchPreservedPath;
       } catch (error) {
         failures.push({ target: "isolated_restore", errorCode: safeCode(error) });
       }
@@ -1139,7 +1200,8 @@ async function main(): Promise<void> {
           newArtifactRetained: false,
           partialCiphertextRemoved: true,
           existingBackupsUnchanged: true,
-          scratchRemoved: true,
+          scratchRemoved,
+          ...(scratchPreservedPath ? { scratchPreservedPath } : {}),
           sourceDatabaseUnchanged: true,
           supabaseDatabaseUnchanged: true,
         }),
@@ -1161,14 +1223,22 @@ async function main(): Promise<void> {
         })),
         failures,
         diagnostics,
-        scratchRemoved: true,
+        scratchRemoved,
+        ...(scratchPreservedPath ? { scratchPreservedPath } : {}),
         sourceSchemaUnchanged: true,
         supabaseSchemaUnchanged: true,
       }),
     );
     if (failures.length > 0 || diagnostics.length > 0) process.exitCode = 2;
   } catch (error) {
-    console.error(JSON.stringify({ status: "stopped", errorCode: safeCode(error) }));
+    console.error(
+      JSON.stringify({
+        status: "stopped",
+        errorCode: safeCode(error),
+        scratchRemoved,
+        ...(scratchPreservedPath ? { scratchPreservedPath } : {}),
+      }),
+    );
     process.exitCode = 2;
   } finally {
     key.fill(0);
