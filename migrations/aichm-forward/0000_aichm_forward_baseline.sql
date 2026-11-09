@@ -1,0 +1,2 @@
+-- AICHM forward-stream baseline marker only.
+-- This migration intentionally makes no application-schema or application-data changes.
