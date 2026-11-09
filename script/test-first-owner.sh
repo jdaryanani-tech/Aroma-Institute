@@ -20,6 +20,9 @@ pg_ctl -D "$test_root/data" -l "$test_root/postgres.log" \
 started=true
 createdb -h "$test_root" -p 55448 -U first_owner_test first_owner_test
 export FIRST_OWNER_TEST_DATABASE_URL="postgresql://first_owner_test@localhost/first_owner_test?host=$test_root&port=55448"
+export AICHM_SCHEMA_CHANGE_INTENT=disposable-test
+export AICHM_DEVELOPMENT_DATABASE_URL="$FIRST_OWNER_TEST_DATABASE_URL"
+export NODE_ENV=test
 export FIRST_OWNER_TEST_DB_APPROVAL=SOCKET_ONLY_DISPOSABLE_DATABASE
 export DATABASE_URL="$FIRST_OWNER_TEST_DATABASE_URL"
 npm run db:push -- --force

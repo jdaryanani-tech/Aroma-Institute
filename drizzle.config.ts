@@ -1,14 +1,11 @@
 import { defineConfig } from "drizzle-kit";
+import { buildGuardedDrizzleConfigUrl } from "./server/db/legacy-schema-change-guard";
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL, ensure the database is provisioned");
-}
+const url = buildGuardedDrizzleConfigUrl(process.env);
 
 export default defineConfig({
   out: "./migrations",
   schema: ["./shared/schema.ts", "./shared/lms-schema.ts", "./shared/calendar-schema.ts"],
   dialect: "postgresql",
-  dbCredentials: {
-    url: process.env.DATABASE_URL,
-  },
+  dbCredentials: { url },
 });

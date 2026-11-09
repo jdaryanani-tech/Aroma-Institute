@@ -37,6 +37,9 @@ cluster_started=true
 createdb -h "$test_root" -p 55446 -U admin_session_test admin_session_test
 
 export LMS_AUTH_TEST_DATABASE_URL="postgresql://admin_session_test@localhost/admin_session_test?host=$test_root&port=55446"
+export AICHM_SCHEMA_CHANGE_INTENT=disposable-test
+export AICHM_DEVELOPMENT_DATABASE_URL="$LMS_AUTH_TEST_DATABASE_URL"
+export NODE_ENV=test
 export LMS_AUTH_TEST_DB_WRITE_APPROVED=I_ACKNOWLEDGE_THIS_IS_A_NONPRODUCTION_DATABASE
 DATABASE_URL="$LMS_AUTH_TEST_DATABASE_URL" npm run db:push -- --force
 npm run build
