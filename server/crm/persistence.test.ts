@@ -9,7 +9,7 @@ import { once } from "node:events";
 import { listCrm, detailCrm } from "./read";
 import { updateCrm } from "./write";
 import { assignCrmLead } from "./assignment";
-import { validateLegacySchemaChangeTarget } from "../db/legacy-schema-change-guard";
+import { validateCrmPersistenceTestTarget } from "./persistence-test-target";
 
 const adminPrincipal = { id: 1, roles: ["admin"] as const };
 const secondAdminPrincipal = { id: 2, roles: ["admin"] as const };
@@ -18,9 +18,14 @@ const admissionsPrincipal = { id: 4, roles: ["admissions"] as const };
 const secondAdmissionsPrincipal = { id: 6, roles: ["admissions"] as const };
 
 test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, evidence, pagination, guards and degraded schema",
-  { skip:process.env.CRM_TEST_DB_WRITE_APPROVED!=="TEMPORARY_DEVELOPMENT_SCHEMA_ONLY" || process.env.NODE_ENV!=="test" },
+  {
+    skip: process.env.CRM_TEST_DB_WRITE_APPROVED !== "TEMPORARY_DEVELOPMENT_SCHEMA_ONLY"
+      || process.env.NODE_ENV !== "test"
+      || !process.env.AICHM_DEVELOPMENT_DATABASE_URL
+      || !process.env.CRM_TEST_DATABASE_NAME,
+  },
   async()=>{
-     const target=validateLegacySchemaChangeTarget(process.env);
+     const target=validateCrmPersistenceTestTarget(process.env);
      assert.equal(target.intent,"disposable-test");
      const root=new Pool({connectionString:target.url,max:2});
     const namespace=`crm_test_${randomUUID().replaceAll("-","")}`;
@@ -48,12 +53,16 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       const assignments=(await readFile("migrations/0014_crm_canonical_assignments.sql","utf8"))
         .replaceAll('"public".',"").replaceAll("public.","")
         .replace("SET search_path = pg_catalog, public",`SET search_path = pg_catalog, "${namespace}"`);
+       const assignmentGuards=(await readFile("migrations/0015_crm_assignment_audit_invariants.sql","utf8"))
+         .replaceAll('"public".',"").replaceAll("public.","")
+         .replace("SET search_path = pg_catalog, public",`SET search_path = pg_catalog, "${namespace}"`);
       for(let i=0;i<2;i++) {await db.query(stage1);await db.query(crm);}
       await db.query(`CREATE TABLE counselling_delivery_attempts(
         id integer PRIMARY KEY,inquiry_id integer,attempt_number integer,attempted_at timestamptz,
         response_at timestamptz,http_status integer,delivery_state text,error_summary text)`);
       const {rows:[l]}=await db.query("INSERT INTO admissions_leads(canonical_phone,name,registered_at,entry_source) VALUES('919000000011','Linked Person',now(),'vsl_registration') RETURNING id");
       await db.query(assignments);
+       await db.query(assignmentGuards);
       await db.query(`INSERT INTO inquiries(name,email,phone,program_interest,lead_id,counselling_answers,counselling_submitted_at) VALUES
         ('Linked Person','','9000000011','Barista',$1,NULL,NULL),
         ('Linked Person','synthetic@example.invalid','+91 90000 00011','Barista',$1,'{\"synthetic\":\"preserved\"}',now()),
@@ -76,6 +85,13 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       const {rows:[unassignedLead]}=await db.query(
         "INSERT INTO admissions_leads(canonical_phone,name,entry_source) VALUES('919000000055','Unassigned Person','website') RETURNING id",
       );
+       await assert.rejects(
+         db.query(
+           "INSERT INTO admissions_lead_assignments(lead_id,assignee_user_id,assigned_by,version) VALUES($1,4,1,1)",
+           [unassignedLead.id],
+         ),
+         /requires a matching history event/,
+       );
       await db.query(`INSERT INTO inquiries(name,email,phone,program_interest,lead_id) VALUES
         ('Other Assigned Person','','9000000044','Other',$1),
         ('Unassigned Person','','9000000055','Other',$2)`,[otherLead.id,unassignedLead.id]);
@@ -98,6 +114,13 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
         expectedVersion:0,assigneeUserId:4,reason:"Assign for follow-up",requestId,
       },adminPrincipal);
       assert.equal(firstAssignment.version,1);assert.equal(firstAssignment.replayed,false);
+       await assert.rejects(db.query(
+         `INSERT INTO admissions_lead_assignment_history(
+            lead_id,previous_assignee_user_id,new_assignee_user_id,actor_user_id,
+            reason,source,request_id,assignment_version
+          ) VALUES($1,NULL,4,3,'Invalid history actor','admin_ui',$2,1)`,
+         [l.id,randomUUID()],
+       ),/active administrator/);
       const replayed=await assignCrmLead(db,l.id,{
         expectedVersion:0,assigneeUserId:4,reason:"Assign for follow-up",requestId,
       },adminPrincipal);
@@ -105,6 +128,43 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       await assert.rejects(assignCrmLead(db,l.id,{
         expectedVersion:0,assigneeUserId:6,reason:"Different intent",requestId,
       },adminPrincipal),/already used for a different assignment/);
+       await assert.rejects(
+         db.query("UPDATE admissions_lead_assignments SET assignee_user_id=6 WHERE lead_id=$1",[l.id]),
+         /version must increase by exactly one/,
+       );
+       await assert.rejects(
+         db.query("UPDATE admissions_lead_assignments SET assignee_user_id=6,version=version+1 WHERE lead_id=$1",[l.id]),
+         /requires a matching history event/,
+       );
+       await db.query("BEGIN");
+       await db.query(
+         "UPDATE admissions_lead_assignments SET assignee_user_id=6,assigned_by=1,version=version+1 WHERE lead_id=$1",
+         [l.id],
+       );
+       await assert.rejects(db.query(
+         `INSERT INTO admissions_lead_assignment_history(
+            lead_id,previous_assignee_user_id,new_assignee_user_id,actor_user_id,
+            reason,source,request_id,assignment_version
+          ) VALUES($1,999,6,1,'Mismatched previous assignee','admin_ui',$2,2)`,
+         [l.id,randomUUID()],
+       ),/must continue the prior assignment version/);
+       await db.query("ROLLBACK");
+       await assert.rejects(
+         db.query("UPDATE admissions_lead_assignments SET assignee_user_id=6,assigned_by=3,version=version+1 WHERE lead_id=$1",[l.id]),
+         /active administrator/,
+       );
+       await assert.rejects(
+         db.query("INSERT INTO admissions_lead_assignments(lead_id,assignee_user_id,assigned_by,version) VALUES($1,2,1,1)",[otherLead.id]),
+         /active admissions user/,
+       );
+       await assert.rejects(
+         db.query("DELETE FROM admissions_lead_assignments WHERE lead_id=$1",[l.id]),
+         /cannot be deleted/,
+       );
+       await assert.rejects(
+         db.query("TRUNCATE admissions_lead_assignments"),
+         /cannot be deleted or truncated/,
+       );
       assert.equal((await listCrm(db,{},admissionsPrincipal)).total,1);
       assert.equal((await listCrm(db,{q:"Linked Person"},admissionsPrincipal)).items.length,1);
       await assert.rejects(listCrm(db,{assignee:"6"},admissionsPrincipal),/cannot query another assignee/);
@@ -137,6 +197,15 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
         expectedVersion:1,assigneeUserId:6,reason:"Reassign to second admissions user",requestId:randomUUID(),
       },adminPrincipal);
       assert.equal(secondReassignment.version,2);
+       const unassignment=await assignCrmLead(db,l.id,{
+         expectedVersion:2,assigneeUserId:null,reason:"Close the assignment",requestId:randomUUID(),
+       },adminPrincipal);
+       assert.equal(unassignment.version,3);
+       assert.equal(unassignment.assigneeUserId,null);
+       const reassignmentAfterUnassign=await assignCrmLead(db,l.id,{
+         expectedVersion:3,assigneeUserId:6,reason:"Return to admissions queue",requestId:randomUUID(),
+       },adminPrincipal);
+       assert.equal(reassignmentAfterUnassign.version,4);
       assert.equal((await listCrm(db,{},admissionsPrincipal)).total,0);
       assert.equal((await listCrm(db,{},secondAdmissionsPrincipal)).total,2);
       await assert.rejects(db.query("UPDATE admissions_lead_assignment_history SET reason='tampered' WHERE request_id=$1",[requestId]),/append-only/);
@@ -243,11 +312,11 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       assert.equal((await fetch(origin+"/api/admin/crm/avni-health",{headers:{"x-test-role":"admin"}})).status,200);
       assert.equal((await fetch(origin+"/api/admin/crm/leads?pageSize=999",{headers:{"x-test-role":"admin"}})).status,400);
       const assignmentRace=await Promise.allSettled([
-        assignCrmLead(db,l.id,{expectedVersion:2,assigneeUserId:4,reason:"Concurrent reassign A",requestId:randomUUID()},adminPrincipal),
-        assignCrmLead(db,l.id,{expectedVersion:2,assigneeUserId:null,reason:"Concurrent reassign B",requestId:randomUUID()},adminPrincipal),
+        assignCrmLead(db,l.id,{expectedVersion:4,assigneeUserId:4,reason:"Concurrent reassign A",requestId:randomUUID()},adminPrincipal),
+        assignCrmLead(db,l.id,{expectedVersion:4,assigneeUserId:null,reason:"Concurrent reassign B",requestId:randomUUID()},adminPrincipal),
       ]);
       assert.equal(assignmentRace.filter(result=>result.status==="fulfilled").length,1);
-      assert.equal((await db.query("SELECT version FROM admissions_lead_assignments WHERE lead_id=$1",[l.id])).rows[0].version,3);
+      assert.equal((await db.query("SELECT version FROM admissions_lead_assignments WHERE lead_id=$1",[l.id])).rows[0].version,5);
       await db.query("DROP TABLE admissions_crm_profiles,admissions_crm_activities");
       assert.equal((await listCrm(db,{},adminPrincipal)).capabilities.crmPersistence,false);
       await assert.rejects(updateCrm(db,`lead:${l.id}`,{expectedVersion:0,note:"no schema"},adminPrincipal),/migration is pending/);
