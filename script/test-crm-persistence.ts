@@ -3,11 +3,12 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import net from "node:net";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 import { stopConfirmAndRemoveScratchPostgres, type ScratchPostgresState } from "../server/db/aichm-scratch-postgres-cleanup";
 
 type ToolResult = { code: number; stdout: string };
-type ScratchProof = {
+export type ScratchProof = {
   version: 1;
   instanceId: string;
   databaseName: string;
@@ -16,6 +17,23 @@ type ScratchProof = {
   systemIdentifier: string;
   postmasterPid: number;
 };
+type ScratchServerIdentity = {
+  database_name: string;
+  database_user: string;
+  data_directory: string;
+  host: string | null;
+  port: number;
+  system_identifier: string;
+  in_recovery: boolean;
+};
+
+export type ScratchIdentityMismatch = {
+  field: string;
+  expected: string | number | boolean;
+  observed: string | number | boolean;
+};
+
+const IDENTITY_MISMATCH_CODE = "CRM_TEST_SCRATCH_IDENTITY_MISMATCH";
 
 const activeChildren = new Set<ChildProcess>();
 let terminationSignal: NodeJS.Signals | undefined;
@@ -145,37 +163,141 @@ function parseSystemIdentifier(output: string): string {
   return match[1];
 }
 
+function safeIdentityValue(field: string, value: unknown): string | number | boolean {
+  if (field === "dataDirectory") {
+    return typeof value === "string" ? value : "<unavailable>";
+  }
+  if (field === "port") {
+    return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535
+      ? value
+      : "<invalid-port>";
+  }
+  if (field === "recoveryState") {
+    return typeof value === "boolean" ? value : "<invalid-boolean>";
+  }
+  if (typeof value !== "string") return "<unavailable>";
+  const allowed = field === "serverAddress"
+    ? /^[0-9a-fA-F:.]{1,64}$/
+    : field === "systemIdentifier"
+      ? /^\d{1,32}$/
+      : /^[A-Za-z0-9_-]{1,80}$/;
+  return allowed.test(value) ? value : "<invalid-value>";
+}
+
+function safeScratchPath(value: string | undefined, scratchRoot: string): string {
+  if (!value) return "<unavailable>";
+  const resolved = path.resolve(value);
+  const relative = path.relative(scratchRoot, resolved);
+  if (!relative) return "<scratch-root>";
+  if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+    if (relative === "data" || relative === "socket") return `<scratch-root>/${relative}`;
+    return "<scratch-root>/<other-path>";
+  }
+  return "<outside-scratch>";
+}
+
+export function buildScratchIdentityMismatchDiagnostic(
+  proof: ScratchProof,
+  identity: ScratchServerIdentity | undefined,
+  resolvedObservedDataDirectory: string | undefined,
+): { status: "failed"; code: typeof IDENTITY_MISMATCH_CODE; mismatches: ScratchIdentityMismatch[] } {
+  const scratchRoot = path.dirname(proof.dataDirectory);
+  const checks: Array<{
+    field: string;
+    expected: unknown;
+    observed: unknown;
+    matches: boolean;
+  }> = [
+    {
+      field: "databaseName",
+      expected: proof.databaseName,
+      observed: identity?.database_name,
+      matches: identity?.database_name === proof.databaseName,
+    },
+    {
+      field: "databaseUser",
+      expected: "postgres",
+      observed: identity?.database_user,
+      matches: identity?.database_user === "postgres",
+    },
+    {
+      field: "dataDirectory",
+      expected: proof.dataDirectory,
+      observed: resolvedObservedDataDirectory,
+      matches: resolvedObservedDataDirectory === proof.dataDirectory,
+    },
+    {
+      field: "serverAddress",
+      expected: "127.0.0.1",
+      observed: identity?.host,
+      matches: identity?.host === "127.0.0.1",
+    },
+    {
+      field: "port",
+      expected: proof.port,
+      observed: identity?.port,
+      matches: identity?.port === proof.port,
+    },
+    {
+      field: "systemIdentifier",
+      expected: proof.systemIdentifier,
+      observed: identity?.system_identifier,
+      matches: identity?.system_identifier === proof.systemIdentifier,
+    },
+    {
+      field: "recoveryState",
+      expected: false,
+      observed: identity?.in_recovery,
+      matches: identity?.in_recovery === false,
+    },
+  ];
+
+  return {
+    status: "failed",
+    code: IDENTITY_MISMATCH_CODE,
+    mismatches: checks
+      .filter(check => !check.matches)
+      .map(check => ({
+        field: check.field,
+        expected: check.field === "dataDirectory"
+          ? safeScratchPath(check.expected as string, scratchRoot)
+          : safeIdentityValue(check.field, check.expected),
+        observed: check.field === "dataDirectory"
+          ? safeScratchPath(check.observed as string | undefined, scratchRoot)
+          : safeIdentityValue(check.field, check.observed),
+      })),
+  };
+}
+
 async function verifyScratchIdentity(
   connectionString: string,
   proof: ScratchProof,
 ): Promise<void> {
   const pool = new Pool({ connectionString, ssl: false, max: 1, connectionTimeoutMillis: 5_000 });
   try {
-    const { rows: [identity] } = await pool.query<{
-      database_name: string;
-      database_user: string;
-      data_directory: string;
-      host: string | null;
-      port: number;
-      system_identifier: string;
-      in_recovery: boolean;
-    }>(`
+    const { rows: [identity] } = await pool.query<ScratchServerIdentity>(`
       SELECT current_database() AS database_name,current_user AS database_user,
         current_setting('data_directory') AS data_directory,inet_server_addr()::text AS host,
         inet_server_port() AS port,(pg_control_system()).system_identifier::text AS system_identifier,
         pg_is_in_recovery() AS in_recovery
     `);
-    if (
-      !identity ||
-      identity.database_name !== proof.databaseName ||
-      identity.database_user !== "postgres" ||
-      (await realpath(identity.data_directory)) !== proof.dataDirectory ||
-      identity.host !== "127.0.0.1" ||
-      identity.port !== proof.port ||
-      identity.system_identifier !== proof.systemIdentifier ||
-      identity.in_recovery
-    ) {
-      throw new Error("CRM_TEST_SCRATCH_IDENTITY_MISMATCH");
+    let resolvedObservedDataDirectory: string | undefined;
+    if (identity) {
+      try {
+        resolvedObservedDataDirectory = await realpath(identity.data_directory);
+      } catch {
+        // Preserve the failure as an unavailable path value without logging the raw path.
+      }
+    }
+    const diagnostic = buildScratchIdentityMismatchDiagnostic(
+      proof,
+      identity,
+      resolvedObservedDataDirectory,
+    );
+    if (diagnostic.mismatches.length > 0) {
+      // Emit before throwing so this survives the finally-path scratch cleanup.
+      console.error(JSON.stringify(diagnostic));
+      throw new Error(IDENTITY_MISMATCH_CODE);
     }
   } finally {
     await pool.end();
@@ -349,10 +471,13 @@ async function main(): Promise<void> {
   }
 }
 
-void main().catch((error: unknown) => {
-  const code = error instanceof Error && /^CRM_TEST_[A-Z0-9_]+$/.test(error.message)
-    ? error.message
-    : "CRM_TEST_ISOLATED_RUN_FAILED";
-  console.error(JSON.stringify({ status: "failed", code }));
-  process.exitCode = 1;
-});
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : undefined;
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  void main().catch((error: unknown) => {
+    const code = error instanceof Error && /^CRM_TEST_[A-Z0-9_]+$/.test(error.message)
+      ? error.message
+      : "CRM_TEST_ISOLATED_RUN_FAILED";
+    console.error(JSON.stringify({ status: "failed", code }));
+    process.exitCode = 1;
+  });
+}
