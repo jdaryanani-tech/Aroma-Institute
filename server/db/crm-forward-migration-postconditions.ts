@@ -42,6 +42,49 @@ type ConstraintSpec = {
   check?: "assignment_version" | "history_reason" | "history_source" | "history_version" | "history_changed";
 };
 
+export type CrmConstraintCatalogRow = {
+  name: string;
+  table_name: string;
+  type: string;
+  columns: string[];
+  ref_schema: string | null;
+  ref_table: string | null;
+  ref_columns: string[] | null;
+  delete_action: string;
+  update_action: string;
+  match_type: string;
+  validated: boolean;
+  deferrable: boolean;
+  initially_deferred: boolean;
+  check_expression: string | null;
+};
+
+export type CrmConstraintDiagnosticView = {
+  name: string;
+  table: string;
+  type: string;
+  typeCode: string;
+  columns: string[];
+  referencedSchema: string | null;
+  referencedTable: string | null;
+  referencedColumns: string[] | null;
+  onDelete: string | null;
+  onUpdate: string | null;
+  match: string | null;
+  validated: boolean | null;
+  deferrable: boolean | null;
+  initiallyDeferred: boolean | null;
+  checkExpression: string | null;
+};
+
+export type CrmConstraintComparisonDiagnostic = {
+  expectedCount: number;
+  actualCount: number;
+  expected: CrmConstraintDiagnosticView[];
+  actual: CrmConstraintDiagnosticView[];
+  mismatches: Array<{ constraint: string; fields: string[] }>;
+};
+
 const EXPECTED_CONSTRAINTS: Record<string, ConstraintSpec> = {
   admissions_lead_assignments_pkey: {
     table: "admissions_lead_assignments", type: "p", columns: ["lead_id"],
@@ -193,6 +236,183 @@ function checkMatches(kind: NonNullable<ConstraintSpec["check"]>, expression: st
   }
 }
 
+const CHECK_EXPRESSIONS: Record<NonNullable<ConstraintSpec["check"]>, string> = {
+  assignment_version: "version > 0",
+  history_reason: "length(btrim(reason)) >= 3 AND length(btrim(reason)) <= 1000",
+  history_source: "source = 'admin_ui'",
+  history_version: "assignment_version > 0",
+  history_changed: "previous_assignee_user_id IS DISTINCT FROM new_assignee_user_id",
+};
+
+const CONSTRAINT_TYPE_LABELS: Record<string, string> = {
+  p: "PRIMARY KEY",
+  u: "UNIQUE",
+  f: "FOREIGN KEY",
+  c: "CHECK",
+};
+
+const REFERENTIAL_ACTION_LABELS: Record<string, string> = {
+  a: "NO ACTION",
+  r: "RESTRICT",
+  c: "CASCADE",
+  n: "SET NULL",
+  d: "SET DEFAULT",
+};
+
+const MATCH_TYPE_LABELS: Record<string, string> = {
+  s: "SIMPLE",
+  f: "FULL",
+  p: "PARTIAL",
+};
+
+const SAFE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
+const SAFE_CHECK_EXPRESSION = /^[A-Za-z0-9_ '"().,<>!=:+-]{1,512}$/;
+
+function safeCatalogIdentifier(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return SAFE_IDENTIFIER.test(value) ? value : "<invalid-identifier>";
+}
+
+function safeCatalogIdentifierArray(value: string[] | null | undefined): string[] | null {
+  if (value === null || value === undefined) return null;
+  return value.map(item => safeCatalogIdentifier(item) ?? "<invalid-identifier>");
+}
+
+function safeCheckExpression(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return SAFE_CHECK_EXPRESSION.test(normalized) ? normalized : "<redacted-expression>";
+}
+
+function actionLabel(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return REFERENTIAL_ACTION_LABELS[value] ?? "<unknown-action>";
+}
+
+function matchTypeLabel(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return MATCH_TYPE_LABELS[value] ?? "<unknown-match>";
+}
+
+function expectedConstraintView(
+  name: string,
+  spec: ConstraintSpec,
+  schema: string,
+): CrmConstraintDiagnosticView {
+  return {
+    name,
+    table: spec.table,
+    type: CONSTRAINT_TYPE_LABELS[spec.type] ?? "UNKNOWN",
+    typeCode: spec.type,
+    columns: [...spec.columns],
+    referencedSchema: spec.type === "f" ? schema : null,
+    referencedTable: spec.refTable ?? null,
+    referencedColumns: spec.refColumns ? [...spec.refColumns] : null,
+    onDelete: actionLabel(spec.deleteAction),
+    onUpdate: actionLabel(spec.updateAction),
+    match: spec.type === "f" ? "SIMPLE" : null,
+    validated: true,
+    deferrable: false,
+    initiallyDeferred: false,
+    checkExpression: spec.check ? CHECK_EXPRESSIONS[spec.check] : null,
+  };
+}
+
+function actualConstraintView(row: CrmConstraintCatalogRow): CrmConstraintDiagnosticView {
+  return {
+    name: safeCatalogIdentifier(row.name) ?? "<invalid-identifier>",
+    table: safeCatalogIdentifier(row.table_name) ?? "<invalid-identifier>",
+    type: CONSTRAINT_TYPE_LABELS[row.type] ?? "UNKNOWN",
+    typeCode: /^[pufc]$/.test(row.type) ? row.type : "<unknown-type>",
+    columns: safeCatalogIdentifierArray(row.columns) ?? [],
+    referencedSchema: safeCatalogIdentifier(row.ref_schema),
+    referencedTable: safeCatalogIdentifier(row.ref_table),
+    referencedColumns: safeCatalogIdentifierArray(row.ref_columns),
+    onDelete: actionLabel(row.delete_action),
+    onUpdate: actionLabel(row.update_action),
+    match: matchTypeLabel(row.match_type),
+    validated: typeof row.validated === "boolean" ? row.validated : null,
+    deferrable: typeof row.deferrable === "boolean" ? row.deferrable : null,
+    initiallyDeferred: typeof row.initially_deferred === "boolean" ? row.initially_deferred : null,
+    checkExpression: safeCheckExpression(row.check_expression),
+  };
+}
+
+export function buildCrmConstraintComparisonDiagnostic(
+  schema: string,
+  rows: readonly CrmConstraintCatalogRow[],
+): CrmConstraintComparisonDiagnostic {
+  const expectedEntries = Object.entries(EXPECTED_CONSTRAINTS);
+  const expected = expectedEntries.map(([name, spec]) => expectedConstraintView(name, spec, schema));
+  const actual = rows.map(actualConstraintView).sort((left, right) =>
+    left.table.localeCompare(right.table) || left.name.localeCompare(right.name));
+  const mismatches: CrmConstraintComparisonDiagnostic["mismatches"] = [];
+
+  if (rows.length !== expectedEntries.length) {
+    mismatches.push({
+      constraint: "<constraint-set>",
+      fields: ["count"],
+    });
+  }
+
+  for (const [name, spec] of expectedEntries) {
+    const matchingRows = rows.filter(row => row.name === name);
+    if (matchingRows.length === 0) {
+      mismatches.push({ constraint: name, fields: ["missing"] });
+      continue;
+    }
+    if (matchingRows.length > 1) {
+      mismatches.push({ constraint: name, fields: ["duplicateName"] });
+      continue;
+    }
+
+    const row = matchingRows[0]!;
+    const fields: string[] = [];
+    if (row.table_name !== spec.table) fields.push("table");
+    if (row.type !== spec.type) fields.push("type");
+    if (JSON.stringify(row.columns) !== JSON.stringify(spec.columns)) fields.push("columns");
+    if (!row.validated) fields.push("validated");
+    if (row.deferrable) fields.push("deferrable");
+    if (row.initially_deferred) fields.push("initiallyDeferred");
+    if (spec.type === "f") {
+      if (row.ref_schema !== schema) fields.push("referencedSchema");
+      if (row.ref_table !== spec.refTable) fields.push("referencedTable");
+      if (JSON.stringify(row.ref_columns) !== JSON.stringify(spec.refColumns)) fields.push("referencedColumns");
+      if (row.delete_action !== spec.deleteAction) fields.push("onDelete");
+      if (row.update_action !== spec.updateAction) fields.push("onUpdate");
+      if (row.match_type !== "s") fields.push("match");
+    } else if (spec.check && !checkMatches(spec.check, row.check_expression)) {
+      fields.push("checkExpression");
+    }
+    if (fields.length) mismatches.push({ constraint: name, fields });
+  }
+
+  const expectedNames = new Set(expectedEntries.map(([name]) => name));
+  for (const row of rows) {
+    if (!expectedNames.has(row.name)) {
+      mismatches.push({
+        constraint: safeCatalogIdentifier(row.name) ?? "<invalid-identifier>",
+        fields: ["unexpected"],
+      });
+    }
+  }
+
+  return {
+    expectedCount: expected.length,
+    actualCount: rows.length,
+    expected,
+    actual,
+    mismatches,
+  };
+}
+
+function failWithConstraintDiagnostic(
+  code: string,
+  diagnostic: CrmConstraintComparisonDiagnostic,
+): never {
+  throw new Error(`${code} ${JSON.stringify(diagnostic)}`);
+}
+
 function extractFunctionSources(sql: string): Map<string, string> {
   const sources = new Map<string, string>();
   const pattern = /CREATE OR REPLACE FUNCTION\s+(?:(?:public)\.)?([a-z0-9_]+)\s*\(\s*\)\s*RETURNS\s+trigger\b[\s\S]*?\bAS\s+\$\$(.*?)\$\$;/gi;
@@ -252,12 +472,7 @@ export async function assertCrmAssignmentSchemaPostconditions(
     ) fail("CRM_SCHEMA_POSTCONDITION_COLUMNS_DRIFTED");
   }
 
-  const { rows: constraintRows } = await client.query<{
-    name: string; table_name: string; type: string; columns: string[];
-    ref_schema: string | null; ref_table: string | null; ref_columns: string[] | null;
-    delete_action: string; update_action: string; match_type: string;
-    validated: boolean; deferrable: boolean; initially_deferred: boolean; check_expression: string | null;
-  }>(`
+  const { rows: constraintRows } = await client.query<CrmConstraintCatalogRow>(`
     SELECT k.conname AS name,t.relname AS table_name,k.contype AS type,
       ARRAY(SELECT a.attname FROM unnest(k.conkey) WITH ORDINALITY x(attnum,ord)
         JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=x.attnum ORDER BY x.ord) AS columns,
@@ -276,8 +491,9 @@ export async function assertCrmAssignmentSchemaPostconditions(
     WHERE n.nspname=$1 AND t.relname=ANY($2::text[])
     ORDER BY t.relname,k.conname
   `, [schema, ASSIGNMENT_TABLES]);
+  const constraintDiagnostic = buildCrmConstraintComparisonDiagnostic(schema, constraintRows);
   if (constraintRows.length !== Object.keys(EXPECTED_CONSTRAINTS).length) {
-    fail("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED");
+    failWithConstraintDiagnostic("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED", constraintDiagnostic);
   }
   for (const row of constraintRows) {
     const expected = EXPECTED_CONSTRAINTS[row.name];
@@ -285,7 +501,7 @@ export async function assertCrmAssignmentSchemaPostconditions(
       !expected || row.table_name !== expected.table || row.type !== expected.type ||
       JSON.stringify(row.columns) !== JSON.stringify(expected.columns) ||
       !row.validated || row.deferrable || row.initially_deferred
-    ) fail("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED");
+    ) failWithConstraintDiagnostic("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED", constraintDiagnostic);
     if (expected.type === "f") {
       if (
         row.ref_schema !== schema ||
@@ -294,9 +510,9 @@ export async function assertCrmAssignmentSchemaPostconditions(
         row.delete_action !== expected.deleteAction ||
         row.update_action !== expected.updateAction ||
         row.match_type !== "s"
-      ) fail("CRM_SCHEMA_POSTCONDITION_FOREIGN_KEYS_DRIFTED");
+      ) failWithConstraintDiagnostic("CRM_SCHEMA_POSTCONDITION_FOREIGN_KEYS_DRIFTED", constraintDiagnostic);
     } else if (expected.check && !checkMatches(expected.check, row.check_expression)) {
-      fail("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED");
+      failWithConstraintDiagnostic("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED", constraintDiagnostic);
     }
   }
 
