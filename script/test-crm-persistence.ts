@@ -314,7 +314,7 @@ async function verifyScratchIdentity(
   try {
     const { rows: [identity] } = await pool.query<ScratchServerIdentity>(`
       SELECT current_database() AS database_name,current_user AS database_user,
-        current_setting('data_directory') AS data_directory,inet_server_addr()::text AS host,
+        current_setting('data_directory') AS data_directory,host(inet_server_addr()) AS host,
         inet_server_port() AS port,(pg_control_system()).system_identifier::text AS system_identifier,
         pg_is_in_recovery() AS in_recovery
     `);

@@ -28,8 +28,10 @@ const matchingIdentity = {
   in_recovery: false,
 };
 
+type TestIdentity = Omit<typeof matchingIdentity, "host"> & { host: string | null };
+
 function diagnostic(
-  identity: typeof matchingIdentity,
+  identity: TestIdentity,
   resolvedDirectory = proof.dataDirectory,
 ) {
   return buildScratchIdentityMismatchDiagnostic(proof, identity, resolvedDirectory);
@@ -41,6 +43,8 @@ test("the live identity gate rejects each mismatch and prevents the test child f
     ["databaseUser", { ...matchingIdentity, database_user: "other_user" }, proof.dataDirectory],
     ["dataDirectory", matchingIdentity, `${scratchRoot}/other-data`],
     ["serverAddress", { ...matchingIdentity, host: "::1" }, proof.dataDirectory],
+    ["serverAddress", { ...matchingIdentity, host: "127.0.0.2" }, proof.dataDirectory],
+    ["serverAddress", { ...matchingIdentity, host: null }, proof.dataDirectory],
     ["port", { ...matchingIdentity, port: proof.port + 1 }, proof.dataDirectory],
     ["systemIdentifier", { ...matchingIdentity, system_identifier: "1234" }, proof.dataDirectory],
     ["recoveryState", { ...matchingIdentity, in_recovery: true }, proof.dataDirectory],
@@ -72,6 +76,9 @@ test("the live identity gate rejects each mismatch and prevents the test child f
     const result = JSON.parse(emitted[0]) as ReturnType<typeof diagnostic>;
     assert.equal(result.code, "CRM_TEST_SCRATCH_IDENTITY_MISMATCH");
     assert.deepEqual(result.mismatches.map(mismatch => mismatch.field), [field]);
+    if (identity.host === null) {
+      assert.equal(result.mismatches[0]?.observed, "<unavailable>");
+    }
   }
 });
 
