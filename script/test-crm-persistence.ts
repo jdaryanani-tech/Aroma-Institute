@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { Pool } from "pg";
 import { stopConfirmAndRemoveScratchPostgres, type ScratchPostgresState } from "../server/db/aichm-scratch-postgres-cleanup";
 
@@ -17,13 +17,40 @@ type ScratchProof = {
   postmasterPid: number;
 };
 
+const activeChildren = new Set<ChildProcess>();
+let terminationSignal: NodeJS.Signals | undefined;
+let escalationTimer: NodeJS.Timeout | undefined;
+
+function onTermination(signal: NodeJS.Signals): void {
+  if (terminationSignal) {
+    for (const child of activeChildren) child.kill("SIGKILL");
+    return;
+  }
+  terminationSignal = signal;
+  for (const child of activeChildren) child.kill("SIGTERM");
+  escalationTimer = setTimeout(() => {
+    for (const child of activeChildren) child.kill("SIGKILL");
+  }, 2_000);
+  escalationTimer.unref();
+}
+
+function ensureNotInterrupted(): void {
+  if (terminationSignal) throw new Error("CRM_TEST_INTERRUPTED");
+}
+
 function runTool(
   command: string,
   args: string[],
   env: NodeJS.ProcessEnv,
   mode: "ignore" | "capture" | "inherit" = "ignore",
+  timeoutMs = 30_000,
+  allowDuringTermination = false,
 ): Promise<ToolResult> {
   return new Promise((resolve, reject) => {
+    if (terminationSignal && !allowDuringTermination) {
+      reject(new Error("CRM_TEST_INTERRUPTED"));
+      return;
+    }
     let child;
     try {
       child = spawn(command, args, {
@@ -34,37 +61,76 @@ function runTool(
       reject(new Error("CRM_TEST_SCRATCH_TOOL_UNAVAILABLE"));
       return;
     }
+    activeChildren.add(child);
     let stdout = "";
+    let settled = false;
+    let timedOut = false;
+    let killTimer: NodeJS.Timeout | undefined;
+    const finish = (error?: Error, result?: ToolResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      activeChildren.delete(child);
+      if (terminationSignal && !allowDuringTermination) reject(new Error("CRM_TEST_INTERRUPTED"));
+      else if (error) reject(error);
+      else resolve(result!);
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+      killTimer.unref();
+    }, timeoutMs);
     if (mode === "capture") {
       child.stdout?.setEncoding("utf8");
       child.stdout?.on("data", (chunk: string) => { stdout += chunk; });
     }
-    child.once("error", () => reject(new Error("CRM_TEST_SCRATCH_TOOL_UNAVAILABLE")));
-    child.once("close", code => resolve({ code: code ?? 1, stdout: stdout.trim() }));
+    child.once("error", () => finish(new Error("CRM_TEST_SCRATCH_TOOL_UNAVAILABLE")));
+    child.once("close", code => {
+      if (timedOut) finish(new Error("CRM_TEST_SCRATCH_TOOL_TIMEOUT"));
+      else finish(undefined, { code: code ?? 1, stdout: stdout.trim() });
+    });
   });
 }
 
 async function localPort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
-    server.once("error", () => reject(new Error("CRM_TEST_SCRATCH_PORT_UNAVAILABLE")));
+    const timer = setTimeout(() => {
+      server.close();
+      reject(new Error("CRM_TEST_SCRATCH_PORT_TIMEOUT"));
+    }, 5_000);
+    server.once("error", () => {
+      clearTimeout(timer);
+      reject(new Error("CRM_TEST_SCRATCH_PORT_UNAVAILABLE"));
+    });
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       if (!address || typeof address === "string") {
+        clearTimeout(timer);
         server.close();
         reject(new Error("CRM_TEST_SCRATCH_PORT_UNAVAILABLE"));
         return;
       }
-      server.close(error => error
-        ? reject(new Error("CRM_TEST_SCRATCH_PORT_UNAVAILABLE"))
-        : resolve(address.port));
+      server.close(error => {
+        clearTimeout(timer);
+        if (error) reject(new Error("CRM_TEST_SCRATCH_PORT_UNAVAILABLE"));
+        else resolve(address.port);
+      });
     });
   });
 }
 
-async function scratchState(dataDirectory: string, env: NodeJS.ProcessEnv): Promise<ScratchPostgresState> {
+async function scratchState(
+  dataDirectory: string,
+  env: NodeJS.ProcessEnv,
+  allowDuringTermination = false,
+): Promise<ScratchPostgresState> {
   try {
-    const result = await runTool("pg_ctl", ["--pgdata", dataDirectory, "status"], env);
+    const result = await runTool(
+      "pg_ctl", ["--pgdata", dataDirectory, "status"], env, "ignore", 10_000, allowDuringTermination,
+    );
     if (result.code === 0) return "running";
     if (result.code === 3) return "stopped";
   } catch {
@@ -125,39 +191,47 @@ async function main(): Promise<void> {
     return;
   }
 
-  const versions = await Promise.all(
-    ["initdb", "pg_ctl", "createdb", "pg_controldata"].map(tool =>
-      runTool(tool, ["--version"], process.env, true),
-    ),
-  );
-  if (versions.some(result => result.code !== 0)) {
-    throw new Error("CRM_TEST_SCRATCH_TOOLS_UNAVAILABLE");
-  }
-
-  const instanceId = randomBytes(16).toString("hex");
-  const databaseName = `aichm_test_${instanceId}`;
-  const scratchRoot = await mkdtemp("/dev/shm/aichm-crm-test-");
-  await chmod(scratchRoot, 0o700);
-  const dataDirectory = path.join(scratchRoot, "data");
-  const socketDirectory = path.join(scratchRoot, "socket");
-  await mkdir(socketDirectory, { mode: 0o700 });
-  const port = await localPort();
-  const localEnv: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
-    HOME: scratchRoot,
-    TMPDIR: scratchRoot,
-    LANG: "C",
-    LC_ALL: "C",
-  };
   let failureCode: string | undefined;
+  let scratchRoot: string | undefined;
+  let dataDirectory: string | undefined;
+  let localEnv: NodeJS.ProcessEnv | undefined;
+  let databaseName: string | undefined;
+
+  process.on("SIGINT", onTermination);
+  process.on("SIGTERM", onTermination);
   try {
+    const versions = await Promise.all(
+      ["initdb", "pg_ctl", "createdb", "pg_controldata"].map(tool =>
+        runTool(tool, ["--version"], process.env, "capture", 10_000),
+      ),
+    );
+    if (versions.some(result => result.code !== 0)) throw new Error("CRM_TEST_SCRATCH_TOOLS_UNAVAILABLE");
+    ensureNotInterrupted();
+
+    const port = await localPort();
+    ensureNotInterrupted();
+    const instanceId = randomBytes(16).toString("hex");
+    databaseName = `aichm_test_${instanceId}`;
+    scratchRoot = await mkdtemp("/dev/shm/aichm-crm-test-");
+    dataDirectory = path.join(scratchRoot, "data");
+    const socketDirectory = path.join(scratchRoot, "socket");
+    localEnv = {
+      PATH: process.env.PATH,
+      HOME: scratchRoot,
+      TMPDIR: scratchRoot,
+      LANG: "C",
+      LC_ALL: "C",
+    };
+    await chmod(scratchRoot, 0o700);
+    await mkdir(socketDirectory, { mode: 0o700 });
+
     const init = await runTool("initdb", [
       "--pgdata", dataDirectory,
       "--username=postgres",
       "--auth-local=trust",
       "--auth-host=trust",
       "--no-instructions",
-    ], localEnv);
+    ], localEnv, "ignore", 60_000);
     if (init.code !== 0) throw new Error("CRM_TEST_SCRATCH_INITDB_FAILED");
 
     const start = await runTool("pg_ctl", [
@@ -165,7 +239,7 @@ async function main(): Promise<void> {
       "--log", path.join(scratchRoot, "postgres.log"),
       "--options", `-h 127.0.0.1 -p ${port} -k ${socketDirectory} -c listen_addresses=127.0.0.1`,
       "--wait", "start",
-    ], localEnv);
+    ], localEnv, "ignore", 45_000);
     if (start.code !== 0) throw new Error("CRM_TEST_SCRATCH_START_FAILED");
 
     const createdb = await runTool("createdb", [
@@ -174,10 +248,10 @@ async function main(): Promise<void> {
       "--username=postgres",
       "--template=template0",
       databaseName,
-    ], localEnv);
+    ], localEnv, "ignore", 20_000);
     if (createdb.code !== 0) throw new Error("CRM_TEST_SCRATCH_DATABASE_CREATE_FAILED");
 
-    const control = await runTool("pg_controldata", ["--pgdata", dataDirectory], localEnv, true);
+    const control = await runTool("pg_controldata", ["--pgdata", dataDirectory], localEnv, "capture", 10_000);
     if (control.code !== 0) throw new Error("CRM_TEST_SCRATCH_CONTROL_DATA_FAILED");
     const pidText = await readFile(path.join(dataDirectory, "postmaster.pid"), "utf8");
     const proof: ScratchProof = {
@@ -192,6 +266,7 @@ async function main(): Promise<void> {
     if (!Number.isSafeInteger(proof.postmasterPid)) {
       throw new Error("CRM_TEST_SCRATCH_POSTMASTER_PID_INVALID");
     }
+    ensureNotInterrupted();
     await verifyScratchIdentity(
       `postgresql://postgres@127.0.0.1:${port}/${databaseName}`,
       proof,
@@ -218,6 +293,7 @@ async function main(): Promise<void> {
       ["--test", "server/crm/persistence.test.ts"],
       testEnv,
       "inherit",
+      240_000,
     );
     if (testResult.code !== 0) throw new Error("CRM_TEST_PERSISTENCE_SUITE_FAILED");
   } catch (error) {
@@ -225,27 +301,38 @@ async function main(): Promise<void> {
       ? error.message
       : "CRM_TEST_ISOLATED_RUN_FAILED";
   } finally {
-    const cleanup = await stopConfirmAndRemoveScratchPostgres({
-      inspectState: () => scratchState(dataDirectory, localEnv),
-      stop: async () => {
-        const result = await runTool(
-          "pg_ctl",
-          ["--pgdata", dataDirectory, "--mode=fast", "--wait", "stop"],
-          localEnv,
-        );
-        if (result.code !== 0) throw new Error("CRM_TEST_SCRATCH_STOP_FAILED");
-      },
-      removeScratch: async () => rm(scratchRoot, { recursive: true, force: true }),
-    });
-    if (!cleanup.ok) {
-      failureCode = cleanup.errorCode;
-      console.error(JSON.stringify({
-        status: "failed",
-        code: failureCode,
-        scratchPreserved: cleanup.scratchPreserved,
-        scratchPath: cleanup.scratchPreserved ? scratchRoot : undefined,
-      }));
+    if (scratchRoot && dataDirectory && localEnv) {
+      const cleanup = await stopConfirmAndRemoveScratchPostgres({
+        inspectState: () => scratchState(dataDirectory!, localEnv!, true),
+        stop: async () => {
+          const result = await runTool(
+            "pg_ctl",
+            ["--pgdata", dataDirectory!, "--mode=fast", "--wait", "stop"],
+            localEnv!,
+            "ignore",
+            30_000,
+            true,
+          );
+          if (result.code !== 0) throw new Error("CRM_TEST_SCRATCH_STOP_FAILED");
+        },
+        removeScratch: async () => rm(scratchRoot!, { recursive: true, force: true }),
+      });
+      if (cleanup.ok) {
+        console.log(JSON.stringify({ cleanup: "postgres-stopped-and-scratch-removed" }));
+      } else {
+        failureCode = cleanup.errorCode;
+        console.error(JSON.stringify({
+          status: "failed",
+          code: failureCode,
+          scratchPreserved: cleanup.scratchPreserved,
+          scratchPath: cleanup.scratchPreserved ? scratchRoot : undefined,
+          diagnostics: "postgres.log and scratch identity files retained when stop is unconfirmed",
+        }));
+      }
     }
+    process.removeListener("SIGINT", onTermination);
+    process.removeListener("SIGTERM", onTermination);
+    if (escalationTimer) clearTimeout(escalationTimer);
   }
   if (failureCode) {
     if (!failureCode.startsWith("local_postgres_") && !failureCode.startsWith("scratch_directory_")) {
@@ -253,12 +340,19 @@ async function main(): Promise<void> {
     }
     process.exitCode = 1;
   } else {
-    console.log(JSON.stringify({ status: "passed", isolatedInstance: true }));
-    console.log(JSON.stringify({ cleanup: "postgres-stopped-and-scratch-removed" }));
+    console.log(JSON.stringify({
+      status: "passed",
+      isolatedInstance: true,
+      scratchDatabase: databaseName,
+      migrationsApplied: ["0014_crm_canonical_assignments.sql", "0015_crm_assignment_audit_invariants.sql"],
+    }));
   }
 }
 
-void main().catch(() => {
-  console.error(JSON.stringify({ status: "failed", code: "CRM_TEST_ISOLATED_RUN_FAILED" }));
+void main().catch((error: unknown) => {
+  const code = error instanceof Error && /^CRM_TEST_[A-Z0-9_]+$/.test(error.message)
+    ? error.message
+    : "CRM_TEST_ISOLATED_RUN_FAILED";
+  console.error(JSON.stringify({ status: "failed", code }));
   process.exitCode = 1;
 });

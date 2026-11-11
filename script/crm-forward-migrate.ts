@@ -3,10 +3,19 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Pool, type PoolClient } from "pg";
 import {
+  assertCrmAssignmentSchemaAbsent,
+  assertCrmAssignmentSchemaPostconditions,
+} from "../server/db/crm-forward-migration-postconditions";
+import {
   assertCrmForwardDevelopmentIdentity,
+  CRM_FORWARD_DEVELOPMENT_IDENTITY,
   requireCrmForwardConnectionUrl,
   type CrmForwardDatabaseIdentity,
 } from "../server/db/crm-forward-migration-guard";
+import {
+  parseCrmForwardMigrationMode,
+  type CrmForwardMigrationMode,
+} from "../server/db/crm-forward-migration-mode";
 
 type Migration = {
   id: string;
@@ -20,6 +29,7 @@ type Registry = {
   migrations: Migration[];
 };
 type Queryable = Pick<PoolClient, "query">;
+type MigrationArtifact = { sql: string; hash: string };
 
 const REGISTRY_PATH = path.resolve("migrations/crm-forward/registry.json");
 const EXPECTED_MIGRATIONS = [
@@ -30,53 +40,11 @@ const EXPECTED_FILES = [
   "../0014_crm_canonical_assignments.sql",
   "../0015_crm_assignment_audit_invariants.sql",
 ];
+const ADVISORY_LOCK_KEYS = [1095326536, 1128813875] as const;
 const BASE_COLUMNS: Record<string, string[]> = {
   admissions_leads: ["id", "canonical_phone", "name"],
   lms_users: ["id", "is_active"],
   lms_user_roles: ["user_id", "role"],
-};
-const ASSIGNMENT_COLUMNS: Record<string, string[]> = {
-  admissions_lead_assignments: ["lead_id", "assignee_user_id", "assigned_by", "updated_at", "version"],
-  admissions_lead_assignment_history: [
-    "id", "lead_id", "previous_assignee_user_id", "new_assignee_user_id",
-    "actor_user_id", "changed_at", "reason", "source", "request_id", "assignment_version",
-  ],
-};
-const ASSIGNMENT_TRIGGERS = [
-  "admissions_lead_assignments_validate_trg",
-  "admissions_lead_assignment_history_validate_trg",
-  "admissions_lead_assignment_history_immutable_trg",
-  "admissions_lead_assignment_history_no_truncate_trg",
-];
-const ASSIGNMENT_TRIGGER_TABLES: Record<string, string> = {
-  admissions_lead_assignments_validate_trg: "admissions_lead_assignments",
-  admissions_lead_assignment_history_validate_trg: "admissions_lead_assignment_history",
-  admissions_lead_assignment_history_immutable_trg: "admissions_lead_assignment_history",
-  admissions_lead_assignment_history_no_truncate_trg: "admissions_lead_assignment_history",
-};
-const ASSIGNMENT_TRIGGER_FUNCTIONS: Record<string, string> = {
-  admissions_lead_assignments_validate_trg: "aichm_validate_lead_assignment",
-  admissions_lead_assignment_history_validate_trg: "aichm_validate_lead_assignment_history",
-  admissions_lead_assignment_history_immutable_trg: "aichm_reject_lead_assignment_history_mutation",
-  admissions_lead_assignment_history_no_truncate_trg: "aichm_reject_lead_assignment_history_mutation",
-};
-const EXPECTED_0014_ITEM_COUNT =
-  Object.values(ASSIGNMENT_COLUMNS).reduce((sum, columns) => sum + columns.length, 0) +
-  ASSIGNMENT_TRIGGERS.length + 3;
-const HARDENING_TRIGGERS = [
-  "admissions_lead_assignments_history_required_trg",
-  "admissions_lead_assignments_no_delete_trg",
-  "admissions_lead_assignments_no_truncate_trg",
-];
-const HARDENING_TRIGGER_TABLES: Record<string, string> = {
-  admissions_lead_assignments_history_required_trg: "admissions_lead_assignments",
-  admissions_lead_assignments_no_delete_trg: "admissions_lead_assignments",
-  admissions_lead_assignments_no_truncate_trg: "admissions_lead_assignments",
-};
-const HARDENING_TRIGGER_FUNCTIONS: Record<string, string> = {
-  admissions_lead_assignments_history_required_trg: "aichm_require_assignment_history_for_change",
-  admissions_lead_assignments_no_delete_trg: "aichm_reject_lead_assignment_mutation",
-  admissions_lead_assignments_no_truncate_trg: "aichm_reject_lead_assignment_mutation",
 };
 
 function fail(code: string): never {
@@ -105,9 +73,7 @@ function validateRegistry(registry: Registry): void {
       migration.postconditions !== (index === 0 ? "crm_assignments_v0014" : "crm_assignment_invariants_v0015") ||
       JSON.stringify(migration.requires) !== JSON.stringify(expectedRequirements[index])
     )
-  ) {
-    fail("CRM_FORWARD_REGISTRY_INVALID");
-  }
+  ) fail("CRM_FORWARD_REGISTRY_INVALID");
 }
 
 function pgConfig(connectionUrl: string) {
@@ -122,6 +88,8 @@ function pgConfig(connectionUrl: string) {
     ssl: { rejectUnauthorized: true },
     max: 1,
     connectionTimeoutMillis: 8_000,
+    query_timeout: 30_000,
+    statement_timeout: 30_000,
   };
 }
 
@@ -170,149 +138,55 @@ async function presentBaseTables(client: Queryable): Promise<string[]> {
     .map(item => `public.${item.table}.${item.column}`);
 }
 
-async function triggerRows(client: Queryable, names: string[]) {
-  return client.query<{
-    tgname: string;
-    relname: string;
-    function_name: string;
-    tgdeferrable: boolean;
-    tginitdeferred: boolean;
-    tgtype: number;
-  }>(`
-    SELECT t.tgname,c.relname,p.proname AS function_name,
-      t.tgdeferrable,t.tginitdeferred,t.tgtype::integer
-    FROM pg_trigger t
-    JOIN pg_class c ON c.oid=t.tgrelid
-    JOIN pg_namespace n ON n.oid=c.relnamespace
-    JOIN pg_proc p ON p.oid=t.tgfoid
-    WHERE n.nspname='public' AND t.tgname=ANY($1::text[]) AND NOT t.tgisinternal
-  `, [names]);
-}
-
-async function requiredAssignmentStateMissing(client: Queryable): Promise<string[]> {
-  const missing: string[] = [];
-  const columns = Object.entries(ASSIGNMENT_COLUMNS).flatMap(([table, names]) =>
-    names.map(column => ({ table, column })),
+async function readExistingLedger(client: Queryable, registry: Registry) {
+  const regclass = `${registry.ledger.schema}.${registry.ledger.table}`;
+  const { rows: [table] } = await client.query<{ exists: boolean }>(
+    "SELECT to_regclass($1) IS NOT NULL AS exists",
+    [regclass],
   );
-  const { rows } = await client.query<{ table_name: string; column_name: string }>(
-    `SELECT table_name,column_name FROM information_schema.columns
-     WHERE table_schema='public'
-       AND (table_name,column_name) IN (SELECT * FROM unnest($1::text[],$2::text[]))`,
-    [columns.map(item => item.table), columns.map(item => item.column)],
+  if (!table?.exists) return [];
+  const { rows } = await client.query<{ migration_id: string; sha256: string }>(
+    `SELECT migration_id,sha256 FROM ${registry.ledger.schema}.${registry.ledger.table} ORDER BY migration_id`,
   );
-  const foundColumns = new Set(rows.map(row => `${row.table_name}.${row.column_name}`));
-  for (const item of columns) {
-    if (!foundColumns.has(`${item.table}.${item.column}`)) {
-      missing.push(`public.${item.table}.${item.column}`);
-    }
-  }
-
-  const { rows: triggers } = await triggerRows(client, ASSIGNMENT_TRIGGERS);
-  const foundTriggers = new Map(triggers.map(row => [row.tgname, row]));
-  for (const name of ASSIGNMENT_TRIGGERS) {
-    const trigger = foundTriggers.get(name);
-    if (
-      !trigger ||
-      trigger.relname !== ASSIGNMENT_TRIGGER_TABLES[name] ||
-      trigger.function_name !== ASSIGNMENT_TRIGGER_FUNCTIONS[name]
-    ) {
-      missing.push(`trigger:${name}`);
-    }
-  }
-  const { rows: functions } = await client.query<{ proname: string }>(`
-    SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-    WHERE n.nspname='public' AND p.proname=ANY($1::text[])
-  `, [[
-    "aichm_validate_lead_assignment",
-    "aichm_validate_lead_assignment_history",
-    "aichm_reject_lead_assignment_history_mutation",
-  ]]);
-  const foundFunctions = new Set(functions.map(row => row.proname));
-  for (const name of [
-    "aichm_validate_lead_assignment",
-    "aichm_validate_lead_assignment_history",
-    "aichm_reject_lead_assignment_history_mutation",
-  ]) {
-    if (!foundFunctions.has(name)) missing.push(`function:${name}`);
-  }
-  return missing;
+  return rows;
 }
 
-async function anyHardeningStatePresent(client: Queryable): Promise<boolean> {
-  const { rows: functions } = await client.query<{ count: string }>(`
-    SELECT count(*)::text AS count FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-    WHERE n.nspname='public' AND p.proname=ANY($1::text[])
-  `, [["aichm_require_assignment_history_for_change", "aichm_reject_lead_assignment_mutation"]]);
-  const { rows: triggers } = await triggerRows(client, HARDENING_TRIGGERS);
-  return Number(functions[0]?.count ?? 0) > 0 || triggers.length > 0;
+async function ensureLedger(
+  client: Queryable,
+  registry: Registry,
+  assertTarget: () => Promise<void>,
+): Promise<void> {
+  await assertTarget();
+  await client.query(`CREATE SCHEMA IF NOT EXISTS ${registry.ledger.schema}`);
+  await assertTarget();
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS ${registry.ledger.schema}.${registry.ledger.table} (
+      migration_id text PRIMARY KEY,
+      sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+      applied_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
 }
 
-async function validateHardeningState(client: Queryable): Promise<void> {
-  const missing: string[] = [];
-  const { rows: triggers } = await triggerRows(client, HARDENING_TRIGGERS);
-  const byName = new Map(triggers.map(row => [row.tgname, row]));
-  for (const name of HARDENING_TRIGGERS) {
-    const trigger = byName.get(name);
-    if (
-      !trigger ||
-      trigger.relname !== HARDENING_TRIGGER_TABLES[name] ||
-      trigger.function_name !== HARDENING_TRIGGER_FUNCTIONS[name]
-    ) {
-      missing.push(`trigger:${name}`);
-    }
+async function loadArtifacts(registry: Registry): Promise<Map<string, MigrationArtifact>> {
+  const migrationsRoot = path.resolve("migrations");
+  const artifacts = new Map<string, MigrationArtifact>();
+  for (const migration of registry.migrations) {
+    const file = path.resolve(path.dirname(REGISTRY_PATH), migration.file);
+    if (!file.startsWith(`${migrationsRoot}${path.sep}`)) fail("CRM_FORWARD_REGISTRY_PATH_REJECTED");
+    const sql = await readFile(file, "utf8");
+    artifacts.set(migration.id, {
+      sql,
+      hash: createHash("sha256").update(sql).digest("hex"),
+    });
   }
-  const deferred = byName.get("admissions_lead_assignments_history_required_trg");
-  if (
-    deferred &&
-    (!deferred.tgdeferrable || !deferred.tginitdeferred ||
-      (deferred.tgtype & 1) === 0 || (deferred.tgtype & 4) === 0 || (deferred.tgtype & 16) === 0)
-  ) {
-    missing.push("trigger:admissions_lead_assignments_history_required_trg:not_deferred");
-  }
-  const noDelete = byName.get("admissions_lead_assignments_no_delete_trg");
-  if (noDelete && (
-    (noDelete.tgtype & 1) === 0 ||
-    (noDelete.tgtype & 2) === 0 ||
-    (noDelete.tgtype & 8) === 0
-  )) {
-    missing.push("trigger:admissions_lead_assignments_no_delete_trg:event_mismatch");
-  }
-  const noTruncate = byName.get("admissions_lead_assignments_no_truncate_trg");
-  if (noTruncate && (
-    (noTruncate.tgtype & 2) === 0 ||
-    (noTruncate.tgtype & 32) === 0
-  )) {
-    missing.push("trigger:admissions_lead_assignments_no_truncate_trg:event_mismatch");
-  }
-  const { rows: functions } = await client.query<{ proname: string }>(`
-    SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-    WHERE n.nspname='public' AND p.proname=ANY($1::text[])
-  `, [[
-    "aichm_require_assignment_history_for_change",
-    "aichm_reject_lead_assignment_mutation",
-    "aichm_validate_lead_assignment",
-    "aichm_validate_lead_assignment_history",
-  ]]);
-  const found = new Set(functions.map(row => row.proname));
-  for (const name of ["aichm_require_assignment_history_for_change", "aichm_reject_lead_assignment_mutation"]) {
-    if (!found.has(name)) missing.push(`function:${name}`);
-  }
-  const { rows: definitions } = await client.query<{ proname: string; definition: string }>(`
-    SELECT p.proname,pg_get_functiondef(p.oid) AS definition
-    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-    WHERE n.nspname='public' AND p.proname=ANY($1::text[])
-  `, [["aichm_validate_lead_assignment", "aichm_validate_lead_assignment_history"]]);
-  const byFunction = new Map(definitions.map(row => [row.proname, row.definition]));
-  const assignmentDefinition = byFunction.get("aichm_validate_lead_assignment") ?? "";
-  const historyDefinition = byFunction.get("aichm_validate_lead_assignment_history") ?? "";
-  if (
-    !/OLD\.version\s*\+\s*1/i.test(assignmentDefinition) ||
-    !/NEW\.version\s*<>\s*1/i.test(assignmentDefinition) ||
-    !/assigned_by\s*=\s*NEW\.actor_user_id/i.test(historyDefinition)
-  ) {
-    missing.push("function:assignment_version_or_history_actor_validation");
-  }
-  if (missing.length) fail("CRM_FORWARD_0015_POSTCONDITION_FAILED");
+  return artifacts;
+}
+
+function artifact(artifacts: Map<string, MigrationArtifact>, id: string): MigrationArtifact {
+  const found = artifacts.get(id);
+  if (!found) fail("CRM_FORWARD_REGISTRY_INVALID");
+  return found;
 }
 
 function unwrapMigration(sql: string): string {
@@ -323,142 +197,189 @@ function unwrapMigration(sql: string): string {
   return trimmed.replace(/^BEGIN;\s*/i, "").replace(/;\s*COMMIT;$/i, ";");
 }
 
-async function ensureLedger(client: Queryable, registry: Registry): Promise<void> {
-  await client.query(`CREATE SCHEMA IF NOT EXISTS ${registry.ledger.schema}`);
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS ${registry.ledger.schema}.${registry.ledger.table} (
-      migration_id text PRIMARY KEY,
-      sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
-      applied_at timestamptz NOT NULL DEFAULT now()
-    )
-  `);
-}
+async function collectPlan(
+  client: Queryable,
+  registry: Registry,
+  artifacts: Map<string, MigrationArtifact>,
+): Promise<{ ledger: Map<string, string>; pending: Migration[] }> {
+  const missingBase = await presentBaseTables(client);
+  if (missingBase.length) fail("CRM_FORWARD_BASE_PREREQUISITES_MISSING");
 
-async function readExistingLedger(client: Queryable, registry: Registry) {
-  const { rows: [table] } = await client.query<{ exists: boolean }>(
-    `SELECT to_regclass($1) IS NOT NULL AS exists`,
-    [`${registry.ledger.schema}.${registry.ledger.table}`],
-  );
-  if (!table?.exists) return [];
-  const { rows } = await client.query<{ migration_id: string; sha256: string }>(
-    `SELECT migration_id,sha256 FROM ${registry.ledger.schema}.${registry.ledger.table} ORDER BY migration_id`,
-  );
-  return rows;
-}
-
-async function run(): Promise<void> {
-  const connectionUrl = requireCrmForwardConnectionUrl(process.env);
-  const registry = JSON.parse(await readFile(REGISTRY_PATH, "utf8")) as Registry;
-  validateRegistry(registry);
-  const migrationsRoot = path.resolve("migrations");
-  const migrationSql = new Map<string, { sql: string; hash: string }>();
+  const rows = await readExistingLedger(client, registry);
+  const allowed = new Set(registry.migrations.map(migration => migration.id));
+  if (rows.some(row => !allowed.has(row.migration_id))) fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
+  const ledger = new Map(rows.map(row => [row.migration_id, row.sha256]));
   for (const migration of registry.migrations) {
-    const file = path.resolve(path.dirname(REGISTRY_PATH), migration.file);
-    if (!file.startsWith(`${migrationsRoot}${path.sep}`)) fail("CRM_FORWARD_REGISTRY_PATH_REJECTED");
-    const sql = await readFile(file, "utf8");
-    migrationSql.set(migration.id, {
-      sql,
-      hash: createHash("sha256").update(sql).digest("hex"),
-    });
+    const recordedHash = ledger.get(migration.id);
+    if (recordedHash && recordedHash !== artifact(artifacts, migration.id).hash) {
+      fail("CRM_FORWARD_LEDGER_HASH_MISMATCH");
+    }
   }
 
-  const pool = new Pool(pgConfig(connectionUrl));
-  const client = await pool.connect();
-  const appliedNow: string[] = [];
+  const recorded14 = ledger.has(EXPECTED_MIGRATIONS[0]);
+  const recorded15 = ledger.has(EXPECTED_MIGRATIONS[1]);
+  if (recorded15 && !recorded14) fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
+  if (!recorded14) {
+    if (rows.length) fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
+    await assertCrmAssignmentSchemaAbsent(
+      client,
+      "public",
+      artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+      artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+    );
+  } else {
+    await assertCrmAssignmentSchemaPostconditions(
+      client,
+      "public",
+      recorded15 ? "0015" : "0014",
+      artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+      artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+    );
+  }
+
+  return {
+    ledger,
+    pending: registry.migrations.filter(migration => !ledger.has(migration.id)),
+  };
+}
+
+function previewRecord(
+  identity: CrmForwardDatabaseIdentity,
+  registry: Registry,
+  pending: Migration[],
+  mode: CrmForwardMigrationMode,
+) {
+  return {
+    status: "preview",
+    mode,
+    targetIdentity: {
+      expectedPinnedDevelopment: CRM_FORWARD_DEVELOPMENT_IDENTITY,
+      verified: {
+        databaseName: identity.databaseName,
+        databaseOid: identity.databaseOid,
+        databaseUser: identity.databaseUser,
+        systemIdentifier: identity.systemIdentifier,
+      },
+    },
+    migrationFiles: registry.migrations.map(migration => ({
+      id: migration.id,
+      file: migration.file,
+    })),
+    wouldRun: pending.map(migration => ({ id: migration.id, file: migration.file })),
+    message: mode === "preview"
+      ? "No schema writes were made. Use the explicit apply flag and confirmation variable to apply."
+      : "Apply was explicitly confirmed; the verified plan will be rechecked under an advisory lock.",
+  };
+}
+
+async function readOnlyPlan(
+  client: PoolClient,
+  registry: Registry,
+  artifacts: Map<string, MigrationArtifact>,
+) {
+  await client.query("BEGIN READ ONLY");
   try {
-    await client.query("BEGIN READ ONLY");
-    assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
-    const missingBase = await presentBaseTables(client);
-    if (missingBase.length) fail("CRM_FORWARD_BASE_PREREQUISITES_MISSING");
-
-    const assignmentMissing = await requiredAssignmentStateMissing(client);
-    const hardeningPresent = await anyHardeningStatePresent(client);
-    const existingLedgerRows = await readExistingLedger(client, registry);
-    const allowedIds = new Set(registry.migrations.map(migration => migration.id));
-    if (existingLedgerRows.some(row => !allowedIds.has(row.migration_id))) fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
-    const existingLedger = new Map(existingLedgerRows.map(row => [row.migration_id, row.sha256]));
-    const migration14 = migrationSql.get("0014_crm_canonical_assignments");
-    const migration15 = migrationSql.get("0015_crm_assignment_audit_invariants");
-    if (
-      (existingLedger.get("0014_crm_canonical_assignments") &&
-        existingLedger.get("0014_crm_canonical_assignments") !== migration14?.hash) ||
-      (existingLedger.get("0015_crm_assignment_audit_invariants") &&
-        existingLedger.get("0015_crm_assignment_audit_invariants") !== migration15?.hash)
-    ) fail("CRM_FORWARD_LEDGER_HASH_MISMATCH");
-    const recorded14 = existingLedger.has("0014_crm_canonical_assignments");
-    const recorded15 = existingLedger.has("0015_crm_assignment_audit_invariants");
-    if (recorded15 && !recorded14) fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
-    if (recorded14 && assignmentMissing.length) fail("CRM_FORWARD_0014_POSTCONDITION_FAILED");
-    if (!recorded14 && assignmentMissing.length === 0) fail("CRM_FORWARD_UNTRACKED_0014_STATE");
-    if (
-      !recorded14 &&
-      assignmentMissing.length !== EXPECTED_0014_ITEM_COUNT
-    ) fail("CRM_FORWARD_PARTIAL_0014_STATE");
-    if (recorded15 && !hardeningPresent) fail("CRM_FORWARD_0015_POSTCONDITION_FAILED");
-    if (!recorded15 && hardeningPresent) fail("CRM_FORWARD_UNTRACKED_0015_STATE");
+    const identity = await inspectIdentity(client);
+    assertCrmForwardDevelopmentIdentity(identity);
+    const plan = await collectPlan(client, registry, artifacts);
     await client.query("COMMIT");
+    return { identity, plan };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
+}
 
+async function applyPlan(
+  client: PoolClient,
+  registry: Registry,
+  artifacts: Map<string, MigrationArtifact>,
+  connectionState: { released: boolean },
+): Promise<string[]> {
+  let lockAcquired = false;
+  try {
     await client.query("BEGIN");
     try {
       assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
-      await ensureLedger(client, registry);
+      await client.query("SET LOCAL lock_timeout = '10s'");
+      await client.query("SELECT pg_advisory_lock($1::integer,$2::integer)", [...ADVISORY_LOCK_KEYS]);
+      lockAcquired = true;
+      await client.query("COMMIT");
+    } catch {
+      await client.query("ROLLBACK").catch(() => undefined);
+      fail("CRM_FORWARD_ADVISORY_LOCK_FAILED");
+    }
+
+    // Re-read identity and state after acquiring the session lock; another
+    // forward-runner cannot race the plan between preview and execution.
+    const lockedPlan = await readOnlyPlan(client, registry, artifacts);
+    console.log(JSON.stringify(previewRecord(lockedPlan.identity, registry, lockedPlan.plan.pending, "apply")));
+
+    await client.query("BEGIN");
+    try {
+      await ensureLedger(client, registry, async () => {
+        assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
+      });
       await client.query("COMMIT");
     } catch {
       await client.query("ROLLBACK").catch(() => undefined);
       fail("CRM_FORWARD_LEDGER_SETUP_FAILED");
     }
-    const ledgerName = `${registry.ledger.schema}.${registry.ledger.table}`;
-    const { rows: ledgerRows } = await client.query<{ migration_id: string; sha256: string }>(
-      `SELECT migration_id,sha256 FROM ${ledgerName} ORDER BY migration_id`,
-    );
-    const allowedIds = new Set(registry.migrations.map(migration => migration.id));
-    if (ledgerRows.some(row => !allowedIds.has(row.migration_id))) {
-      fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
-    }
-    const recorded = new Map(ledgerRows.map(row => [row.migration_id, row.sha256]));
 
-    for (const migration of registry.migrations) {
-      const artifact = migrationSql.get(migration.id);
-      if (!artifact) fail("CRM_FORWARD_REGISTRY_INVALID");
-      const recordedHash = recorded.get(migration.id);
-      if (recordedHash) {
-        if (recordedHash !== artifact.hash) fail("CRM_FORWARD_LEDGER_HASH_MISMATCH");
-        if (migration.postconditions === "crm_assignments_v0014") {
-          if ((await requiredAssignmentStateMissing(client)).length) fail("CRM_FORWARD_0014_POSTCONDITION_FAILED");
-        } else {
-          await validateHardeningState(client);
-        }
-        continue;
-      }
-
-      if (migration.id === "0015_crm_assignment_audit_invariants") {
-        if (!recorded.has("0014_crm_canonical_assignments")) {
-          fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
-        }
-        if ((await requiredAssignmentStateMissing(client)).length) {
-          fail("CRM_FORWARD_0014_PREREQUISITES_MISSING");
-        }
-        if (await anyHardeningStatePresent(client)) fail("CRM_FORWARD_UNTRACKED_0015_STATE");
-      } else {
-        const stateMissing = await requiredAssignmentStateMissing(client);
-        const hardeningExists = await anyHardeningStatePresent(client);
-        if (stateMissing.length !== EXPECTED_0014_ITEM_COUNT || hardeningExists) {
-          fail("CRM_FORWARD_UNTRACKED_0014_STATE");
-        }
-      }
-
+    const appliedNow: string[] = [];
+    for (const migration of lockedPlan.plan.pending) {
+      const sql = artifact(artifacts, migration.id).sql;
       await client.query("BEGIN");
       try {
         assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
-        await client.query(unwrapMigration(artifact.sql));
-        if (migration.postconditions === "crm_assignments_v0014") {
-          if ((await requiredAssignmentStateMissing(client)).length) fail("CRM_FORWARD_0014_POSTCONDITION_FAILED");
-        } else {
-          await validateHardeningState(client);
+        const latestLedger = await readExistingLedger(client, registry);
+        if (latestLedger.some(row => !registry.migrations.some(item => item.id === row.migration_id))) {
+          fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
         }
+        const alreadyApplied = latestLedger.find(row => row.migration_id === migration.id);
+        if (alreadyApplied) {
+          if (alreadyApplied.sha256 !== artifact(artifacts, migration.id).hash) {
+            fail("CRM_FORWARD_LEDGER_HASH_MISMATCH");
+          }
+          await client.query("COMMIT");
+          continue;
+        }
+        if (migration.id === EXPECTED_MIGRATIONS[1]) {
+          const prerequisiteLedger = latestLedger.find(row => row.migration_id === EXPECTED_MIGRATIONS[0]);
+          if (prerequisiteLedger?.sha256 !== artifact(artifacts, EXPECTED_MIGRATIONS[0]).hash) {
+            fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
+          }
+          await assertCrmAssignmentSchemaPostconditions(
+            client,
+            "public",
+            "0014",
+            artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+            artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+          );
+        } else {
+          await assertCrmAssignmentSchemaAbsent(
+            client,
+            "public",
+            artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+            artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+          );
+        }
+        await client.query("SET LOCAL search_path = public, pg_catalog");
+        // The final identity assertion is immediately before the migration SQL.
+        assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
+        await client.query(unwrapMigration(sql));
+        const completedStage = migration.id === EXPECTED_MIGRATIONS[0] ? "0014" : "0015";
+        await assertCrmAssignmentSchemaPostconditions(
+          client,
+          "public",
+          completedStage,
+          artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+          artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+        );
+        assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
         await client.query(
-          `INSERT INTO ${ledgerName}(migration_id,sha256) VALUES($1,$2)`,
-          [migration.id, artifact.hash],
+          `INSERT INTO ${registry.ledger.schema}.${registry.ledger.table}(migration_id,sha256) VALUES($1,$2)`,
+          [migration.id, artifact(artifacts, migration.id).hash],
         );
         await client.query("COMMIT");
         appliedNow.push(migration.id);
@@ -466,22 +387,60 @@ async function run(): Promise<void> {
         await client.query("ROLLBACK").catch(() => undefined);
         fail("CRM_FORWARD_MIGRATION_FAILED");
       }
-      recorded.set(migration.id, artifact.hash);
     }
+    return appliedNow;
+  } finally {
+    if (lockAcquired) {
+      let unlockFailed = false;
+      try {
+        const { rows: [row] } = await client.query<{ unlocked: boolean }>(
+          "SELECT pg_advisory_unlock($1::integer,$2::integer) AS unlocked",
+          [...ADVISORY_LOCK_KEYS],
+        );
+        unlockFailed = row?.unlocked !== true;
+      } catch {
+        unlockFailed = true;
+      }
+      if (unlockFailed) {
+        connectionState.released = true;
+        client.release(new Error("CRM_FORWARD_ADVISORY_UNLOCK_FAILED"));
+        fail("CRM_FORWARD_ADVISORY_UNLOCK_FAILED");
+      }
+    }
+  }
+}
+
+async function run(): Promise<void> {
+  const mode = parseCrmForwardMigrationMode(process.argv.slice(2), process.env);
+  const connectionUrl = requireCrmForwardConnectionUrl(process.env);
+  const registry = JSON.parse(await readFile(REGISTRY_PATH, "utf8")) as Registry;
+  validateRegistry(registry);
+  const artifacts = await loadArtifacts(registry);
+  const pool = new Pool(pgConfig(connectionUrl));
+  let client: PoolClient | undefined;
+  const connectionState = { released: false };
+  try {
+    client = await pool.connect();
+    const { identity, plan } = await readOnlyPlan(client, registry, artifacts);
+    console.log(JSON.stringify(previewRecord(identity, registry, plan.pending, mode)));
+    if (mode === "preview") return;
+
+    const appliedNow = await applyPlan(client, registry, artifacts, connectionState);
+    const finalState = await readOnlyPlan(client, registry, artifacts);
     console.log(JSON.stringify({
       status: "verified",
       stream: registry.stream,
       appliedNow,
-      ledgerEntries: Array.from(recorded.keys()),
+      remaining: finalState.plan.pending.map(migration => migration.id),
     }));
   } finally {
-    client.release();
+    if (client && !connectionState.released) client.release();
     await pool.end();
   }
 }
 
 void run().catch((error: unknown) => {
-  const code = error instanceof Error && /^CRM_FORWARD_[A-Z0-9_]+$/.test(error.message)
+  const code = error instanceof Error && /^CRM_(?:FORWARD|SCHEMA_POSTCONDITION)_[A-Z0-9_]+$/.test(error.message)
     ? error.message
     : "CRM_FORWARD_FAILED";
   console.error(JSON.stringify({ status: "failed", code }));

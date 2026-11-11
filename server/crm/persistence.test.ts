@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { listCrm, detailCrm } from "./read";
 import { updateCrm } from "./write";
 import { assignCrmLead } from "./assignment";
+import { assertCrmAssignmentSchemaPostconditions } from "../db/crm-forward-migration-postconditions";
 import {
   assertCrmPersistenceTestServerIdentity,
   validateCrmPersistenceTestTarget,
@@ -100,7 +101,9 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
         response_at timestamptz,http_status integer,delivery_state text,error_summary text)`);
       const {rows:[l]}=await db.query("INSERT INTO admissions_leads(canonical_phone,name,registered_at,entry_source) VALUES('919000000011','Linked Person',now(),'vsl_registration') RETURNING id");
       await db.query(assignments);
+       await assertCrmAssignmentSchemaPostconditions(db,namespace,"0014",assignments,assignmentGuards);
        await db.query(assignmentGuards);
+       await assertCrmAssignmentSchemaPostconditions(db,namespace,"0015",assignments,assignmentGuards);
       await db.query(`INSERT INTO inquiries(name,email,phone,program_interest,lead_id,counselling_answers,counselling_submitted_at) VALUES
         ('Linked Person','','9000000011','Barista',$1,NULL,NULL),
         ('Linked Person','synthetic@example.invalid','+91 90000 00011','Barista',$1,'{\"synthetic\":\"preserved\"}',now()),

@@ -26,15 +26,31 @@ updated automatically. If Development is recreated or any identity field
 changes, the runner stops and requires fresh manual verification and a reviewed
 code change. Inability to read the system identifier also stops the runner.
 
-The runner is explicit and is not a startup or publish hook:
+The runner is not a startup or publish hook. It defaults to a read-only preview
+and requires the named Development URL even for that preview. The preview
+connects only to verify the pinned identity and current migration state; it
+reports the full pinned identity, both registered SQL file names, and exactly
+which files are pending. It does not create the custom ledger:
 
 ```sh
-AICHM_CRM_FORWARD_DATABASE_URL='<secure Development connection>' npx tsx script/crm-forward-migrate.ts
+npx tsx script/crm-forward-migrate.ts
 ```
 
-Do not put the URL in source, command history, output, or logs. The connection
-is never printed. Before each migration transaction, the runner rechecks the
-same pinned identity on its single connection.
+Applying requires both `--apply-crm-migrations` and the exact confirmation
+variable `AICHM_CRM_FORWARD_APPLY_CONFIRM=APPLY_CRM_FORWARD_MIGRATIONS_TO_PINNED_DEVELOPMENT`.
+Without both, the runner cannot apply. Supply the URL through a securely
+configured environment, not source or command history:
+
+```sh
+npx tsx script/crm-forward-migrate.ts --apply-crm-migrations
+```
+
+The apply path prints the verified preview, obtains a database advisory lock
+after checking identity, then rechecks identity and state under the lock before
+writing. It revalidates the pinned identity immediately before each migration
+and ledger write and releases the lock in a `finally` path; if unlock cannot be
+confirmed, it destroys the connection so PostgreSQL releases the session lock.
+The URL and database errors are never printed.
 
 ## Ordering and prerequisites
 
@@ -47,7 +63,11 @@ immutability triggers. It also verifies the deferred history-pairing trigger
 after 0015.
 
 If a prerequisite is missing, or if migration objects exist without matching
-entries in the dedicated ledger, the runner fails for review. It does not run
+entries in the dedicated ledger, the runner fails for review. Postconditions
+compare the exact assignment-table columns/defaults, constraints and foreign-key
+actions, indexes and predicates, trigger event/timing/enabled state, relevant
+PL/pgSQL source/configuration, and the history-table PUBLIC mutation grants.
+Unexpected, missing, disabled, or drifted objects fail closed. It does not run
 0013 or any earlier migration, does not edit either old journal, and does not
 insert a synthetic baseline/history row. A migration and its checksum row in
 `aichm_crm_forward_meta.schema_migrations` are committed in one transaction;
@@ -83,8 +103,9 @@ server identity before creating its temporary schema. Its base CRM fixture is
 created directly in the disposable test schema; it does not replay migrations
 0000–0013.
 
-Cleanup uses the existing stop-confirm-remove helper. Scratch files are removed
-only after `pg_ctl` confirms PostgreSQL stopped. If stop or state verification
-fails, the scratch directory and PostgreSQL diagnostics are preserved and the
-runner exits non-zero. This runner has not been executed as part of the current
-code-only change.
+Every subprocess has a bounded timeout. SIGINT/SIGTERM requests stop active
+children and enter the same cleanup path; cleanup status/stop commands remain
+available during signal handling. Scratch files are removed only after `pg_ctl`
+confirms PostgreSQL stopped. If stop or state verification fails, the scratch
+directory and PostgreSQL diagnostics are preserved and the runner exits
+non-zero.

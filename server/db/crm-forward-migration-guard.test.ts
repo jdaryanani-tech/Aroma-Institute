@@ -7,6 +7,12 @@ import {
   requireCrmForwardConnectionUrl,
   type CrmForwardDatabaseIdentity,
 } from "./crm-forward-migration-guard";
+import {
+  CRM_FORWARD_APPLY_CONFIRM_ENV,
+  CRM_FORWARD_APPLY_CONFIRM_VALUE,
+  CRM_FORWARD_APPLY_FLAG,
+  parseCrmForwardMigrationMode,
+} from "./crm-forward-migration-mode";
 
 const expectedIdentity: CrmForwardDatabaseIdentity = {
   ...CRM_FORWARD_DEVELOPMENT_IDENTITY,
@@ -75,6 +81,40 @@ test("CRM forward identity rejects unknown database, OID, user, system, replica,
   }
 });
 
+test("CRM forward runner defaults to read-only preview", () => {
+  assert.equal(parseCrmForwardMigrationMode([], {}), "preview");
+  assert.equal(parseCrmForwardMigrationMode(["--preview"], {}), "preview");
+  assert.equal(
+    parseCrmForwardMigrationMode([], { [CRM_FORWARD_APPLY_CONFIRM_ENV]: CRM_FORWARD_APPLY_CONFIRM_VALUE }),
+    "preview",
+  );
+});
+
+test("CRM forward runner requires both the apply flag and exact confirmation value", () => {
+  assert.throws(
+    () => parseCrmForwardMigrationMode([CRM_FORWARD_APPLY_FLAG], {}),
+    /CRM_FORWARD_EXPLICIT_APPLY_CONFIRMATION_REQUIRED/,
+  );
+  assert.throws(
+    () => parseCrmForwardMigrationMode([CRM_FORWARD_APPLY_FLAG], {
+      [CRM_FORWARD_APPLY_CONFIRM_ENV]: "wrong",
+    }),
+    /CRM_FORWARD_EXPLICIT_APPLY_CONFIRMATION_REQUIRED/,
+  );
+  assert.equal(
+    parseCrmForwardMigrationMode([CRM_FORWARD_APPLY_FLAG], {
+      [CRM_FORWARD_APPLY_CONFIRM_ENV]: CRM_FORWARD_APPLY_CONFIRM_VALUE,
+    }),
+    "apply",
+  );
+  assert.throws(
+    () => parseCrmForwardMigrationMode(["--apply-crm-migrations", "--preview"], {
+      [CRM_FORWARD_APPLY_CONFIRM_ENV]: CRM_FORWARD_APPLY_CONFIRM_VALUE,
+    }),
+    /CRM_FORWARD_ARGUMENTS_REJECTED/,
+  );
+});
+
 test("CRM migrations are registered only in their separate forward stream", async () => {
   const [registryText, mainJournalText, aichmJournalText] = await Promise.all([
     readFile("migrations/crm-forward/registry.json", "utf8"),
@@ -100,4 +140,27 @@ test("CRM migrations are registered only in their separate forward stream", asyn
   assert.equal(mainJournalText.includes("0015_crm_assignment_audit_invariants"), false);
   assert.equal(aichmJournalText.includes("0014_crm_canonical_assignments"), false);
   assert.equal(aichmJournalText.includes("0015_crm_assignment_audit_invariants"), false);
+});
+
+test("CRM forward runner previews by default and applies only under explicit confirmation and lock", async () => {
+  const source = await readFile("script/crm-forward-migrate.ts", "utf8");
+  assert.doesNotMatch(source, /process\.env\.DATABASE_URL/);
+  assert.match(source, /parseCrmForwardMigrationMode/);
+  assert.match(source, /BEGIN READ ONLY/);
+  assert.match(source, /pg_advisory_lock/);
+  assert.match(source, /pg_advisory_unlock/);
+  assert.match(source, /assertCrmForwardDevelopmentIdentity/);
+  assert.match(source, /assertCrmAssignmentSchemaPostconditions/);
+  assert.match(source, /CRM_FORWARD_DEVELOPMENT_IDENTITY/);
+});
+
+test("isolated CRM test launcher bounds child work and cleans up after signals", async () => {
+  const source = await readFile("script/test-crm-persistence.ts", "utf8");
+  assert.match(source, /process\.on\("SIGINT", onTermination\)/);
+  assert.match(source, /process\.on\("SIGTERM", onTermination\)/);
+  assert.match(source, /CRM_TEST_SCRATCH_TOOL_TIMEOUT/);
+  assert.match(source, /240_000/);
+  assert.match(source, /allowDuringTermination/);
+  assert.match(source, /stopConfirmAndRemoveScratchPostgres/);
+  assert.match(source, /scratchPreserved/);
 });
