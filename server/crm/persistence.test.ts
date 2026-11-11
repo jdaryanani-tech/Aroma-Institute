@@ -9,7 +9,10 @@ import { once } from "node:events";
 import { listCrm, detailCrm } from "./read";
 import { updateCrm } from "./write";
 import { assignCrmLead } from "./assignment";
-import { validateCrmPersistenceTestTarget } from "./persistence-test-target";
+import {
+  assertCrmPersistenceTestServerIdentity,
+  validateCrmPersistenceTestTarget,
+} from "./persistence-test-target";
 
 const adminPrincipal = { id: 1, roles: ["admin"] as const };
 const secondAdminPrincipal = { id: 2, roles: ["admin"] as const };
@@ -19,28 +22,66 @@ const secondAdmissionsPrincipal = { id: 6, roles: ["admissions"] as const };
 
 test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, evidence, pagination, guards and degraded schema",
   {
-    skip: process.env.CRM_TEST_DB_WRITE_APPROVED !== "TEMPORARY_DEVELOPMENT_SCHEMA_ONLY"
+    skip: process.env.CRM_TEST_DB_WRITE_APPROVED !== "ISOLATED_EPHEMERAL_POSTGRES_ONLY"
       || process.env.NODE_ENV !== "test"
       || !process.env.AICHM_DEVELOPMENT_DATABASE_URL
-      || !process.env.CRM_TEST_DATABASE_NAME,
+      || !process.env.CRM_TEST_DATABASE_NAME
+      || !process.env.CRM_TEST_EPHEMERAL_ROOT
+      || !process.env.CRM_TEST_EPHEMERAL_PROOF,
   },
   async()=>{
-     const target=validateCrmPersistenceTestTarget(process.env);
+     const target=await validateCrmPersistenceTestTarget(process.env);
      assert.equal(target.intent,"disposable-test");
      const root=new Pool({connectionString:target.url,max:2});
     const namespace=`crm_test_${randomUUID().replaceAll("-","")}`;
     assert.match(namespace,/^crm_test_[a-f0-9]+$/);
     let db:Pool|undefined,server:ReturnType<typeof createServer>|undefined;
     try {
+       await assertCrmPersistenceTestServerIdentity(root,target.proof);
       await root.query(`CREATE SCHEMA "${namespace}"`);
       db=new Pool({connectionString:target.url,options:`-c search_path=${namespace}`,max:4});
-      await db.query(`CREATE TABLE inquiries(LIKE public.inquiries INCLUDING DEFAULTS INCLUDING CONSTRAINTS);
-        CREATE SEQUENCE inquiry_ids; ALTER TABLE inquiries ALTER COLUMN id SET DEFAULT nextval('inquiry_ids');
+       await db.query(`CREATE TABLE inquiries(
+           id integer NOT NULL,name text NOT NULL,email text NOT NULL,phone text NOT NULL,
+           program_interest text NOT NULL,message text,counselling_answers jsonb,
+           counselling_submitted_at timestamptz,counselling_delivery_status text NOT NULL DEFAULT 'not_applicable',
+           counselling_delivery_attempts integer NOT NULL DEFAULT 0,
+           counselling_delivery_last_attempt_at timestamptz,counselling_delivery_last_result text,
+           submission_source text NOT NULL DEFAULT 'public_form',submission_idempotency_key text,
+           submission_payload_hash text,lead_id uuid
+         );
+         CREATE SEQUENCE inquiry_ids; ALTER TABLE inquiries ALTER COLUMN id SET DEFAULT nextval('inquiry_ids');
         ALTER TABLE inquiries ADD PRIMARY KEY(id);
          CREATE TABLE lms_users(id serial PRIMARY KEY,display_name text,is_active boolean DEFAULT true);
         CREATE TABLE lms_user_roles(user_id integer,role text);
          CREATE TABLE lms_audit_logs(id serial PRIMARY KEY,actor_id integer,action text NOT NULL,entity_type text NOT NULL,
            entity_id text,metadata jsonb NOT NULL DEFAULT '{}'::jsonb,created_at timestamptz NOT NULL DEFAULT now());
+         CREATE TABLE admissions_leads(
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),canonical_phone text NOT NULL UNIQUE,name text NOT NULL,
+           created_at timestamptz NOT NULL DEFAULT now(),registered_at timestamptz,last_registered_at timestamptz,
+           entry_source text,entry_path text,entry_host text,
+           questionnaire_status text NOT NULL DEFAULT 'not_submitted',questionnaire_completed_at timestamptz,
+           legacy_match_status text NOT NULL DEFAULT 'none'
+         );
+         ALTER TABLE inquiries ADD CONSTRAINT inquiries_lead_id_fk FOREIGN KEY(lead_id) REFERENCES admissions_leads(id);
+         CREATE TABLE admissions_crm_profiles(
+           inquiry_id integer PRIMARY KEY,stage text,stage_evidence jsonb,owner_id integer,follow_up_at timestamptz,
+           updated_at timestamptz NOT NULL DEFAULT now(),updated_by integer NOT NULL,version integer NOT NULL DEFAULT 1
+         );
+         CREATE TABLE admissions_crm_activities(
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),inquiry_id integer NOT NULL,type text NOT NULL,
+           occurred_at timestamptz NOT NULL DEFAULT now(),actor_id integer NOT NULL,body text,data jsonb
+         );
+         CREATE TABLE admissions_vsl_playbacks(
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),lead_id uuid NOT NULL,session_hash text NOT NULL,
+           created_at timestamptz NOT NULL DEFAULT now(),last_observed_at timestamptz,
+           last_position double precision,duration double precision,ranges jsonb NOT NULL DEFAULT '[]'::jsonb,
+           sequence integer NOT NULL DEFAULT 0
+         );
+         CREATE TABLE admissions_vsl_events(
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),lead_id uuid NOT NULL,event text NOT NULL,
+           occurred_at timestamptz NOT NULL DEFAULT now(),position_seconds double precision,duration_seconds double precision,
+           UNIQUE(lead_id,event)
+         );
          INSERT INTO lms_users(id,display_name) VALUES
            (1,'Test Admin'),(2,'Other Admin'),(3,'Test Student'),(4,'Admissions One'),
            (5,'Inactive Admissions'),(6,'Admissions Two'),(7,'Test Trainer');
@@ -48,15 +89,12 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
          INSERT INTO lms_user_roles VALUES
            (1,'admin'),(2,'admin'),(2,'admissions'),(3,'student'),(4,'admissions'),(5,'admissions'),
            (6,'admissions'),(7,'trainer');`);
-      const stage1=(await readFile("migrations/0006_admissions_stage_one.sql","utf8")).replaceAll('"public".',"");
-      const crm=(await readFile("migrations/0007_admissions_crm.sql","utf8")).replaceAll('"public".',"");
       const assignments=(await readFile("migrations/0014_crm_canonical_assignments.sql","utf8"))
         .replaceAll('"public".',"").replaceAll("public.","")
         .replace("SET search_path = pg_catalog, public",`SET search_path = pg_catalog, "${namespace}"`);
        const assignmentGuards=(await readFile("migrations/0015_crm_assignment_audit_invariants.sql","utf8"))
          .replaceAll('"public".',"").replaceAll("public.","")
          .replace("SET search_path = pg_catalog, public",`SET search_path = pg_catalog, "${namespace}"`);
-      for(let i=0;i<2;i++) {await db.query(stage1);await db.query(crm);}
       await db.query(`CREATE TABLE counselling_delivery_attempts(
         id integer PRIMARY KEY,inquiry_id integer,attempt_number integer,attempted_at timestamptz,
         response_at timestamptz,http_status integer,delivery_state text,error_summary text)`);

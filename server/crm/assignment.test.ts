@@ -1,9 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Pool } from "pg";
-import { assignCrmLead, type CrmAssignmentUpdate } from "./assignment";
+import {
+  assignCrmLead,
+  crmAssignmentUpdateSchema,
+  type CrmAssignmentUpdate,
+} from "./assignment";
 import type { CrmPrincipal } from "./authorization";
-import { validateCrmPersistenceTestTarget } from "./persistence-test-target";
+import { validateCrmPersistenceTestTargetConfiguration } from "./persistence-test-target";
 
 type FakeOptions = {
   current?: { lead_id: string; assignee_user_id: number | null; assigned_by: number; version: number };
@@ -167,33 +171,48 @@ test("the CRM assignment SQL contains deferred pair enforcement and destructive 
   assert.match(sql, /admin_role\.role::text = 'admin'/);
 });
 
-test("CRM persistence test target requires explicit opt-in and a dedicated loopback database", () => {
-  const dedicatedName = "aichm_test_0123456789abcdef";
+test("CRM persistence test target requires explicit opt-in and a verified ephemeral loopback database", () => {
+  const dedicatedName = "aichm_test_0123456789abcdef0123456789abcdef";
   const validEnvironment = {
     NODE_ENV: "test",
-    CRM_TEST_DB_WRITE_APPROVED: "TEMPORARY_DEVELOPMENT_SCHEMA_ONLY",
+    CRM_TEST_DB_WRITE_APPROVED: "ISOLATED_EPHEMERAL_POSTGRES_ONLY",
     CRM_TEST_DATABASE_NAME: dedicatedName,
     AICHM_SCHEMA_CHANGE_INTENT: "disposable-test",
-    AICHM_DEVELOPMENT_DATABASE_URL: `postgresql://test_user:local_only@127.0.0.1:55432/${dedicatedName}`,
+    AICHM_DEVELOPMENT_DATABASE_URL: `postgresql://postgres@127.0.0.1:55432/${dedicatedName}`,
+    CRM_TEST_EPHEMERAL_ROOT: "/dev/shm/aichm-crm-test-example",
+    CRM_TEST_EPHEMERAL_PROOF: "/dev/shm/aichm-crm-test-example/identity.json",
     DATABASE_URL: "postgresql://ignored:ignored@production.invalid/app",
   };
 
-  assert.equal(validateCrmPersistenceTestTarget(validEnvironment).database, dedicatedName);
-  assert.throws(() => validateCrmPersistenceTestTarget({
+  assert.equal(validateCrmPersistenceTestTargetConfiguration(validEnvironment).database, dedicatedName);
+  assert.throws(() => validateCrmPersistenceTestTargetConfiguration({
     ...validEnvironment,
     CRM_TEST_DB_WRITE_APPROVED: undefined,
   }), /explicit disposable-database approval/);
-  assert.throws(() => validateCrmPersistenceTestTarget({
+  assert.throws(() => validateCrmPersistenceTestTargetConfiguration({
     ...validEnvironment,
     CRM_TEST_DATABASE_NAME: "aichm_test_other0123456789",
-  }), /named, dedicated loopback test database/);
-  assert.throws(() => validateCrmPersistenceTestTarget({
+  }), /verified ephemeral loopback PostgreSQL instance/);
+  assert.throws(() => validateCrmPersistenceTestTargetConfiguration({
     ...validEnvironment,
-    AICHM_DEVELOPMENT_DATABASE_URL: "postgresql://test_user:secret@remote.invalid/aichm_test_0123456789abcdef",
+    AICHM_DEVELOPMENT_DATABASE_URL: "postgresql://postgres@remote.invalid/aichm_test_0123456789abcdef0123456789abcdef",
   }), /NON_LOOPBACK|loopback|target/i);
-  assert.throws(() => validateCrmPersistenceTestTarget({
+  assert.throws(() => validateCrmPersistenceTestTargetConfiguration({
     NODE_ENV: "test",
-    CRM_TEST_DB_WRITE_APPROVED: "TEMPORARY_DEVELOPMENT_SCHEMA_ONLY",
+    CRM_TEST_DB_WRITE_APPROVED: "ISOLATED_EPHEMERAL_POSTGRES_ONLY",
     DATABASE_URL: validEnvironment.DATABASE_URL,
   }), /intent|database URL|development database URL/i);
+  assert.throws(() => validateCrmPersistenceTestTargetConfiguration({
+    ...validEnvironment,
+    CRM_TEST_EPHEMERAL_PROOF: undefined,
+  }), /verified ephemeral loopback PostgreSQL instance/);
+});
+
+test("assignment endpoint payload cannot supply its actor identity", async () => {
+  assert.throws(
+    () => crmAssignmentUpdateSchema.parse({ ...input(0, 4), actorUserId: 999 }),
+    /Unrecognized key/,
+  );
+  const routeSource = await (await import("node:fs/promises")).readFile("server/crm/routes.ts", "utf8");
+  assert.match(routeSource, /assignCrmLead\([\s\S]*?req\.lmsUser as CrmPrincipal/);
 });

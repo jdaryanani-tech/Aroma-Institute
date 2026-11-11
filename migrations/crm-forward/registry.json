@@ -1,0 +1,27 @@
+{
+  "stream": "aichm-crm-forward",
+  "ledger": {
+    "schema": "aichm_crm_forward_meta",
+    "table": "schema_migrations"
+  },
+  "migrations": [
+    {
+      "id": "0014_crm_canonical_assignments",
+      "file": "../0014_crm_canonical_assignments.sql",
+      "requires": ["public.admissions_leads", "public.lms_users", "public.lms_user_roles"],
+      "postconditions": "crm_assignments_v0014"
+    },
+    {
+      "id": "0015_crm_assignment_audit_invariants",
+      "file": "../0015_crm_assignment_audit_invariants.sql",
+      "requires": [
+        "ledger:0014_crm_canonical_assignments",
+        "trigger:admissions_lead_assignments_validate_trg",
+        "trigger:admissions_lead_assignment_history_validate_trg",
+        "trigger:admissions_lead_assignment_history_immutable_trg",
+        "trigger:admissions_lead_assignment_history_no_truncate_trg"
+      ],
+      "postconditions": "crm_assignment_invariants_v0015"
+    }
+  ]
+}
