@@ -34,6 +34,12 @@ export type ScratchIdentityMismatch = {
 };
 
 const IDENTITY_MISMATCH_CODE = "CRM_TEST_SCRATCH_IDENTITY_MISMATCH";
+type ScratchIdentityDiagnostic = {
+  status: "failed";
+  code: typeof IDENTITY_MISMATCH_CODE;
+  mismatches: ScratchIdentityMismatch[];
+};
+type ScratchIdentityDiagnosticWriter = (line: string) => void;
 
 const activeChildren = new Set<ChildProcess>();
 let terminationSignal: NodeJS.Signals | undefined;
@@ -176,6 +182,12 @@ function safeIdentityValue(field: string, value: unknown): string | number | boo
     return typeof value === "boolean" ? value : "<invalid-boolean>";
   }
   if (typeof value !== "string") return "<unavailable>";
+  if (
+    value.includes("://") ||
+    /(?:token|secret|password|passwd|credential|bearer|api[_-]?key)/i.test(value)
+  ) {
+    return "<redacted>";
+  }
   const allowed = field === "serverAddress"
     ? /^[0-9a-fA-F:.]{1,64}$/
     : field === "systemIdentifier"
@@ -200,7 +212,7 @@ export function buildScratchIdentityMismatchDiagnostic(
   proof: ScratchProof,
   identity: ScratchServerIdentity | undefined,
   resolvedObservedDataDirectory: string | undefined,
-): { status: "failed"; code: typeof IDENTITY_MISMATCH_CODE; mismatches: ScratchIdentityMismatch[] } {
+): ScratchIdentityDiagnostic {
   const scratchRoot = path.dirname(proof.dataDirectory);
   const checks: Array<{
     field: string;
@@ -269,6 +281,31 @@ export function buildScratchIdentityMismatchDiagnostic(
   };
 }
 
+export function verifyScratchIdentityObservation(
+  proof: ScratchProof,
+  identity: ScratchServerIdentity | undefined,
+  resolvedObservedDataDirectory: string | undefined,
+  writeDiagnostic: ScratchIdentityDiagnosticWriter = line => console.error(line),
+): void {
+  const diagnostic = buildScratchIdentityMismatchDiagnostic(
+    proof,
+    identity,
+    resolvedObservedDataDirectory,
+  );
+  if (diagnostic.mismatches.length > 0) {
+    writeDiagnostic(JSON.stringify(diagnostic));
+    throw new Error(IDENTITY_MISMATCH_CODE);
+  }
+}
+
+export async function runAfterScratchIdentityVerification<T>(
+  verify: () => Promise<void>,
+  launchTestChild: () => Promise<T>,
+): Promise<T> {
+  await verify();
+  return launchTestChild();
+}
+
 async function verifyScratchIdentity(
   connectionString: string,
   proof: ScratchProof,
@@ -289,16 +326,11 @@ async function verifyScratchIdentity(
         // Preserve the failure as an unavailable path value without logging the raw path.
       }
     }
-    const diagnostic = buildScratchIdentityMismatchDiagnostic(
+    verifyScratchIdentityObservation(
       proof,
       identity,
       resolvedObservedDataDirectory,
     );
-    if (diagnostic.mismatches.length > 0) {
-      // Emit before throwing so this survives the finally-path scratch cleanup.
-      console.error(JSON.stringify(diagnostic));
-      throw new Error(IDENTITY_MISMATCH_CODE);
-    }
   } finally {
     await pool.end();
   }
@@ -389,35 +421,44 @@ async function main(): Promise<void> {
       throw new Error("CRM_TEST_SCRATCH_POSTMASTER_PID_INVALID");
     }
     ensureNotInterrupted();
-    await verifyScratchIdentity(
-      `postgresql://postgres@127.0.0.1:${port}/${databaseName}`,
-      proof,
-    );
-    const proofPath = path.join(scratchRoot, "identity.json");
-    await writeFile(proofPath, `${JSON.stringify(proof)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await runAfterScratchIdentityVerification(
+      () => verifyScratchIdentity(
+        `postgresql://postgres@127.0.0.1:${port}/${databaseName}`,
+        proof,
+      ),
+      async () => {
+        const proofPath = path.join(scratchRoot!, "identity.json");
+        await writeFile(proofPath, `${JSON.stringify(proof)}\n`, {
+          encoding: "utf8",
+          mode: 0o600,
+          flag: "wx",
+        });
 
-    const testEnv: NodeJS.ProcessEnv = {
-      PATH: process.env.PATH,
-      HOME: scratchRoot,
-      TMPDIR: scratchRoot,
-      LANG: "C",
-      LC_ALL: "C",
-      NODE_ENV: "test",
-      CRM_TEST_DB_WRITE_APPROVED: "ISOLATED_EPHEMERAL_POSTGRES_ONLY",
-      CRM_TEST_DATABASE_NAME: databaseName,
-      CRM_TEST_EPHEMERAL_ROOT: scratchRoot,
-      CRM_TEST_EPHEMERAL_PROOF: proofPath,
-      AICHM_SCHEMA_CHANGE_INTENT: "disposable-test",
-      AICHM_DEVELOPMENT_DATABASE_URL: `postgresql://postgres@127.0.0.1:${port}/${databaseName}`,
-    };
-    const testResult = await runTool(
-      path.resolve("node_modules/.bin/tsx"),
-      ["--test", "server/crm/persistence.test.ts"],
-      testEnv,
-      "inherit",
-      240_000,
+        const testEnv: NodeJS.ProcessEnv = {
+          PATH: process.env.PATH,
+          HOME: scratchRoot,
+          TMPDIR: scratchRoot,
+          LANG: "C",
+          LC_ALL: "C",
+          NODE_ENV: "test",
+          CRM_TEST_DB_WRITE_APPROVED: "ISOLATED_EPHEMERAL_POSTGRES_ONLY",
+          CRM_TEST_DATABASE_NAME: databaseName!,
+          CRM_TEST_EPHEMERAL_ROOT: scratchRoot!,
+          CRM_TEST_EPHEMERAL_PROOF: proofPath,
+          AICHM_SCHEMA_CHANGE_INTENT: "disposable-test",
+          AICHM_DEVELOPMENT_DATABASE_URL: `postgresql://postgres@127.0.0.1:${port}/${databaseName}`,
+        };
+        const testResult = await runTool(
+          path.resolve("node_modules/.bin/tsx"),
+          ["--test", "server/crm/persistence.test.ts"],
+          testEnv,
+          "inherit",
+          240_000,
+        );
+        if (testResult.code !== 0) throw new Error("CRM_TEST_PERSISTENCE_SUITE_FAILED");
+        return testResult;
+      },
     );
-    if (testResult.code !== 0) throw new Error("CRM_TEST_PERSISTENCE_SUITE_FAILED");
   } catch (error) {
     failureCode = error instanceof Error && /^CRM_TEST_[A-Z0-9_]+$/.test(error.message)
       ? error.message

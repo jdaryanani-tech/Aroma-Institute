@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildScratchIdentityMismatchDiagnostic,
+  runAfterScratchIdentityVerification,
+  verifyScratchIdentityObservation,
   type ScratchProof,
 } from "./test-crm-persistence";
 
@@ -33,7 +35,7 @@ function diagnostic(
   return buildScratchIdentityMismatchDiagnostic(proof, identity, resolvedDirectory);
 }
 
-test("scratch identity diagnostics report every required comparison without changing acceptance", () => {
+test("the live identity gate rejects each mismatch and prevents the test child from launching", async () => {
   const cases = [
     ["databaseName", { ...matchingIdentity, database_name: "other_test_db" }, proof.dataDirectory],
     ["databaseUser", { ...matchingIdentity, database_user: "other_user" }, proof.dataDirectory],
@@ -44,19 +46,78 @@ test("scratch identity diagnostics report every required comparison without chan
     ["recoveryState", { ...matchingIdentity, in_recovery: true }, proof.dataDirectory],
   ] as const;
 
-  assert.deepEqual(diagnostic(matchingIdentity).mismatches, []);
+  let childLaunches = 0;
+  await runAfterScratchIdentityVerification(
+    async () => verifyScratchIdentityObservation(proof, matchingIdentity, proof.dataDirectory, () => {}),
+    async () => { childLaunches += 1; },
+  );
+  assert.equal(childLaunches, 1);
+
   for (const [field, identity, resolvedDirectory] of cases) {
-    const result = diagnostic(identity, resolvedDirectory);
+    const emitted: string[] = [];
+    await assert.rejects(
+      runAfterScratchIdentityVerification(
+        async () => verifyScratchIdentityObservation(
+          proof,
+          identity,
+          resolvedDirectory,
+          line => emitted.push(line),
+        ),
+        async () => { childLaunches += 1; },
+      ),
+      /CRM_TEST_SCRATCH_IDENTITY_MISMATCH/,
+    );
+    assert.equal(childLaunches, 1, `${field} mismatch must prevent child launch`);
+    assert.equal(emitted.length, 1);
+    const result = JSON.parse(emitted[0]) as ReturnType<typeof diagnostic>;
     assert.equal(result.code, "CRM_TEST_SCRATCH_IDENTITY_MISMATCH");
     assert.deepEqual(result.mismatches.map(mismatch => mismatch.field), [field]);
   }
 });
 
-test("scratch identity diagnostic reports multiple mismatches with sanitized expected and observed values", () => {
+test("structured identity diagnostic is emitted before cleanup and remains observable afterward", async () => {
+  const output: string[] = [];
+  const order: string[] = [];
+  const scratch = new Map<string, string>([["identity.json", JSON.stringify(proof)]]);
+  const badIdentity = { ...matchingIdentity, host: "::1" };
+
+  await assert.rejects(async () => {
+    try {
+      await runAfterScratchIdentityVerification(
+        async () => verifyScratchIdentityObservation(
+          proof,
+          badIdentity,
+          proof.dataDirectory,
+          line => {
+            output.push(line);
+            order.push("diagnostic");
+          },
+        ),
+        async () => {
+          order.push("test-child");
+        },
+      );
+    } finally {
+      order.push("cleanup-start");
+      scratch.clear();
+    }
+  }, /CRM_TEST_SCRATCH_IDENTITY_MISMATCH/);
+
+  assert.deepEqual(order, ["diagnostic", "cleanup-start"]);
+  assert.equal(scratch.size, 0);
+  assert.equal(output.length, 1);
+  const diagnosticOutput = JSON.parse(output[0]) as ReturnType<typeof diagnostic>;
+  assert.equal(diagnosticOutput.code, "CRM_TEST_SCRATCH_IDENTITY_MISMATCH");
+  assert.equal(diagnosticOutput.mismatches[0]?.field, "serverAddress");
+  assert.equal(diagnosticOutput.mismatches[0]?.expected, "127.0.0.1");
+  assert.equal(diagnosticOutput.mismatches[0]?.observed, "::1");
+});
+
+test("multiple mismatches are reported with redacted credential-like values and paths", () => {
   const result = diagnostic({
     ...matchingIdentity,
-    database_name: "unexpected database with password",
-    database_user: "user-with-secret",
+    database_name: "postgresql://private-user:private-password@host/db",
+    database_user: "user-with-secret-token",
     data_directory: "/outside/secret/path",
     host: "10.20.30.40",
     port: 6432,
@@ -71,9 +132,9 @@ test("scratch identity diagnostic reports multiple mismatches with sanitized exp
       {
         field: "databaseName",
         expected: proof.databaseName,
-        observed: "<invalid-value>",
+        observed: "<redacted>",
       },
-      { field: "databaseUser", expected: "postgres", observed: "user-with-secret" },
+      { field: "databaseUser", expected: "postgres", observed: "<redacted>" },
       {
         field: "dataDirectory",
         expected: "<scratch-root>/data",
@@ -93,10 +154,43 @@ test("scratch identity diagnostic reports multiple mismatches with sanitized exp
   const serialized = JSON.stringify(result);
   for (const forbidden of [
     "postgresql://",
-    "password",
+    "private-user",
+    "private-password",
+    "secret-token",
     "/dev/shm/aichm-crm-test-0123456789abcdef0123456789abcdef",
     "/outside/secret/path",
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test("credentials, URLs, tokens, and arbitrary environment values are excluded from output", () => {
+  const identityWithUnrelatedFields = {
+    ...matchingIdentity,
+    database_name: "postgresql://user:password@remote.invalid/db",
+    database_user: "api-key-secret-value",
+    connectionString: "postgresql://must-not-appear:pass@host/db",
+    password: "password-sentinel-must-not-appear",
+    accessToken: "token-sentinel-must-not-appear",
+    arbitraryEnvironmentValue: "environment-sentinel-must-not-appear",
+  };
+  const result = buildScratchIdentityMismatchDiagnostic(
+    proof,
+    identityWithUnrelatedFields,
+    "/outside/environment-sentinel-must-not-appear",
+  );
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.code, "CRM_TEST_SCRATCH_IDENTITY_MISMATCH");
+  assert.equal(result.mismatches.find(mismatch => mismatch.field === "databaseName")?.observed, "<redacted>");
+  assert.equal(result.mismatches.find(mismatch => mismatch.field === "databaseUser")?.observed, "<redacted>");
+  for (const forbidden of [
+    "postgresql://",
+    "password-sentinel-must-not-appear",
+    "token-sentinel-must-not-appear",
+    "environment-sentinel-must-not-appear",
     "DATABASE_URL",
+    "/outside/environment-sentinel-must-not-appear",
   ]) {
     assert.equal(serialized.includes(forbidden), false);
   }
