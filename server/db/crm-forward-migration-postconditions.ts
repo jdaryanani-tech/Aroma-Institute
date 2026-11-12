@@ -142,30 +142,192 @@ const EXPECTED_CONSTRAINTS: Record<string, ConstraintSpec> = {
   },
 };
 
-type IndexSpec = { table: string; columns: string[]; unique: boolean; primary: boolean };
+type IndexKeySpec = {
+  position: number;
+  column: string | null;
+  definition: string;
+  descending: boolean;
+  nullsFirst: boolean;
+  collationSchema: string | null;
+  collationName: string | null;
+  opclassSchema: string | null;
+  opclassName: string | null;
+};
+
+type IndexSpec = {
+  table: string;
+  method: string;
+  keys: IndexKeySpec[];
+  includedColumns: string[];
+  unique: boolean;
+  primary: boolean;
+  constraintName: string | null;
+  constraintType: string | null;
+  predicate: string | null;
+  expressions: string | null;
+};
+
+function expectedIndexKey(column: string, position: number, opclassName: string): IndexKeySpec {
+  return {
+    position,
+    column,
+    definition: column,
+    descending: false,
+    nullsFirst: false,
+    collationSchema: null,
+    collationName: null,
+    opclassSchema: "pg_catalog",
+    opclassName,
+  };
+}
+
 const EXPECTED_INDEXES: Record<string, IndexSpec> = {
   admissions_lead_assignments_pkey: {
-    table: "admissions_lead_assignments", columns: ["lead_id"], unique: true, primary: true,
+    table: "admissions_lead_assignments",
+    method: "btree",
+    keys: [expectedIndexKey("lead_id", 1, "uuid_ops")],
+    includedColumns: [],
+    unique: true,
+    primary: true,
+    constraintName: "admissions_lead_assignments_pkey",
+    constraintType: "p",
+    predicate: null,
+    expressions: null,
   },
   admissions_lead_assignments_assignee_idx: {
-    table: "admissions_lead_assignments", columns: ["assignee_user_id", "lead_id"], unique: false, primary: false,
+    table: "admissions_lead_assignments",
+    method: "btree",
+    keys: [
+      expectedIndexKey("assignee_user_id", 1, "int4_ops"),
+      expectedIndexKey("lead_id", 2, "uuid_ops"),
+    ],
+    includedColumns: [],
+    unique: false,
+    primary: false,
+    constraintName: null,
+    constraintType: null,
+    predicate: null,
+    expressions: null,
   },
   admissions_lead_assignment_history_pkey: {
-    table: "admissions_lead_assignment_history", columns: ["id"], unique: true, primary: true,
+    table: "admissions_lead_assignment_history",
+    method: "btree",
+    keys: [expectedIndexKey("id", 1, "uuid_ops")],
+    includedColumns: [],
+    unique: true,
+    primary: true,
+    constraintName: "admissions_lead_assignment_history_pkey",
+    constraintType: "p",
+    predicate: null,
+    expressions: null,
   },
   admissions_lead_assignment_history_request_id_key: {
-    table: "admissions_lead_assignment_history", columns: ["request_id"], unique: true, primary: false,
+    table: "admissions_lead_assignment_history",
+    method: "btree",
+    keys: [expectedIndexKey("request_id", 1, "uuid_ops")],
+    includedColumns: [],
+    unique: true,
+    primary: false,
+    constraintName: "admissions_lead_assignment_history_request_id_key",
+    constraintType: "u",
+    predicate: null,
+    expressions: null,
   },
   admissions_lead_assignment_history_lead_time_idx: {
-    table: "admissions_lead_assignment_history", columns: ["lead_id", "changed_at"], unique: false, primary: false,
+    table: "admissions_lead_assignment_history",
+    method: "btree",
+    keys: [
+      expectedIndexKey("lead_id", 1, "uuid_ops"),
+      expectedIndexKey("changed_at", 2, "timestamptz_ops"),
+    ],
+    includedColumns: [],
+    unique: false,
+    primary: false,
+    constraintName: null,
+    constraintType: null,
+    predicate: null,
+    expressions: null,
   },
   admissions_lead_assignment_history_assignee_time_idx: {
     table: "admissions_lead_assignment_history",
-    columns: ["new_assignee_user_id", "changed_at"], unique: false, primary: false,
+    method: "btree",
+    keys: [
+      expectedIndexKey("new_assignee_user_id", 1, "int4_ops"),
+      expectedIndexKey("changed_at", 2, "timestamptz_ops"),
+    ],
+    includedColumns: [],
+    unique: false,
+    primary: false,
+    constraintName: null,
+    constraintType: null,
+    predicate: null,
+    expressions: null,
   },
   admissions_lead_assignment_history_lead_version_uidx: {
-    table: "admissions_lead_assignment_history", columns: ["lead_id", "assignment_version"], unique: true, primary: false,
+    table: "admissions_lead_assignment_history",
+    method: "btree",
+    keys: [
+      expectedIndexKey("lead_id", 1, "uuid_ops"),
+      expectedIndexKey("assignment_version", 2, "int4_ops"),
+    ],
+    includedColumns: [],
+    unique: true,
+    primary: false,
+    constraintName: null,
+    constraintType: null,
+    predicate: null,
+    expressions: null,
   },
+};
+
+export type CrmIndexCatalogRow = {
+  name: string;
+  table_name: string;
+  method: string;
+  unique: boolean;
+  primary: boolean;
+  constraint_name: string | null;
+  constraint_type: string | null;
+  valid: boolean;
+  ready: boolean;
+  live: boolean;
+  key_count: number;
+  attr_count: number;
+  key_details: unknown;
+  included_columns: unknown;
+  predicate: string | null;
+  expressions: string | null;
+  definition: string;
+};
+
+export type CrmIndexDiagnosticView = {
+  name: string;
+  table: string;
+  method: string;
+  unique: boolean | null;
+  primary: boolean | null;
+  constraintBacked: boolean | null;
+  constraintName: string | null;
+  constraintType: string | null;
+  keyCount: number | null;
+  attributeCount: number | null;
+  keys: IndexKeySpec[];
+  includedColumns: string[];
+  predicate: string | null;
+  expressions: string | null;
+  valid: boolean | null;
+  ready: boolean | null;
+  live: boolean | null;
+  definition: string;
+  normalizedDefinition: string;
+};
+
+export type CrmIndexComparisonDiagnostic = {
+  expectedCount: number;
+  actualCount: number;
+  expected: CrmIndexDiagnosticView[];
+  actual: CrmIndexDiagnosticView[];
+  mismatches: Array<{ index: string; fields: string[] }>;
 };
 
 type TriggerSpec = {
