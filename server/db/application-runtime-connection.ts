@@ -45,6 +45,7 @@ function reject(code: string): never {
 
 function isPrivateDatabaseHost(host: string): boolean {
   const normalized = host.toLowerCase().replace(/\.$/, "");
+  if (normalized === "helium") return true;
   if (isIP(normalized) === 4) {
     const parts = normalized.split(".").map(Number);
     return parts[0] === 10 ||

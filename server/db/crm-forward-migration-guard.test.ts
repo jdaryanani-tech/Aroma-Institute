@@ -53,7 +53,7 @@ test("matching internal Development endpoints pass and return only the dedicated
 
 test("CRM forward rejects each endpoint mismatch before connecting", () => {
   const mismatches = [
-    "postgresql://postgres:runtime-placeholder@helium-other/heliumdb?sslmode=disable",
+    "postgresql://postgres:runtime-placeholder@other.internal/heliumdb?sslmode=disable",
     "postgresql://postgres:runtime-placeholder@helium:6543/heliumdb?sslmode=disable",
     "postgresql://other:runtime-placeholder@helium/heliumdb?sslmode=disable",
     "postgresql://postgres:runtime-placeholder@helium/otherdb?sslmode=disable",
@@ -81,6 +81,27 @@ test("CRM forward rejects external hosts in either URL", () => {
   }
 });
 
+test("CRM forward accepts the exact Helium host and rejects arbitrary single-label names", () => {
+  for (const host of ["helium-other", "database", "apphost"]) {
+    const url = `postgresql://postgres:placeholder@${host}/heliumdb?sslmode=disable`;
+    assert.throws(
+      () => requireCrmForwardConnectionUrl({
+        AICHM_CRM_FORWARD_DATABASE_URL: url,
+        DATABASE_URL: "postgresql://postgres:runtime-placeholder@" +
+          `${host}/heliumdb?sslmode=disable`,
+      }),
+      (error: unknown) =>
+        (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.endpointMustBeInternal,
+      `host ${host} must be rejected`,
+    );
+  }
+
+  assert.equal(requireCrmForwardConnectionUrl({
+    AICHM_CRM_FORWARD_DATABASE_URL: dedicatedUrl,
+    DATABASE_URL: runtimeUrl,
+  }), dedicatedUrl);
+});
+
 test("CRM forward accepts private IP endpoints but rejects public IP endpoints", () => {
   const privateUrl = "postgresql://postgres:placeholder@10.24.16.8/heliumdb?sslmode=disable";
   assert.equal(requireCrmForwardConnectionUrl({
@@ -96,6 +117,15 @@ test("CRM forward accepts private IP endpoints but rejects public IP endpoints",
     }),
     (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.endpointMustBeInternal,
   );
+});
+
+test("CRM forward retains its explicit .internal hostname allowance", () => {
+  const dedicated = "postgresql://postgres:dedicated-placeholder@db.replit.internal/heliumdb?sslmode=disable";
+  const runtime = "postgresql://postgres:runtime-placeholder@db.replit.internal/heliumdb?sslmode=disable";
+  assert.equal(requireCrmForwardConnectionUrl({
+    AICHM_CRM_FORWARD_DATABASE_URL: dedicated,
+    DATABASE_URL: runtime,
+  }), dedicated);
 });
 
 test("CRM forward requires the exact dedicated non-TLS mode and rejects ambiguous options", () => {

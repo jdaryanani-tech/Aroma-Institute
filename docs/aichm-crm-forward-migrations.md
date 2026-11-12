@@ -17,8 +17,10 @@ The runner requires `AICHM_CRM_FORWARD_DATABASE_URL` as its only connection
 source. It reads `DATABASE_URL` only as an in-memory, compare-only reference; it
 never uses that value to construct a pool or as a fallback. Before opening a
 socket, it parses both URLs and requires their normalized host, effective port
-(fixed `5432` when omitted), username, and database name to match. Both hosts
-must have internal/private Replit-style syntax. Runtime URL query overrides for
+(fixed `5432` when omitted), username, and database name to match. The verified
+Replit Helium service hostname is the exact single-label `helium`; the guard
+also retains explicit RFC1918 IPv4 and `.internal` cases. It rejects arbitrary
+single-label names and public DNS/IP endpoints. Runtime URL query overrides for
 host, port, user, password, or database are rejected so the comparison cannot
 silently disagree with the app's `pg` parser.
 

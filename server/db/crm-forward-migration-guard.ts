@@ -78,17 +78,12 @@ function isInternalPrivateHost(host: string): boolean {
 
   if (ipVersion === 4) {
     const [a, b] = normalized.split(".").map(Number);
-    return a === 10 || a === 127 ||
-      (a === 169 && b === 254) ||
+    return a === 10 ||
       (a === 172 && b >= 16 && b <= 31) ||
       (a === 192 && b === 168);
   }
 
-  if (ipVersion === 6) {
-    return normalized === "::1" ||
-      /^f[cd]/.test(normalized) ||
-      /^fe[89ab]/.test(normalized);
-  }
+  if (ipVersion === 6) return false;
 
   const labels = normalized.split(".");
   if (
@@ -101,13 +96,7 @@ function isInternalPrivateHost(host: string): boolean {
     return false;
   }
 
-  return normalized === "localhost" ||
-    normalized.endsWith(".localhost") ||
-    normalized.endsWith(".internal") ||
-    normalized.endsWith(".local") ||
-    normalized.endsWith(".svc") ||
-    normalized.endsWith(".cluster.local") ||
-    !normalized.includes(".");
+  return normalized === "helium" || normalized.endsWith(".internal");
 }
 
 function parseEndpoint(

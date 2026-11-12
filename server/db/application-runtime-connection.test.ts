@@ -48,6 +48,36 @@ test("explicit app URL must target the same host, effective port, and database",
   assert.equal(buildApplicationPoolConfig(explicitPortMode).port, 5544);
 });
 
+test("the exact Replit Helium hostname is allowed with the restricted app URL", () => {
+  const mode = resolveApplicationRuntimeMode({
+    DATABASE_URL: "postgresql://platform_user:platform_pass@helium/heliumdb?sslmode=disable",
+    [APP_DATABASE_URL_ENV]: "postgresql://runtime_user:runtime_pass@helium/heliumdb?sslmode=disable",
+  });
+  assert.equal(mode.kind, "least_privilege");
+  assert.deepEqual(buildApplicationPoolConfig(mode), {
+    connectionString: "postgresql://runtime_user:runtime_pass@helium/heliumdb?sslmode=disable",
+    host: "helium",
+    port: 5432,
+    user: "runtime_user",
+    password: "runtime_pass",
+    database: "heliumdb",
+  });
+});
+
+test("the app host allowlist rejects near-miss, arbitrary, public DNS, and public IP hosts", () => {
+  for (const host of ["helium-other", "database", "db.example.com", "8.8.8.8"]) {
+    const url = `postgresql://runtime_user:pass@${host}/heliumdb?sslmode=disable`;
+    assert.throws(
+      () => resolveApplicationRuntimeMode({
+        DATABASE_URL: url,
+        [APP_DATABASE_URL_ENV]: url,
+      }),
+      /APP_DATABASE_ENDPOINT_NOT_INTERNAL/,
+      `host ${host} must be rejected`,
+    );
+  }
+});
+
 test("preflight endpoint comparison allows a dedicated login but binds transport and database", () => {
   assert.equal(applicationDatabaseEndpointsMatch(
     "postgresql://aichm_login:app_pass@db.replit.internal/heliumdb?sslmode=disable",

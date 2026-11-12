@@ -161,15 +161,16 @@ code-only preparation.
 The app uses `AICHM_APP_DATABASE_URL` only when explicitly set. Its endpoint
 must match the platform-provided `DATABASE_URL` endpoint in memory; the
 platform URL is comparison-only and is never a fallback after an explicit
-invalid app URL. The code currently accepts only RFC1918 IPv4 addresses or
-hostnames ending in `.internal`; it rejects public-DNS and loopback-style
-addresses before opening a socket. Replit's public docs describe the
-Development URL as private and project-scoped but do not publish its hostname
-syntax, so a legitimate URL outside this narrow syntax will fail closed until
-that format is verified and deliberately supported. The app login username is
-intentionally allowed to differ from the platform URL's username; otherwise a
-dedicated non-superuser could not replace the historical `postgres` login.
-Host, effective port, database name, and query/TLS policy must still match.
+invalid app URL. Replit's official Helium Development database documentation
+describes the database as running alongside the app, accessible only from
+within the app, and never public. The verified Development service hostname is
+the exact single-label `helium`; the app guard accepts that exact name alongside
+the existing RFC1918 IPv4 and `.internal` cases. It does not accept arbitrary
+single-label names, public DNS names, or public IP addresses. The app login
+username is intentionally allowed to differ from the platform URL's username;
+otherwise a dedicated non-superuser could not replace the historical
+`postgres` login. Host, effective port, database name, and query/TLS policy
+must still match.
 Startup then checks current database, login role, non-superuser
 status, safe group memberships, required core privileges, read-only assignment
 table ACLs, assignment-function EXECUTE, and absence of schema CREATE before
