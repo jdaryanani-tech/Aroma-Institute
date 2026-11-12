@@ -142,7 +142,7 @@ const EXPECTED_CONSTRAINTS: Record<string, ConstraintSpec> = {
   },
 };
 
-type IndexKeySpec = {
+export type IndexKeySpec = {
   position: number;
   column: string | null;
   definition: string;
@@ -553,6 +553,378 @@ function expectedConstraintEntries(): Array<[string, string, ConstraintSpec]> {
   return entries;
 }
 
+export function postgresStoredIndexName(declaredName: string): string {
+  return truncateIdentifierComponent(declaredName, 63);
+}
+
+function expectedIndexEntries(): Array<[string, string, IndexSpec]> {
+  const entries = Object.entries(EXPECTED_INDEXES).map(([declaredName, spec]) => [
+    declaredName,
+    postgresStoredIndexName(declaredName),
+    spec,
+  ] as [string, string, IndexSpec]);
+  const storedNames = entries.map(([, storedName]) => storedName);
+  if (new Set(storedNames).size !== storedNames.length) {
+    fail("CRM_SCHEMA_POSTCONDITION_EXPECTED_INDEX_NAMES_COLLIDE");
+  }
+  return entries;
+}
+
+type NormalizedIndexCatalogKey = IndexKeySpec;
+type NormalizedIndexCatalogRow = {
+  name: string;
+  table_name: string;
+  method: string;
+  unique: boolean;
+  primary: boolean;
+  constraint_name: string | null;
+  constraint_type: string | null;
+  valid: boolean;
+  ready: boolean;
+  live: boolean;
+  key_count: number;
+  attr_count: number;
+  keys: NormalizedIndexCatalogKey[];
+  included_columns: string[];
+  predicate: string | null;
+  expressions: string | null;
+  definition: string;
+};
+
+function invalidIndexMetadata(): never {
+  fail("CRM_SCHEMA_POSTCONDITION_INDEX_METADATA_INVALID");
+}
+
+function safeIndexIdentifier(value: unknown, nullable = false): string | null {
+  if (value === null && nullable) return null;
+  if (typeof value !== "string") return invalidIndexMetadata();
+  return safeCatalogIdentifier(value) ?? "<invalid-identifier>";
+}
+
+function normalizeIndexKeyDetails(value: unknown): NormalizedIndexCatalogKey[] {
+  if (!Array.isArray(value)) return invalidIndexMetadata();
+  return value.map(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return invalidIndexMetadata();
+    const key = item as Record<string, unknown>;
+    if (
+      typeof key.position !== "number" || !Number.isInteger(key.position) || key.position < 1 ||
+      typeof key.descending !== "boolean" ||
+      typeof key.nullsFirst !== "boolean"
+    ) return invalidIndexMetadata();
+
+    const definition = safeIndexDefinition(key.definition);
+    return {
+      position: key.position,
+      column: safeIndexIdentifier(key.column, true),
+      definition: normalizeIndexKeyDefinition(definition),
+      descending: key.descending,
+      nullsFirst: key.nullsFirst,
+      collationSchema: safeIndexIdentifier(key.collationSchema, true),
+      collationName: safeIndexIdentifier(key.collationName, true),
+      opclassSchema: safeIndexIdentifier(key.opclassSchema, true),
+      opclassName: safeIndexIdentifier(key.opclassName, true),
+    };
+  });
+}
+
+function normalizeIncludedColumns(value: unknown): string[] {
+  if (!Array.isArray(value)) return invalidIndexMetadata();
+  return value.map(column => safeIndexIdentifier(column) ?? "<invalid-identifier>");
+}
+
+function safeIndexDefinition(value: unknown): string {
+  if (typeof value !== "string") return invalidIndexMetadata();
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (
+    normalized.length === 0 ||
+    normalized.length > 4096 ||
+    !/^[A-Za-z0-9_ "$().,<>!=:+*\/%'-]+$/.test(normalized) ||
+    /[\u0000-\u001f\u007f]/.test(normalized)
+  ) return "<redacted-index-definition>";
+  return normalized;
+}
+
+function normalizeIndexKeyDefinition(value: string): string {
+  return value.toLowerCase().replaceAll('"', "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeIndexExpression(value: string | null): string | null {
+  if (value === null) return null;
+  const normalized = value.toLowerCase().replaceAll('"', "").replace(/\s+/g, " ").trim();
+  return SAFE_CHECK_EXPRESSION.test(normalized) ? normalized : "<redacted-index-expression>";
+}
+
+function requireBoolean(value: unknown): boolean {
+  if (typeof value !== "boolean") return invalidIndexMetadata();
+  return value;
+}
+
+function requireNumber(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    return invalidIndexMetadata();
+  }
+  return value;
+}
+
+function normalizeIndexCatalogRow(row: CrmIndexCatalogRow): NormalizedIndexCatalogRow {
+  if (!row || typeof row !== "object") return invalidIndexMetadata();
+  if (row.predicate !== null && typeof row.predicate !== "string") return invalidIndexMetadata();
+  if (row.expressions !== null && typeof row.expressions !== "string") return invalidIndexMetadata();
+  if (typeof row.definition !== "string") return invalidIndexMetadata();
+  const method = safeIndexIdentifier(row.method);
+  const constraintType = safeIndexIdentifier(row.constraint_type, true);
+  const predicate = row.predicate === null ? null : safeCheckExpression(row.predicate);
+  const expressions = row.expressions === null ? null : safeCheckExpression(row.expressions);
+
+  return {
+    name: safeIndexIdentifier(row.name) ?? "<invalid-identifier>",
+    table_name: safeIndexIdentifier(row.table_name) ?? "<invalid-identifier>",
+    method: method ?? "<invalid-identifier>",
+    unique: requireBoolean(row.unique),
+    primary: requireBoolean(row.primary),
+    constraint_name: safeIndexIdentifier(row.constraint_name, true),
+    constraint_type: constraintType,
+    valid: requireBoolean(row.valid),
+    ready: requireBoolean(row.ready),
+    live: requireBoolean(row.live),
+    key_count: requireNumber(row.key_count),
+    attr_count: requireNumber(row.attr_count),
+    keys: normalizeIndexKeyDetails(row.key_details),
+    included_columns: normalizeIncludedColumns(row.included_columns),
+    predicate,
+    expressions,
+    definition: safeIndexDefinition(row.definition),
+  };
+}
+
+type IndexDefinitionShape = {
+  definition: string;
+  table: string;
+  method: string;
+  unique: boolean;
+  primary: boolean;
+  constraintBacked: boolean;
+  constraintName: string | null;
+  constraintType: string | null;
+  keys: IndexKeySpec[];
+  includedColumns: string[];
+  predicate: string | null;
+  expressions: string | null;
+  valid: boolean;
+  ready: boolean;
+  live: boolean;
+};
+
+function normalizeIndexDdlDefinition(value: string, schema: string): string {
+  const normalized = safeIndexDefinition(value)
+    .toLowerCase()
+    .replaceAll('"', "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.replaceAll(`${schema.toLowerCase()}.`, "");
+}
+
+function normalizedIndexDefinition(shape: IndexDefinitionShape, schema: string): string {
+  return JSON.stringify({
+    ddl: normalizeIndexDdlDefinition(shape.definition, schema),
+    table: shape.table,
+    method: shape.method,
+    unique: shape.unique,
+    primary: shape.primary,
+    constraintBacked: shape.constraintBacked,
+    constraintName: shape.constraintName,
+    constraintType: shape.constraintType,
+    keys: shape.keys,
+    includedColumns: shape.includedColumns,
+    predicate: normalizeIndexExpression(shape.predicate),
+    expressions: normalizeIndexExpression(shape.expressions),
+    valid: shape.valid,
+    ready: shape.ready,
+    live: shape.live,
+  });
+}
+
+function expectedIndexDefinition(name: string, schema: string, spec: IndexSpec): string {
+  const uniqueness = spec.unique ? "UNIQUE " : "";
+  const keys = spec.keys.map(key => key.definition).join(", ");
+  const include = spec.includedColumns.length ? ` INCLUDE (${spec.includedColumns.join(", ")})` : "";
+  const predicate = spec.predicate ? ` WHERE ${spec.predicate}` : "";
+  return `CREATE ${uniqueness}INDEX ${name} ON ${schema}.${spec.table} USING ${spec.method} (${keys})${include}${predicate}`;
+}
+
+function expectedIndexView(name: string, schema: string, spec: IndexSpec): CrmIndexDiagnosticView {
+  const definitionShape: IndexDefinitionShape = {
+    definition: expectedIndexDefinition(name, schema, spec),
+    table: spec.table,
+    method: spec.method,
+    unique: spec.unique,
+    primary: spec.primary,
+    constraintBacked: spec.constraintName !== null,
+    constraintName: spec.constraintName,
+    constraintType: spec.constraintType,
+    keys: spec.keys,
+    includedColumns: spec.includedColumns,
+    predicate: spec.predicate,
+    expressions: spec.expressions,
+    valid: true,
+    ready: true,
+    live: true,
+  };
+  return {
+    name,
+    table: spec.table,
+    method: spec.method,
+    unique: spec.unique,
+    primary: spec.primary,
+    constraintBacked: spec.constraintName !== null,
+    constraintName: spec.constraintName,
+    constraintType: spec.constraintType,
+    keyCount: spec.keys.length,
+    attributeCount: spec.keys.length + spec.includedColumns.length,
+    keys: spec.keys,
+    includedColumns: spec.includedColumns,
+    predicate: spec.predicate,
+    expressions: spec.expressions,
+    valid: true,
+    ready: true,
+    live: true,
+    definition: expectedIndexDefinition(name, schema, spec),
+    normalizedDefinition: normalizedIndexDefinition(definitionShape, schema),
+  };
+}
+
+function actualIndexView(row: NormalizedIndexCatalogRow, schema: string): CrmIndexDiagnosticView {
+  const definitionShape: IndexDefinitionShape = {
+    definition: row.definition,
+    table: row.table_name,
+    method: row.method,
+    unique: row.unique,
+    primary: row.primary,
+    constraintBacked: row.constraint_name !== null,
+    constraintName: row.constraint_name,
+    constraintType: row.constraint_type,
+    keys: row.keys,
+    includedColumns: row.included_columns,
+    predicate: row.predicate,
+    expressions: row.expressions,
+    valid: row.valid,
+    ready: row.ready,
+    live: row.live,
+  };
+  return {
+    name: row.name,
+    table: row.table_name,
+    method: row.method,
+    unique: row.unique,
+    primary: row.primary,
+    constraintBacked: row.constraint_name !== null,
+    constraintName: row.constraint_name,
+    constraintType: row.constraint_type,
+    keyCount: row.key_count,
+    attributeCount: row.attr_count,
+    keys: row.keys,
+    includedColumns: row.included_columns,
+    predicate: row.predicate,
+    expressions: row.expressions,
+    valid: row.valid,
+    ready: row.ready,
+    live: row.live,
+    definition: row.definition,
+    normalizedDefinition: normalizedIndexDefinition(definitionShape, schema),
+  };
+}
+
+function indexKeyMismatchFields(expected: IndexKeySpec[], actual: IndexKeySpec[]): string[] {
+  const fields = new Set<string>();
+  if (expected.length !== actual.length) fields.add("keyCount");
+  for (let index = 0; index < Math.max(expected.length, actual.length); index += 1) {
+    const left = expected[index];
+    const right = actual[index];
+    if (!left || !right) continue;
+    if (left.position !== right.position) fields.add("keyOrder");
+    if (left.column !== right.column) fields.add("keyColumns");
+    if (left.definition !== right.definition) fields.add("keyExpressions");
+    if (left.descending !== right.descending) fields.add("sortOrder");
+    if (left.nullsFirst !== right.nullsFirst) fields.add("nullOrder");
+    if (left.collationSchema !== right.collationSchema || left.collationName !== right.collationName) {
+      fields.add("collation");
+    }
+    if (left.opclassSchema !== right.opclassSchema || left.opclassName !== right.opclassName) {
+      fields.add("operatorClass");
+    }
+  }
+  return Array.from(fields);
+}
+
+export function buildCrmIndexComparisonDiagnostic(
+  schema: string,
+  rows: readonly CrmIndexCatalogRow[],
+): CrmIndexComparisonDiagnostic {
+  const expectedEntries = expectedIndexEntries();
+  const normalizedRows = rows.map(normalizeIndexCatalogRow);
+  const expected = expectedEntries.map(([, storedName, spec]) =>
+    expectedIndexView(storedName, schema, spec));
+  const actual = normalizedRows.map(row => actualIndexView(row, schema)).sort((left, right) =>
+    left.table.localeCompare(right.table) || left.name.localeCompare(right.name));
+  const mismatches: CrmIndexComparisonDiagnostic["mismatches"] = [];
+
+  if (normalizedRows.length !== expectedEntries.length) {
+    mismatches.push({ index: "<index-set>", fields: ["count"] });
+  }
+
+  for (const [, storedName, spec] of expectedEntries) {
+    const matching = normalizedRows.filter(row => row.name === storedName);
+    if (matching.length === 0) {
+      mismatches.push({ index: storedName, fields: ["missing"] });
+      continue;
+    }
+    if (matching.length > 1) {
+      mismatches.push({ index: storedName, fields: ["duplicateName"] });
+      continue;
+    }
+
+    const row = matching[0]!;
+    const fields: string[] = [];
+    if (row.table_name !== spec.table) fields.push("table");
+    if (row.method !== spec.method) fields.push("method");
+    if (row.unique !== spec.unique) fields.push("unique");
+    if (row.primary !== spec.primary) fields.push("primary");
+    if ((row.constraint_name !== null) !== (spec.constraintName !== null)) fields.push("constraintBacked");
+    if (row.constraint_name !== spec.constraintName) fields.push("constraintName");
+    if (row.constraint_type !== spec.constraintType) fields.push("constraintType");
+    if (row.key_count !== spec.keys.length) fields.push("keyCount");
+    if (row.attr_count !== spec.keys.length + spec.includedColumns.length) fields.push("attributeCount");
+    fields.push(...indexKeyMismatchFields(spec.keys, row.keys));
+    if (JSON.stringify(row.included_columns) !== JSON.stringify(spec.includedColumns)) {
+      fields.push("includedColumns");
+    }
+    if (normalizeIndexExpression(row.predicate) !== normalizeIndexExpression(spec.predicate)) {
+      fields.push("predicate");
+    }
+    if (normalizeIndexExpression(row.expressions) !== normalizeIndexExpression(spec.expressions)) {
+      fields.push("expressions");
+    }
+    if (!row.valid) fields.push("valid");
+    if (!row.ready) fields.push("ready");
+    if (!row.live) fields.push("live");
+
+    const expectedView = expectedIndexView(storedName, schema, spec);
+    const actualView = actualIndexView(row, schema);
+    if (actualView.normalizedDefinition !== expectedView.normalizedDefinition) {
+      fields.push("normalizedDefinition");
+    }
+    if (fields.length) mismatches.push({ index: storedName, fields: Array.from(new Set(fields)) });
+  }
+
+  const expectedNames = new Set(expectedEntries.map(([, storedName]) => storedName));
+  for (const row of normalizedRows) {
+    if (!expectedNames.has(row.name)) {
+      mismatches.push({ index: row.name, fields: ["unexpected"] });
+    }
+  }
+  return { expectedCount: expected.length, actualCount: normalizedRows.length, expected, actual, mismatches };
+}
+
 function safeCheckExpression(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -705,6 +1077,13 @@ function failWithConstraintDiagnostic(
   throw new Error(`${code} ${JSON.stringify(diagnostic)}`);
 }
 
+function failWithIndexDiagnostic(
+  code: string,
+  diagnostic: CrmIndexComparisonDiagnostic,
+): never {
+  throw new Error(`${code} ${JSON.stringify(diagnostic)}`);
+}
+
 function extractFunctionSources(sql: string): Map<string, string> {
   const sources = new Map<string, string>();
   const pattern = /CREATE OR REPLACE FUNCTION\s+(?:(?:public)\.)?([a-z0-9_]+)\s*\(\s*\)\s*RETURNS\s+trigger\b[\s\S]*?\bAS\s+\$\$(.*?)\$\$;/gi;
@@ -809,38 +1188,57 @@ export async function assertCrmAssignmentSchemaPostconditions(
     );
   }
 
-  const { rows: indexRows } = await client.query<{
-    name: string; table_name: string; method: string; unique: boolean; primary: boolean;
-    valid: boolean; ready: boolean; live: boolean; key_count: number; attr_count: number;
-    columns: string[]; predicate: string | null; expressions: string | null;
-  }>(`
-    SELECT i.relname AS name,t.relname AS table_name,am.amname AS method,
+  const { rows: indexRows } = await client.query<CrmIndexCatalogRow>(`
+    SELECT i.relname::text AS name,t.relname::text AS table_name,am.amname::text AS method,
       x.indisunique AS unique,x.indisprimary AS primary,x.indisvalid AS valid,
       x.indisready AS ready,x.indislive AS live,x.indnkeyatts::integer AS key_count,
       x.indnatts::integer AS attr_count,
-      ARRAY(SELECT a.attname FROM unnest(x.indkey) WITH ORDINALITY k(attnum,ord)
+      backing.conname::text AS constraint_name,backing.contype::text AS constraint_type,
+      COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+          'position',k.ord,
+          'column',a.attname::text,
+          'definition',pg_get_indexdef(x.indexrelid,k.ord::integer,true),
+          'descending',((x.indoption[k.ord::integer-1]::integer & 1) <> 0),
+          'nullsFirst',((x.indoption[k.ord::integer-1]::integer & 2) <> 0),
+          'collationSchema',coll_ns.nspname::text,
+          'collationName',coll.collname::text,
+          'opclassSchema',op_ns.nspname::text,
+          'opclassName',opc.opcname::text
+        ) ORDER BY k.ord)
+        FROM unnest(x.indkey) WITH ORDINALITY k(attnum,ord)
+        LEFT JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum
+        LEFT JOIN pg_opclass opc ON opc.oid=x.indclass[k.ord::integer-1]
+        LEFT JOIN pg_namespace op_ns ON op_ns.oid=opc.opcnamespace
+        LEFT JOIN pg_collation coll ON coll.oid=x.indcollation[k.ord::integer-1]
+        LEFT JOIN pg_namespace coll_ns ON coll_ns.oid=coll.collnamespace
+        WHERE k.ord<=x.indnkeyatts
+      ),'[]'::jsonb) AS key_details,
+      COALESCE((
+        SELECT jsonb_agg(a.attname::text ORDER BY k.ord)
+        FROM unnest(x.indkey) WITH ORDINALITY k(attnum,ord)
         JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum
-        WHERE k.ord<=x.indnkeyatts ORDER BY k.ord) AS columns,
+        WHERE k.ord>x.indnkeyatts
+      ),'[]'::jsonb) AS included_columns,
       pg_get_expr(x.indpred,x.indrelid) AS predicate,
-      pg_get_expr(x.indexprs,x.indrelid) AS expressions
+      pg_get_expr(x.indexprs,x.indrelid) AS expressions,
+      pg_get_indexdef(x.indexrelid) AS definition
     FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid
     JOIN pg_class t ON t.oid=x.indrelid
     JOIN pg_namespace n ON n.oid=t.relnamespace
     JOIN pg_am am ON am.oid=i.relam
+    LEFT JOIN LATERAL (
+      SELECT c.conname,c.contype
+      FROM pg_constraint c
+      WHERE c.conindid=x.indexrelid AND c.conrelid=x.indrelid
+      ORDER BY c.conname LIMIT 1
+    ) backing ON true
     WHERE n.nspname=$1 AND t.relname=ANY($2::text[])
     ORDER BY t.relname,i.relname
   `, [schema, ASSIGNMENT_TABLES]);
-  if (indexRows.length !== Object.keys(EXPECTED_INDEXES).length) fail("CRM_SCHEMA_POSTCONDITION_INDEXES_DRIFTED");
-  for (const row of indexRows) {
-    const expected = EXPECTED_INDEXES[row.name];
-    if (
-      !expected || row.table_name !== expected.table || row.method !== "btree" ||
-      row.unique !== expected.unique || row.primary !== expected.primary ||
-      !row.valid || !row.ready || !row.live ||
-      row.key_count !== expected.columns.length || row.attr_count !== expected.columns.length ||
-      JSON.stringify(row.columns) !== JSON.stringify(expected.columns) ||
-      row.predicate !== null || row.expressions !== null
-    ) fail("CRM_SCHEMA_POSTCONDITION_INDEXES_DRIFTED");
+  const indexDiagnostic = buildCrmIndexComparisonDiagnostic(schema, indexRows);
+  if (indexDiagnostic.mismatches.length > 0) {
+    failWithIndexDiagnostic("CRM_SCHEMA_POSTCONDITION_INDEXES_DRIFTED", indexDiagnostic);
   }
 
   const expectedTriggers = { ...TRIGGERS_0014, ...(stage === "0015" ? TRIGGERS_0015 : {}) };
