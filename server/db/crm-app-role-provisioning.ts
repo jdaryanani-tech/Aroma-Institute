@@ -12,6 +12,24 @@ export const CRM_APP_ROLE_CONFIRM_VALUE = "PROVISION_AICHM_APP_LOGIN_IN_PINNED_D
 export const CRM_APP_ROLE_PASSWORD_ENV = "AICHM_APP_ROLE_PASSWORD";
 export const CRM_APP_ROLE_PASSWORD_MIN_LENGTH = 32;
 
+export const CRM_APP_ROLE_STAGE_CODES = Object.freeze({
+  argumentValidation: "CRM_APP_ROLE_STAGE_ARGUMENT_VALIDATION",
+  urlParsing: "CRM_APP_ROLE_STAGE_URL_PARSING",
+  poolCreation: "CRM_APP_ROLE_STAGE_POOL_CREATION",
+  poolConnection: "CRM_APP_ROLE_STAGE_POOL_CONNECTION",
+  transactionBegin: "CRM_APP_ROLE_STAGE_TRANSACTION_BEGIN",
+  readOnlyTransactionBegin: "CRM_APP_ROLE_STAGE_READ_ONLY_TRANSACTION_BEGIN",
+  pinnedIdentity: "CRM_APP_ROLE_STAGE_PINNED_IDENTITY_VERIFICATION",
+  roleMetadata: "CRM_APP_ROLE_STAGE_ROLE_METADATA_INSPECTION",
+  passwordReadiness: "CRM_APP_ROLE_STAGE_PASSWORD_READINESS",
+  readOnlyTransactionCompletion: "CRM_APP_ROLE_STAGE_READ_ONLY_TRANSACTION_COMPLETION",
+  transactionCompletion: "CRM_APP_ROLE_STAGE_TRANSACTION_COMPLETION",
+  cleanup: "CRM_APP_ROLE_STAGE_CLEANUP",
+});
+
+export type CrmAppRoleStageCode =
+  (typeof CRM_APP_ROLE_STAGE_CODES)[keyof typeof CRM_APP_ROLE_STAGE_CODES];
+
 export type CrmAppRoleProvisionMode = "preview" | "apply";
 
 export type CrmAppRoleAttributes = {
@@ -49,6 +67,17 @@ export type CrmAppRoleProvisionPlan = {
 };
 
 export type CrmAppRoleProvisionQueryable = Pick<PoolClient, "query">;
+
+export type CrmAppRoleProvisionObserver = {
+  setStage?: (stage: CrmAppRoleStageCode) => void;
+  onCleanupFailure?: (error: unknown) => void;
+};
+
+export type CrmAppRoleSelectedFailure = {
+  error: unknown;
+  stageCode: CrmAppRoleStageCode;
+  cleanupError?: unknown;
+};
 
 export function parseCrmAppRoleProvisionMode(
   args: string[],
@@ -182,18 +211,130 @@ export function planCrmAppRoleProvisioning(
   };
 }
 
+const SAFE_CRM_APP_ROLE_ERROR_CODES = new Set<string>([
+  "CRM_APP_ROLE_ARGUMENTS_REJECTED",
+  "CRM_APP_ROLE_EXPLICIT_CONFIRMATION_REQUIRED",
+  "CRM_APP_ROLE_PASSWORD_FORMAT_REJECTED",
+  "CRM_APP_ROLE_PASSWORD_SECRET_REQUIRED",
+  "CRM_APP_ROLE_RUNTIME_GROUP_ATTRIBUTES_REJECTED",
+  "CRM_APP_ROLE_LOGIN_ATTRIBUTES_REJECTED",
+  "CRM_APP_ROLE_LOGIN_PRIVILEGE_REJECTED",
+  "CRM_APP_ROLE_LOGIN_MEMBERSHIPS_REJECTED",
+  "CRM_APP_ROLE_GROUP_MEMBERS_REJECTED",
+  "CRM_APP_ROLE_GROUP_MEMBERSHIP_REJECTED",
+  "CRM_APP_ROLE_MEMBERSHIP_STATE_INCONSISTENT",
+  "CRM_APP_ROLE_IDENTITY_UNAVAILABLE",
+  "CRM_APP_ROLE_PASSWORD_SET_FAILED",
+  "CRM_APP_ROLE_DEVELOPMENT_IDENTITY_REJECTED",
+  "CRM_APP_ROLE_POSTCONDITION_FAILED",
+  "CRM_APP_ROLE_CLIENT_CLEANUP_FAILED",
+  "CRM_APP_ROLE_POOL_CLEANUP_FAILED",
+  "CRM_APP_ROLE_PROVISION_FAILED",
+  "CRM_FORWARD_PRODUCTION_IDENTITY_REJECTED",
+  "CRM_FORWARD_DEVELOPMENT_IDENTITY_MISMATCH",
+  ...Object.values(CRM_FORWARD_GUARD_ERROR_CODES),
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "EHOSTDOWN",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EPIPE",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "ERR_TLS_HANDSHAKE_TIMEOUT",
+  "CERT_HAS_EXPIRED",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "28000",
+  "28P01",
+  "3D000",
+  "42501",
+  "42601",
+  "42703",
+  "42704",
+  "08001",
+  "08003",
+  "08004",
+  "08006",
+  "08007",
+  "08P01",
+]);
+
 function codeFromError(error: unknown): string {
-  if (error && typeof error === "object" && "code" in error) {
-    const code = (error as { code?: unknown }).code;
-    if (typeof code === "string" && /^CRM_APP_ROLE_[A-Z_]+$/.test(code)) return code;
-    if (
-      code === "CRM_FORWARD_PRODUCTION_IDENTITY_REJECTED" ||
-      code === "CRM_FORWARD_DEVELOPMENT_IDENTITY_MISMATCH" ||
-      (typeof code === "string" &&
-        (Object.values(CRM_FORWARD_GUARD_ERROR_CODES) as string[]).includes(code))
-    ) return String(code);
+  const seen = new Set<object>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (!current || typeof current !== "object" || seen.has(current)) break;
+    seen.add(current);
+    let code: unknown;
+    let cause: unknown;
+    try {
+      code = (current as { code?: unknown }).code;
+      cause = (current as { cause?: unknown }).cause;
+    } catch {
+      break;
+    }
+    if (typeof code === "string" && SAFE_CRM_APP_ROLE_ERROR_CODES.has(code)) return code;
+    current = cause;
   }
   return "CRM_APP_ROLE_PROVISION_FAILED";
+}
+
+export function formatCrmAppRoleFailureDiagnostic(input: {
+  correlationId: string;
+  stageCode: CrmAppRoleStageCode;
+  error: unknown;
+  cleanupError?: unknown;
+}): {
+  correlationId: string;
+  stageCode: CrmAppRoleStageCode;
+  errorCode: string;
+  cleanupStageCode?: CrmAppRoleStageCode;
+  cleanupErrorCode?: string;
+} {
+  const diagnostic: {
+    correlationId: string;
+    stageCode: CrmAppRoleStageCode;
+    errorCode: string;
+    cleanupStageCode?: CrmAppRoleStageCode;
+    cleanupErrorCode?: string;
+  } = {
+    correlationId: input.correlationId,
+    stageCode: input.stageCode,
+    errorCode: codeFromError(input.error),
+  };
+  if (input.cleanupError !== undefined) {
+    diagnostic.cleanupStageCode = CRM_APP_ROLE_STAGE_CODES.cleanup;
+    diagnostic.cleanupErrorCode = codeFromError(input.cleanupError);
+  }
+  return diagnostic;
+}
+
+export function selectCrmAppRoleFailure(input: {
+  hasPrimaryFailure: boolean;
+  primaryError: unknown;
+  primaryStageCode?: CrmAppRoleStageCode;
+  hasCleanupFailure: boolean;
+  cleanupError: unknown;
+}): CrmAppRoleSelectedFailure | undefined {
+  if (input.hasPrimaryFailure) {
+    return {
+      error: input.primaryError,
+      stageCode: input.primaryStageCode ?? CRM_APP_ROLE_STAGE_CODES.argumentValidation,
+      cleanupError: input.hasCleanupFailure ? input.cleanupError : undefined,
+    };
+  }
+  if (input.hasCleanupFailure) {
+    return {
+      error: input.cleanupError,
+      stageCode: CRM_APP_ROLE_STAGE_CODES.cleanup,
+    };
+  }
+  return undefined;
 }
 
 async function readIdentity(
@@ -415,33 +556,52 @@ export async function runCrmAppRoleProvisioning(
   mode: CrmAppRoleProvisionMode,
   password: string | undefined,
   confirmation?: string,
+  observer: CrmAppRoleProvisionObserver = {},
 ): Promise<ReturnType<typeof safeResult>> {
-  if (mode === "apply" && confirmation !== CRM_APP_ROLE_CONFIRM_VALUE) {
-    provisionFail("CRM_APP_ROLE_EXPLICIT_CONFIRMATION_REQUIRED");
-  }
-  if (mode === "apply" && !isStrongAlphanumericAppRolePassword(password)) {
-    provisionFail(password ? "CRM_APP_ROLE_PASSWORD_FORMAT_REJECTED" : "CRM_APP_ROLE_PASSWORD_SECRET_REQUIRED");
+  if (mode === "apply") {
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.argumentValidation);
+    if (confirmation !== CRM_APP_ROLE_CONFIRM_VALUE) {
+      provisionFail("CRM_APP_ROLE_EXPLICIT_CONFIRMATION_REQUIRED");
+    }
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.passwordReadiness);
+    if (!isStrongAlphanumericAppRolePassword(password)) {
+      provisionFail(password ? "CRM_APP_ROLE_PASSWORD_FORMAT_REJECTED" : "CRM_APP_ROLE_PASSWORD_SECRET_REQUIRED");
+    }
   }
 
   if (mode === "preview") {
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionBegin);
     await client.query("BEGIN READ ONLY");
     try {
+      observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.pinnedIdentity);
       const identity = await assertPinnedIdentity(client);
+      observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.roleMetadata);
       const state = await readCrmAppRoleProvisioningState(client);
       const plan = planCrmAppRoleProvisioning(state);
+      observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.passwordReadiness);
+      const passwordReady = isStrongAlphanumericAppRolePassword(password);
+      observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionCompletion);
       await client.query("COMMIT");
-      return safeResult("preview", identity, plan, isStrongAlphanumericAppRolePassword(password));
+      return safeResult("preview", identity, plan, passwordReady);
     } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
+      try {
+        await client.query("ROLLBACK");
+      } catch (cleanupError) {
+        observer.onCleanupFailure?.(cleanupError);
+      }
       throw error;
     }
   }
 
+  observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.transactionBegin);
   await client.query("BEGIN");
   try {
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.pinnedIdentity);
     await assertPinnedIdentity(client);
     await client.query("SELECT pg_advisory_xact_lock($1::integer,$2::integer)", [1095326536, 1128813875]);
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.pinnedIdentity);
     const identity = await assertPinnedIdentity(client);
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.roleMetadata);
     const initialState = await readCrmAppRoleProvisioningState(client);
     const plan = planCrmAppRoleProvisioning(initialState);
 
@@ -456,8 +616,10 @@ export async function runCrmAppRoleProvisioning(
       writeIdentity.inRecovery ||
       writeIdentity.defaultTransactionReadOnly
     ) provisionFail("CRM_APP_ROLE_DEVELOPMENT_IDENTITY_REJECTED");
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.roleMetadata);
     const stateAtWrite = await readCrmAppRoleProvisioningState(client);
     const writePlan = planCrmAppRoleProvisioning(stateAtWrite);
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.pinnedIdentity);
     const beforeWriteIdentity = await assertPinnedIdentity(client);
     if (
       beforeWriteIdentity.databaseName !== identity.databaseName ||
@@ -467,8 +629,10 @@ export async function runCrmAppRoleProvisioning(
       beforeWriteIdentity.inRecovery ||
       beforeWriteIdentity.defaultTransactionReadOnly
     ) provisionFail("CRM_APP_ROLE_DEVELOPMENT_IDENTITY_REJECTED");
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.passwordReadiness);
     await provisionWrites(client, writePlan, password!);
 
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.roleMetadata);
     const finalState = await readCrmAppRoleProvisioningState(client);
     validateCrmAppRoleProvisioningState(finalState);
     if (
@@ -479,6 +643,7 @@ export async function runCrmAppRoleProvisioning(
       finalState.runtimeGroupMembers.length !== 1 ||
       finalState.runtimeGroupMembers[0].memberRole !== "aichm_app_login"
     ) provisionFail("CRM_APP_ROLE_POSTCONDITION_FAILED");
+    observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.pinnedIdentity);
     const finalIdentity = await assertPinnedIdentity(client);
     if (
       finalIdentity.databaseName !== identity.databaseName ||
@@ -486,10 +651,15 @@ export async function runCrmAppRoleProvisioning(
       finalIdentity.databaseUser !== identity.databaseUser ||
       finalIdentity.systemIdentifier !== identity.systemIdentifier
     ) provisionFail("CRM_APP_ROLE_DEVELOPMENT_IDENTITY_REJECTED");
+      observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionCompletion);
     await client.query("COMMIT");
     return safeResult("provisioned", finalIdentity, writePlan, true);
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => undefined);
+    try {
+      await client.query("ROLLBACK");
+    } catch (cleanupError) {
+      observer.onCleanupFailure?.(cleanupError);
+    }
     throw error;
   }
 }

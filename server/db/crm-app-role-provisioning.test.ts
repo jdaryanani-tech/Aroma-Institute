@@ -5,10 +5,13 @@ import {
   CRM_APP_ROLE_APPLY_FLAG,
   CRM_APP_ROLE_CONFIRM_ENV,
   CRM_APP_ROLE_CONFIRM_VALUE,
+  CRM_APP_ROLE_STAGE_CODES,
+  formatCrmAppRoleFailureDiagnostic,
   isStrongAlphanumericAppRolePassword,
   parseCrmAppRoleProvisionMode,
   planCrmAppRoleProvisioning,
   runCrmAppRoleProvisioning,
+  selectCrmAppRoleFailure,
   sanitizedCrmAppRoleErrorCode,
   validateCrmAppRoleProvisioningState,
   type CrmAppRoleProvisioningState,
@@ -84,6 +87,7 @@ function existingValidState(): CrmAppRoleProvisioningState {
 function createMockClient(
   initialState: CrmAppRoleProvisioningState,
   identity: typeof pinnedIdentity = pinnedIdentity,
+  failQuery?: (text: string) => unknown,
 ) {
   const calls: Array<{ text: string; values?: unknown[] }> = [];
   const state = structuredClone(initialState);
@@ -92,6 +96,8 @@ function createMockClient(
     state,
     async query(text: string, values?: unknown[]) {
       calls.push({ text, values });
+      const injectedFailure = failQuery?.(text);
+      if (injectedFailure) throw injectedFailure;
       if (text.includes("SELECT current_database() AS database_name")) {
         return { rows: [identity] };
       }
@@ -271,8 +277,18 @@ test("unsafe existing role attributes or memberships block before provisioning w
 
 test("preview reads the pinned identity and roles but performs no provisioning writes", async () => {
   const client = createMockClient(emptyState());
-  const result = await runCrmAppRoleProvisioning(client as never, "preview", password);
+  const stages: string[] = [];
+  const result = await runCrmAppRoleProvisioning(client as never, "preview", password, undefined, {
+    setStage: stage => stages.push(stage),
+  });
   assert.equal(result.status, "preview");
+  assert.deepEqual(stages, [
+    CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionBegin,
+    CRM_APP_ROLE_STAGE_CODES.pinnedIdentity,
+    CRM_APP_ROLE_STAGE_CODES.roleMetadata,
+    CRM_APP_ROLE_STAGE_CODES.passwordReadiness,
+    CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionCompletion,
+  ]);
   assert.deepEqual(result.plan, {
     createRuntimeGroup: true,
     createAppLogin: true,
@@ -330,4 +346,110 @@ test("provisioner sanitizes errors and does not print password-related environme
   assert.match(script, /requireCrmForwardConnectionUrl\(process\.env\)/);
   assert.match(script, /new Pool\(operatorPoolConfig\(dedicatedUrl, effectivePort\)\)/);
   assert.doesNotMatch(script, /new Pool\(\s*process\.env\.DATABASE_URL/);
+  for (const stage of ["urlParsing", "poolCreation", "poolConnection", "cleanup"]) {
+    assert.match(script, new RegExp(`setStage\\(CRM_APP_ROLE_STAGE_CODES\\.${stage}\\)`));
+  }
+});
+
+test("role-inspection failures retain their stage and only an allowlisted code", async () => {
+  const privateText = "postgres://sensitive-user:secret@private-host/aichm";
+  const networkError = Object.assign(new Error(privateText), { code: "ECONNREFUSED" });
+  const client = createMockClient(emptyState(), pinnedIdentity, text =>
+    text.includes("FROM pg_auth_members membership") ? networkError : undefined,
+  );
+  let stage: string | undefined;
+  await assert.rejects(
+    runCrmAppRoleProvisioning(client as never, "preview", password, undefined, {
+      setStage: value => { stage = value; },
+    }),
+  );
+  const diagnostic = formatCrmAppRoleFailureDiagnostic({
+    correlationId: "11111111-1111-4111-8111-111111111111",
+    stageCode: stage as never,
+    error: networkError,
+  });
+  assert.equal(stage, CRM_APP_ROLE_STAGE_CODES.roleMetadata);
+  assert.equal(diagnostic.errorCode, "ECONNREFUSED");
+  assert.equal(JSON.stringify(diagnostic).includes(privateText), false);
+});
+
+test("cleanup failure is reported separately without replacing the primary failure", async () => {
+  const primary = Object.assign(new Error("private URL and password must not appear"), {
+    code: "08006",
+  });
+  const rollback = Object.assign(new Error("private cleanup details"), {
+    code: "CRM_APP_ROLE_POOL_CLEANUP_FAILED",
+  });
+  const client = createMockClient(emptyState(), pinnedIdentity, text => {
+    if (text === "COMMIT") return primary;
+    if (text === "ROLLBACK") return rollback;
+    return undefined;
+  });
+  const cleanupErrors: unknown[] = [];
+  let stage: string | undefined;
+  await assert.rejects(
+    runCrmAppRoleProvisioning(client as never, "preview", password, undefined, {
+      setStage: value => { stage = value; },
+      onCleanupFailure: error => cleanupErrors.push(error),
+    }),
+  );
+  const diagnostic = formatCrmAppRoleFailureDiagnostic({
+    correlationId: "22222222-2222-4222-8222-222222222222",
+    stageCode: stage as never,
+    error: primary,
+    cleanupError: cleanupErrors[0],
+  });
+  assert.equal(stage, CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionCompletion);
+  const selected = selectCrmAppRoleFailure({
+    hasPrimaryFailure: true,
+    primaryError: primary,
+    primaryStageCode: stage as never,
+    hasCleanupFailure: true,
+    cleanupError: cleanupErrors[0],
+  });
+  assert.equal(selected?.error, primary);
+  assert.equal(selected?.cleanupError, rollback);
+  assert.equal(diagnostic.errorCode, "08006");
+  assert.equal(diagnostic.cleanupStageCode, CRM_APP_ROLE_STAGE_CODES.cleanup);
+  assert.equal(diagnostic.cleanupErrorCode, "CRM_APP_ROLE_POOL_CLEANUP_FAILED");
+  assert.equal(JSON.stringify(diagnostic).includes("private"), false);
+});
+
+test("cleanup-only failure is reported as the primary cleanup stage", () => {
+  const cleanup = Object.assign(new Error("secret cleanup text"), {
+    code: "CRM_APP_ROLE_POOL_CLEANUP_FAILED",
+  });
+  const selected = selectCrmAppRoleFailure({
+    hasPrimaryFailure: false,
+    primaryError: undefined,
+    hasCleanupFailure: true,
+    cleanupError: cleanup,
+  });
+  assert.equal(selected?.error, cleanup);
+  assert.equal(selected?.stageCode, CRM_APP_ROLE_STAGE_CODES.cleanup);
+  const diagnostic = formatCrmAppRoleFailureDiagnostic({
+    correlationId: "44444444-4444-4444-8444-444444444444",
+    stageCode: selected!.stageCode,
+    error: selected!.error,
+  });
+  assert.equal(diagnostic.errorCode, "CRM_APP_ROLE_POOL_CLEANUP_FAILED");
+});
+
+test("diagnostic formatting rejects unallowlisted codes and exposes no raw message", () => {
+  const error = Object.assign(new Error("sensitive endpoint and token"), {
+    code: "PRIVATE_PASSWORD_VALUE",
+    cause: Object.assign(new Error("nested endpoint"), { code: "ETIMEDOUT" }),
+  });
+  const diagnostic = formatCrmAppRoleFailureDiagnostic({
+    correlationId: "33333333-3333-4333-8333-333333333333",
+    stageCode: CRM_APP_ROLE_STAGE_CODES.poolConnection,
+    error,
+  });
+  assert.deepEqual(diagnostic, {
+    correlationId: "33333333-3333-4333-8333-333333333333",
+    stageCode: CRM_APP_ROLE_STAGE_CODES.poolConnection,
+    errorCode: "ETIMEDOUT",
+  });
+  assert.equal(JSON.stringify(diagnostic).includes("sensitive"), false);
+  assert.equal(JSON.stringify(diagnostic).includes("endpoint"), false);
 });
