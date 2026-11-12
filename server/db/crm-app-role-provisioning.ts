@@ -1,7 +1,6 @@
 import type { PoolClient } from "pg";
 import {
   assertCrmForwardDevelopmentIdentity,
-  CRM_FORWARD_DEVELOPMENT_IDENTITY,
   CRM_FORWARD_GUARD_ERROR_CODES,
   type CrmForwardDatabaseIdentity,
 } from "./crm-forward-migration-guard";
@@ -11,6 +10,17 @@ export const CRM_APP_ROLE_CONFIRM_ENV = "AICHM_CRM_APP_ROLE_PROVISION_CONFIRM";
 export const CRM_APP_ROLE_CONFIRM_VALUE = "PROVISION_AICHM_APP_LOGIN_IN_PINNED_DEVELOPMENT";
 export const CRM_APP_ROLE_PASSWORD_ENV = "AICHM_APP_ROLE_PASSWORD";
 export const CRM_APP_ROLE_PASSWORD_MIN_LENGTH = 32;
+
+export type CrmAppRolePasswordReadiness = {
+  passwordSecretPresent: boolean;
+  passwordIsString: boolean;
+  passwordLengthAccepted: boolean;
+  passwordLettersAndDigitsOnly: boolean;
+  passwordHasLowercase: boolean;
+  passwordHasUppercase: boolean;
+  passwordHasDigit: boolean;
+  passwordFormatValid: boolean;
+};
 
 export const CRM_APP_ROLE_STAGE_CODES = Object.freeze({
   argumentValidation: "CRM_APP_ROLE_STAGE_ARGUMENT_VALIDATION",
@@ -95,14 +105,38 @@ export function parseCrmAppRoleProvisionMode(
   throw codedError("CRM_APP_ROLE_ARGUMENTS_REJECTED");
 }
 
-export function isStrongAlphanumericAppRolePassword(value: string | undefined): value is string {
-  return typeof value === "string" &&
-    value.length >= CRM_APP_ROLE_PASSWORD_MIN_LENGTH &&
-    value.length <= 128 &&
-    /[a-z]/.test(value) &&
-    /[A-Z]/.test(value) &&
-    /\d/.test(value) &&
-    /^[A-Za-z0-9]+$/.test(value);
+export function summarizeCrmAppRolePasswordReadiness(value: unknown): CrmAppRolePasswordReadiness {
+  const passwordValue = typeof value === "string" ? value : null;
+  const passwordIsString = passwordValue !== null;
+  const passwordSecretPresent = value !== undefined;
+  const passwordLengthAccepted = passwordIsString &&
+    passwordValue.length >= CRM_APP_ROLE_PASSWORD_MIN_LENGTH &&
+    passwordValue.length <= 128;
+  const passwordLettersAndDigitsOnly = passwordIsString && /^[A-Za-z0-9]+$/.test(passwordValue);
+  const passwordHasLowercase = passwordIsString && /[a-z]/.test(passwordValue);
+  const passwordHasUppercase = passwordIsString && /[A-Z]/.test(passwordValue);
+  const passwordHasDigit = passwordIsString && /\d/.test(passwordValue);
+  const passwordFormatValid = passwordSecretPresent &&
+    passwordIsString &&
+    passwordLengthAccepted &&
+    passwordLettersAndDigitsOnly &&
+    passwordHasLowercase &&
+    passwordHasUppercase &&
+    passwordHasDigit;
+  return {
+    passwordSecretPresent,
+    passwordIsString,
+    passwordLengthAccepted,
+    passwordLettersAndDigitsOnly,
+    passwordHasLowercase,
+    passwordHasUppercase,
+    passwordHasDigit,
+    passwordFormatValid,
+  };
+}
+
+export function isStrongAlphanumericAppRolePassword(value: unknown): value is string {
+  return summarizeCrmAppRolePasswordReadiness(value).passwordFormatValid;
 }
 
 function codedError(code: string): Error & { code: string } {
@@ -523,32 +557,12 @@ async function provisionWrites(
   `);
 }
 
-function safeResult(
-  status: "preview" | "provisioned",
-  identity: CrmForwardDatabaseIdentity,
-  plan: CrmAppRoleProvisionPlan,
-  passwordReady: boolean,
-) {
-  return {
-    status,
-    targetIdentity: {
-      verified: {
-        databaseName: identity.databaseName,
-        databaseOid: identity.databaseOid,
-        databaseUser: identity.databaseUser,
-        systemIdentifier: identity.systemIdentifier,
-        inRecovery: identity.inRecovery,
-        defaultTransactionReadOnly: identity.defaultTransactionReadOnly,
-      },
-      expected: CRM_FORWARD_DEVELOPMENT_IDENTITY,
-    },
-    roles: {
-      runtimeGroup: "aichm_app_runtime",
-      appLogin: "aichm_app_login",
-    },
-    passwordSecretReady: passwordReady,
-    plan,
-  };
+function safePreviewResult(readiness: CrmAppRolePasswordReadiness): CrmAppRolePasswordReadiness {
+  return readiness;
+}
+
+function safeProvisionedResult(): { status: "provisioned" } {
+  return { status: "provisioned" };
 }
 
 export async function runCrmAppRoleProvisioning(
@@ -557,7 +571,7 @@ export async function runCrmAppRoleProvisioning(
   password: string | undefined,
   confirmation?: string,
   observer: CrmAppRoleProvisionObserver = {},
-): Promise<ReturnType<typeof safeResult>> {
+): Promise<CrmAppRolePasswordReadiness | { status: "provisioned" }> {
   if (mode === "apply") {
     observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.argumentValidation);
     if (confirmation !== CRM_APP_ROLE_CONFIRM_VALUE) {
@@ -574,15 +588,15 @@ export async function runCrmAppRoleProvisioning(
     await client.query("BEGIN READ ONLY");
     try {
       observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.pinnedIdentity);
-      const identity = await assertPinnedIdentity(client);
+        await assertPinnedIdentity(client);
       observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.roleMetadata);
       const state = await readCrmAppRoleProvisioningState(client);
-      const plan = planCrmAppRoleProvisioning(state);
+        planCrmAppRoleProvisioning(state);
       observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.passwordReadiness);
-      const passwordReady = isStrongAlphanumericAppRolePassword(password);
+      const passwordReadiness = summarizeCrmAppRolePasswordReadiness(password);
       observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionCompletion);
       await client.query("COMMIT");
-      return safeResult("preview", identity, plan, passwordReady);
+      return safePreviewResult(passwordReadiness);
     } catch (error) {
       try {
         await client.query("ROLLBACK");
@@ -653,7 +667,7 @@ export async function runCrmAppRoleProvisioning(
     ) provisionFail("CRM_APP_ROLE_DEVELOPMENT_IDENTITY_REJECTED");
       observer.setStage?.(CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionCompletion);
     await client.query("COMMIT");
-    return safeResult("provisioned", finalIdentity, writePlan, true);
+    return safeProvisionedResult();
   } catch (error) {
     try {
       await client.query("ROLLBACK");

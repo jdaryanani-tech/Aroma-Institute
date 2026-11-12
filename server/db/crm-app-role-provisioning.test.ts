@@ -11,6 +11,7 @@ import {
   parseCrmAppRoleProvisionMode,
   planCrmAppRoleProvisioning,
   runCrmAppRoleProvisioning,
+  summarizeCrmAppRolePasswordReadiness,
   selectCrmAppRoleFailure,
   sanitizedCrmAppRoleErrorCode,
   validateCrmAppRoleProvisioningState,
@@ -211,6 +212,151 @@ test("only strong alphanumeric password secret values are accepted", () => {
   assert.equal(isStrongAlphanumericAppRolePassword(`${password}!`), false);
 });
 
+test("password readiness reports safe format booleans without returning input", () => {
+  const cases: Array<{
+    name: string;
+    input: unknown;
+    expected: ReturnType<typeof summarizeCrmAppRolePasswordReadiness>;
+  }> = [
+    {
+      name: "missing value",
+      input: undefined,
+      expected: {
+        passwordSecretPresent: false,
+        passwordIsString: false,
+        passwordLengthAccepted: false,
+        passwordLettersAndDigitsOnly: false,
+        passwordHasLowercase: false,
+        passwordHasUppercase: false,
+        passwordHasDigit: false,
+        passwordFormatValid: false,
+      },
+    },
+    {
+      name: "non-string value",
+      input: 734921,
+      expected: {
+        passwordSecretPresent: true,
+        passwordIsString: false,
+        passwordLengthAccepted: false,
+        passwordLettersAndDigitsOnly: false,
+        passwordHasLowercase: false,
+        passwordHasUppercase: false,
+        passwordHasDigit: false,
+        passwordFormatValid: false,
+      },
+    },
+    {
+      name: "too short",
+      input: "ShortSecretCanaryA1",
+      expected: {
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        passwordLengthAccepted: false,
+        passwordLettersAndDigitsOnly: true,
+        passwordHasLowercase: true,
+        passwordHasUppercase: true,
+        passwordHasDigit: true,
+        passwordFormatValid: false,
+      },
+    },
+    {
+      name: "too long",
+      input: `Aa1${"longcanary".repeat(13)}`,
+      expected: {
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        passwordLengthAccepted: false,
+        passwordLettersAndDigitsOnly: true,
+        passwordHasLowercase: true,
+        passwordHasUppercase: true,
+        passwordHasDigit: true,
+        passwordFormatValid: false,
+      },
+    },
+    {
+      name: "invalid characters",
+      input: `Aa1!${"canary".repeat(5)}`,
+      expected: {
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        passwordLengthAccepted: true,
+        passwordLettersAndDigitsOnly: false,
+        passwordHasLowercase: true,
+        passwordHasUppercase: true,
+        passwordHasDigit: true,
+        passwordFormatValid: false,
+      },
+    },
+    {
+      name: "missing lowercase",
+      input: `A1${"B".repeat(30)}`,
+      expected: {
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        passwordLengthAccepted: true,
+        passwordLettersAndDigitsOnly: true,
+        passwordHasLowercase: false,
+        passwordHasUppercase: true,
+        passwordHasDigit: true,
+        passwordFormatValid: false,
+      },
+    },
+    {
+      name: "missing uppercase",
+      input: `a1${"b".repeat(30)}`,
+      expected: {
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        passwordLengthAccepted: true,
+        passwordLettersAndDigitsOnly: true,
+        passwordHasLowercase: true,
+        passwordHasUppercase: false,
+        passwordHasDigit: true,
+        passwordFormatValid: false,
+      },
+    },
+    {
+      name: "missing digit",
+      input: `Ab${"c".repeat(30)}`,
+      expected: {
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        passwordLengthAccepted: true,
+        passwordLettersAndDigitsOnly: true,
+        passwordHasLowercase: true,
+        passwordHasUppercase: true,
+        passwordHasDigit: false,
+        passwordFormatValid: false,
+      },
+    },
+    {
+      name: "valid value",
+      input: password,
+      expected: {
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        passwordLengthAccepted: true,
+        passwordLettersAndDigitsOnly: true,
+        passwordHasLowercase: true,
+        passwordHasUppercase: true,
+        passwordHasDigit: true,
+        passwordFormatValid: true,
+      },
+    },
+  ];
+
+  for (const { name, input, expected } of cases) {
+    const readiness = summarizeCrmAppRolePasswordReadiness(input);
+    assert.deepEqual(readiness, expected, name);
+    if (typeof input === "string") {
+      assert.equal(JSON.stringify(readiness).includes(input), false, `${name} output redaction`);
+    } else if (input !== undefined) {
+      assert.equal(JSON.stringify(readiness).includes(String(input)), false, `${name} output redaction`);
+    }
+  }
+});
+
 test("role validation accepts only exact restrictive attributes and memberships", () => {
   assert.doesNotThrow(() => validateCrmAppRoleProvisioningState(existingValidState()));
   for (const state of [
@@ -281,7 +427,17 @@ test("preview reads the pinned identity and roles but performs no provisioning w
   const result = await runCrmAppRoleProvisioning(client as never, "preview", password, undefined, {
     setStage: stage => stages.push(stage),
   });
-  assert.equal(result.status, "preview");
+  assert.deepEqual(result, {
+    passwordSecretPresent: true,
+    passwordIsString: true,
+    passwordLengthAccepted: true,
+    passwordLettersAndDigitsOnly: true,
+    passwordHasLowercase: true,
+    passwordHasUppercase: true,
+    passwordHasDigit: true,
+    passwordFormatValid: true,
+  });
+  assert.equal(JSON.stringify(result).includes(password), false);
   assert.deepEqual(stages, [
     CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionBegin,
     CRM_APP_ROLE_STAGE_CODES.pinnedIdentity,
@@ -289,12 +445,6 @@ test("preview reads the pinned identity and roles but performs no provisioning w
     CRM_APP_ROLE_STAGE_CODES.passwordReadiness,
     CRM_APP_ROLE_STAGE_CODES.readOnlyTransactionCompletion,
   ]);
-  assert.deepEqual(result.plan, {
-    createRuntimeGroup: true,
-    createAppLogin: true,
-    grantRuntimeMembership: true,
-    setLoginPassword: true,
-  });
   assert.equal(client.calls.some(call => /CREATE ROLE|GRANT |set_config|DO \$aichm_password/.test(call.text)), false);
 });
 

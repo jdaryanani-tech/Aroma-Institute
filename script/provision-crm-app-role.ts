@@ -132,9 +132,8 @@ async function run(): Promise<void> {
     return;
   }
 
-  const result = output as { status?: string };
-  console.log(JSON.stringify({ ...(output as object), correlationId }));
-  if (result.status === "preview") process.exitCode = 0;
+  console.log(JSON.stringify(output));
+  process.exitCode = 0;
 }
 
 void run().catch(() => {
