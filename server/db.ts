@@ -4,14 +4,14 @@ import * as siteSchema from "@shared/schema";
 import * as lmsSchema from "@shared/lms-schema";
 import * as calendarSchema from "@shared/calendar-schema";
 import * as avniSchema from "@shared/avni-schema";
+import {
+  buildApplicationPoolConfig,
+  resolveApplicationRuntimeMode,
+} from "./db/application-runtime-connection";
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL must be set.");
-}
+export const applicationRuntimeMode = resolveApplicationRuntimeMode(process.env);
 
-export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+export const pool = new Pool(buildApplicationPoolConfig(applicationRuntimeMode));
 
 // Transcript table types remain available only as legacy documentation; they
 // are intentionally excluded from the active application database schema.

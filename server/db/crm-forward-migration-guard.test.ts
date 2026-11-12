@@ -282,12 +282,15 @@ test("CRM migrations are registered only in their separate forward stream", asyn
   assert.deepEqual(registry.migrations.map(migration => migration.id), [
     "0014_crm_canonical_assignments",
     "0015_crm_assignment_audit_invariants",
+    "0016_crm_runtime_role_separation",
   ]);
   assert.ok(registry.migrations.every(migration => migration.file.startsWith("../")));
   assert.equal(mainJournalText.includes("0014_crm_canonical_assignments"), false);
   assert.equal(mainJournalText.includes("0015_crm_assignment_audit_invariants"), false);
   assert.equal(aichmJournalText.includes("0014_crm_canonical_assignments"), false);
   assert.equal(aichmJournalText.includes("0015_crm_assignment_audit_invariants"), false);
+  assert.equal(mainJournalText.includes("0016_crm_runtime_role_separation"), false);
+  assert.equal(aichmJournalText.includes("0016_crm_runtime_role_separation"), false);
 });
 
 test("CRM forward runner previews by default and applies only under explicit confirmation and lock", async () => {

@@ -10,63 +10,46 @@ import type { CrmPrincipal } from "./authorization";
 import { validateCrmPersistenceTestTargetConfiguration } from "./persistence-test-target";
 
 type FakeOptions = {
-  current?: { lead_id: string; assignee_user_id: number | null; assigned_by: number; version: number };
-  priorRequest?: Record<string, unknown>;
-  actorValid?: boolean;
-  targetValid?: boolean;
-  failHistory?: boolean;
+  result?: Partial<{
+    result_lead_id: string;
+    result_assignee_user_id: number | null;
+    result_version: number;
+    result_request_id: string;
+    result_changed_at: Date | string;
+    result_replayed: boolean;
+  }>;
+  errorCode?: string;
 };
 
 function fakePool(options: FakeOptions = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
-  const client = {
-    async query(sql: string, values: unknown[] = []) {
-      calls.push({ sql: sql.replace(/\s+/g, " ").trim(), values });
-      const normalized = sql.replace(/\s+/g, " ").trim();
-      if (normalized === "BEGIN" || normalized === "COMMIT" || normalized === "ROLLBACK") {
-        return { rows: [], rowCount: 0 };
+  const query = async (sql: string, values: unknown[] = []) => {
+    const normalized = sql.replace(/\s+/g, " ").trim();
+    calls.push({ sql: normalized, values });
+    if (normalized.startsWith("SELECT * FROM public.aichm_assign_crm_lead")) {
+      if (options.errorCode) {
+        throw Object.assign(new Error("simulated database result"), { code: options.errorCode });
       }
-      if (normalized.startsWith("SELECT * FROM admissions_lead_assignment_history WHERE request_id")) {
-        return { rows: options.priorRequest ? [options.priorRequest] : [], rowCount: options.priorRequest ? 1 : 0 };
-      }
-      if (normalized.includes("WHERE u.id=$1 AND u.is_active AND r.role::text='admin'")) {
-        return { rows: options.actorValid === false ? [] : [{}], rowCount: options.actorValid === false ? 0 : 1 };
-      }
-      if (normalized.startsWith("SELECT id FROM admissions_leads")) return { rows: [{ id: values[0] }], rowCount: 1 };
-      if (normalized.startsWith("SELECT * FROM admissions_lead_assignments")) {
-        return { rows: options.current ? [options.current] : [], rowCount: options.current ? 1 : 0 };
-      }
-      if (normalized.includes("r.role::text='admissions'")) {
-        return { rows: options.targetValid === false ? [] : [{}], rowCount: options.targetValid === false ? 0 : 1 };
-      }
-      if (normalized.startsWith("INSERT INTO admissions_lead_assignments") ||
-          normalized.startsWith("UPDATE admissions_lead_assignments")) {
-        return { rows: [], rowCount: 1 };
-      }
-      if (normalized.startsWith("INSERT INTO admissions_lead_assignment_history")) {
-        if (options.failHistory) throw new Error("simulated history insert failure");
-        return {
-          rows: [{
-            request_id: values[5],
-            changed_at: new Date("2026-01-01T00:00:00Z"),
-            assignment_version: values[6],
-            new_assignee_user_id: values[2],
-          }],
-          rowCount: 1,
-        };
-      }
-      if (normalized.startsWith("INSERT INTO lms_audit_logs")) return { rows: [], rowCount: 1 };
-      throw new Error(`Unexpected SQL in assignment test: ${normalized}`);
-    },
-    release() {
-      calls.push({ sql: "RELEASE", values: [] });
-    },
+      return {
+        rows: [{
+          result_lead_id: leadId,
+          result_assignee_user_id: values[2] as number | null,
+          result_version: Number(values[5]) + 1,
+          result_request_id: values[4] as string,
+          result_changed_at: new Date("2026-01-01T00:00:00Z"),
+          result_replayed: false,
+          ...options.result,
+        }],
+        rowCount: 1,
+      };
+    }
+    if (normalized.startsWith("INSERT INTO lms_audit_logs")) return { rows: [], rowCount: 1 };
+    throw new Error(`Unexpected SQL in assignment test: ${normalized}`);
   };
   const pool = {
-    connect: async () => client,
-    query: client.query,
+    query,
   };
-  return { pool: pool as unknown as Pick<Pool, "connect" | "query">, calls };
+  return { pool: pool as unknown as Pick<Pool, "query">, calls };
 }
 
 const admin: CrmPrincipal = { id: 1, roles: ["admin"] };
@@ -81,94 +64,76 @@ function input(expectedVersion: number, assigneeUserId: number | null): CrmAssig
   };
 }
 
-test("assignment insert and matching history share one transaction", async () => {
+test("assignment mutation is one atomic owner-controlled function call", async () => {
   const { pool, calls } = fakePool();
   const result = await assignCrmLead(pool, leadId, input(0, 4), admin);
-  const sql = calls.map(call => call.sql);
   assert.equal(result.version, 1);
-  assert.ok(sql.indexOf("BEGIN") < sql.findIndex(statement => statement.startsWith("INSERT INTO admissions_lead_assignments")));
-  assert.ok(sql.findIndex(statement => statement.startsWith("INSERT INTO admissions_lead_assignments")) <
-    sql.findIndex(statement => statement.startsWith("INSERT INTO admissions_lead_assignment_history")));
-  assert.ok(sql.indexOf("COMMIT") > sql.findIndex(statement => statement.startsWith("INSERT INTO admissions_lead_assignment_history")));
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /public\.aichm_assign_crm_lead/);
+  assert.deepEqual(calls[0].values, [leadId, admin.id, 4, "Reviewed assignment change", input(0, 4).requestId, 0]);
 });
 
-test("reassignment and unassignment increment exactly one version", async () => {
-  const first = fakePool({
-    current: { lead_id: leadId, assignee_user_id: 4, assigned_by: 1, version: 1 },
-  });
-  const reassigned = await assignCrmLead(first.pool, leadId, input(1, 6), admin);
-  assert.equal(reassigned.version, 2);
-  assert.ok(first.calls.some(call => call.sql.startsWith("UPDATE admissions_lead_assignments") &&
-    call.sql.includes("version=version+1") && call.values[3] === 1));
-  assert.ok(first.calls.some(call => call.sql.startsWith("INSERT INTO admissions_lead_assignment_history") &&
-    call.values[1] === 4 && call.values[2] === 6 && call.values[6] === 2));
+test("reassignment, unassignment, and replay use the function's single atomic result", async () => {
+  const reassigned = fakePool({ result: { result_version: 2, result_assignee_user_id: 6 } });
+  const reassignResult = await assignCrmLead(reassigned.pool, leadId, input(1, 6), admin);
+  assert.equal(reassignResult.version, 2);
+  assert.equal(reassigned.calls[0].values[2], 6);
+  assert.equal(reassigned.calls.length, 1);
 
-  const second = fakePool({
-    current: { lead_id: leadId, assignee_user_id: 6, assigned_by: 1, version: 2 },
-  });
-  const unassigned = await assignCrmLead(second.pool, leadId, input(2, null), admin);
-  assert.equal(unassigned.assigneeUserId, null);
-  assert.equal(unassigned.version, 3);
-  assert.ok(second.calls.some(call => call.sql.startsWith("INSERT INTO admissions_lead_assignment_history") &&
-    call.values[1] === 6 && call.values[2] === null && call.values[6] === 3));
+  const unassigned = fakePool({ result: { result_version: 3, result_assignee_user_id: null } });
+  const unassignResult = await assignCrmLead(unassigned.pool, leadId, input(2, null), admin);
+  assert.equal(unassignResult.assigneeUserId, null);
+  assert.equal(unassignResult.version, 3);
+  assert.equal(unassigned.calls[0].values[2], null);
+
+  const replayed = fakePool({ result: { result_replayed: true, result_version: 1 } });
+  assert.equal((await assignCrmLead(replayed.pool, leadId, input(0, 4), admin)).replayed, true);
+  assert.equal(replayed.calls.length, 1);
 });
 
-test("stale versions and invalid active admissions targets roll back", async () => {
-  const stale = fakePool({
-    current: { lead_id: leadId, assignee_user_id: 4, assigned_by: 1, version: 2 },
-  });
-  await assert.rejects(assignCrmLead(stale.pool, leadId, input(1, 6), admin), /assignment changed/);
-  assert.ok(stale.calls.some(call => call.sql === "ROLLBACK"));
-  assert.ok(!stale.calls.some(call => call.sql.startsWith("UPDATE admissions_lead_assignments")));
-
-  const invalidTarget = fakePool({ targetValid: false });
-  await assert.rejects(assignCrmLead(invalidTarget.pool, leadId, input(0, 2), admin), /active admissions user/);
-  assert.ok(invalidTarget.calls.some(call => call.sql === "ROLLBACK"));
+test("database version and request-id conflicts fail without direct assignment DML", async () => {
+  const stale = fakePool({ errorCode: "P0003" });
+  await assert.rejects(assignCrmLead(stale.pool, leadId, input(1, 6), admin), /assignment changed or this request ID/);
+  assert.equal(stale.calls.length, 1);
+  assert.doesNotMatch(stale.calls[0].sql, /INSERT INTO admissions_lead_assignments|UPDATE admissions_lead_assignments/);
 });
 
-test("a principal whose database admin role was revoked cannot assign", async () => {
-  const revokedAdmin = fakePool({ actorValid: false });
-  await assert.rejects(assignCrmLead(revokedAdmin.pool, leadId, input(0, 4), admin), /Administrator access is required/);
-  assert.ok(revokedAdmin.calls.some(call => call.sql === "ROLLBACK"));
-  assert.ok(!revokedAdmin.calls.some(call => call.sql.startsWith("INSERT INTO admissions_lead_assignments")));
+test("invalid actor or assignee fails and records a denial after the function statement aborts", async () => {
+  const denied = fakePool({ errorCode: "42501" });
+  await assert.rejects(assignCrmLead(denied.pool, leadId, input(0, 2), admin), /assignment request is not authorized/);
+  assert.equal(denied.calls.length, 2);
+  assert.match(denied.calls[0].sql, /aichm_assign_crm_lead/);
+  assert.match(denied.calls[1].sql, /INSERT INTO lms_audit_logs/);
 });
 
-test("history insertion failure rolls back the assignment mutation", async () => {
-  const { pool, calls } = fakePool({ failHistory: true });
-  await assert.rejects(assignCrmLead(pool, leadId, input(0, 4), admin), /simulated history insert failure/);
-  assert.ok(calls.some(call => call.sql.startsWith("INSERT INTO admissions_lead_assignments")));
-  assert.ok(calls.some(call => call.sql === "ROLLBACK"));
-  assert.ok(!calls.some(call => call.sql === "COMMIT"));
+test("unchanged assignment state remains a validation error", async () => {
+  const unchanged = fakePool({ errorCode: "P0004" });
+  await assert.rejects(assignCrmLead(unchanged.pool, leadId, input(0, null), admin), /Choose a different assignee/);
 });
 
 test("an idempotent replay does not mutate assignment or history", async () => {
-  const event = {
-    lead_id: leadId,
-    actor_user_id: 1,
-    new_assignee_user_id: 4,
-    reason: "Reviewed assignment change",
-    assignment_version: 1,
-    request_id: input(0, 4).requestId,
-    changed_at: new Date("2026-01-01T00:00:00Z"),
-  };
-  const { pool, calls } = fakePool({ priorRequest: event });
+  const { pool, calls } = fakePool({ result: { result_replayed: true } });
   const result = await assignCrmLead(pool, leadId, input(0, 4), admin);
   assert.equal(result.replayed, true);
-  assert.ok(calls.some(call => call.sql === "COMMIT"));
-  assert.ok(!calls.some(call => call.sql.startsWith("INSERT INTO admissions_lead_assignments")));
-  assert.ok(!calls.some(call => call.sql.startsWith("INSERT INTO admissions_lead_assignment_history")));
+  assert.equal(calls.length, 1);
 });
 
 test("the CRM assignment SQL contains deferred pair enforcement and destructive guards", async () => {
   const { readFile } = await import("node:fs/promises");
-  const sql = await readFile("migrations/0015_crm_assignment_audit_invariants.sql", "utf8");
-  assert.match(sql, /DEFERRABLE INITIALLY DEFERRED/);
-  assert.match(sql, /version must increase by exactly one/);
-  assert.match(sql, /matching history event in the same transaction/);
-  assert.match(sql, /BEFORE DELETE ON public\.admissions_lead_assignments/);
-  assert.match(sql, /BEFORE TRUNCATE ON public\.admissions_lead_assignments/);
-  assert.match(sql, /r\.role::text = 'admissions'/);
-  assert.match(sql, /admin_role\.role::text = 'admin'/);
+  const invariants = await readFile("migrations/0015_crm_assignment_audit_invariants.sql", "utf8");
+  const roles = await readFile("migrations/0016_crm_runtime_role_separation.sql", "utf8");
+  assert.match(invariants, /DEFERRABLE INITIALLY DEFERRED/);
+  assert.match(invariants, /version must increase by exactly one/);
+  assert.match(invariants, /matching history event in the same transaction/);
+  assert.match(invariants, /BEFORE DELETE ON public\.admissions_lead_assignments/);
+  assert.match(invariants, /BEFORE TRUNCATE ON public\.admissions_lead_assignments/);
+  assert.match(roles, /SECURITY DEFINER/);
+  assert.match(roles, /SET search_path = pg_catalog, public/);
+  assert.match(roles, /aichm_app_runtime/);
+  assert.match(roles, /REVOKE ALL ON TABLE public\.admissions_lead_assignments/);
+  assert.match(roles, /pg_advisory_xact_lock/);
+  assert.match(roles, /p_actor_user_id/);
+  assert.match(roles, /p_expected_version/);
 });
 
 test("CRM persistence test target requires explicit opt-in and a verified ephemeral loopback database", () => {

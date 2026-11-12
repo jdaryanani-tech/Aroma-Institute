@@ -2,6 +2,8 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { applicationRuntimeMode, pool } from "./db";
+import { verifyApplicationRuntimePool } from "./db/application-runtime-connection";
 
 const app = express();
 const httpServer = createServer(app);
@@ -48,6 +50,11 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  const databaseReadiness = await verifyApplicationRuntimePool(pool, applicationRuntimeMode);
+  if (databaseReadiness.status === "least_privilege_not_enabled") {
+    log("Least-privilege application database role is not enabled; using the existing DATABASE_URL connection.");
+  }
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
@@ -88,4 +95,12 @@ app.use((req, res, next) => {
       log(`serving on port ${port}`);
     },
   );
-})();
+})().catch(async (error: unknown) => {
+  const safeCode = error instanceof Error &&
+    /^APP_DATABASE_[A-Z_]+$/.test(error.message)
+    ? error.message
+    : "APP_DATABASE_RUNTIME_IDENTITY_UNAVAILABLE";
+  console.error(`Application startup stopped by database-role verification (${safeCode}).`);
+  await pool.end().catch(() => undefined);
+  process.exitCode = 1;
+});

@@ -554,7 +554,7 @@ export function postgresStoredConstraintName(
 }
 
 function expectedConstraintEntries(stage: MigrationStage = "0014"): Array<[string, string, ConstraintSpec]> {
-  const expected = stage === "0015"
+  const expected = stage !== "0014"
     ? { ...EXPECTED_CONSTRAINTS, ...EXPECTED_CONSTRAINT_TRIGGERS_0015 }
     : EXPECTED_CONSTRAINTS;
   const entries = Object.entries(expected).map(([declaredName, spec]) => [
@@ -1258,7 +1258,7 @@ export async function assertCrmAssignmentSchemaPostconditions(
     failWithIndexDiagnostic("CRM_SCHEMA_POSTCONDITION_INDEXES_DRIFTED", indexDiagnostic);
   }
 
-  const expectedTriggers = { ...TRIGGERS_0014, ...(stage === "0015" ? TRIGGERS_0015 : {}) };
+  const expectedTriggers = { ...TRIGGERS_0014, ...(stage !== "0014" ? TRIGGERS_0015 : {}) };
   const { rows: triggerRows } = await client.query<{
     name: string; table_name: string; function_name: string; function_schema: string;
     enabled: string; trigger_type: number; deferrable: boolean; initially_deferred: boolean;
@@ -1287,7 +1287,7 @@ export async function assertCrmAssignmentSchemaPostconditions(
   const sources14 = extractFunctionSources(migration0014Sql);
   const sources15 = extractFunctionSources(migration0015Sql);
   const expectedFunctions = new Map(sources14);
-  if (stage === "0015") {
+  if (stage !== "0014") {
     for (const [name, source] of Array.from(sources15.entries())) expectedFunctions.set(name, source);
   }
   const allFunctionNames = new Set([

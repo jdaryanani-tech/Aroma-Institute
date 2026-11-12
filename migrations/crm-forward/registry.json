@@ -22,6 +22,17 @@
         "trigger:admissions_lead_assignment_history_no_truncate_trg"
       ],
       "postconditions": "crm_assignment_invariants_v0015"
+    },
+    {
+      "id": "0016_crm_runtime_role_separation",
+      "file": "../0016_crm_runtime_role_separation.sql",
+      "requires": [
+        "ledger:0015_crm_assignment_audit_invariants",
+        "trigger:admissions_lead_assignments_history_required_trg",
+        "table:admissions_lead_assignments",
+        "table:admissions_lead_assignment_history"
+      ],
+      "postconditions": "crm_runtime_role_separation_v0016"
     }
   ]
 }

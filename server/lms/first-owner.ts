@@ -125,7 +125,6 @@ export function registerFirstOwnerRoutes(app: Express, options: {
       const result = await database.transaction(async tx => {
         // Serialize bootstrap attempts, and block concurrent role writes until commit.
         await tx.execute(sql`SELECT pg_advisory_xact_lock(891762, 1)`);
-        await tx.execute(sql`LOCK TABLE lms_user_roles IN SHARE ROW EXCLUSIVE MODE`);
         const [admin] = await tx.select({ id: lmsUserRoles.userId }).from(lmsUserRoles)
           .where(eq(lmsUserRoles.role, "admin")).limit(1);
         const [marker] = await tx.select({ id: lmsAuditLogs.id }).from(lmsAuditLogs)
