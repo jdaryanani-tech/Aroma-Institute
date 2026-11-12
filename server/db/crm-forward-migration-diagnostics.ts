@@ -14,6 +14,15 @@ export type CrmForwardFailureStage = keyof typeof CRM_FORWARD_FAILURE_STAGE_CODE
 const MAX_CAUSE_DEPTH = 5;
 const CAUSE_KEYS = ["cause", "original", "parent"] as const;
 const SAFE_FAILURE_CODES = new Map<string, { category: string; priority: number }>([
+  ["CRM_FORWARD_INTERNAL_DEVELOPMENT_AICHM_URL_REQUIRED", { category: "development_secret_required", priority: 10 }],
+  ["CRM_FORWARD_INTERNAL_DEVELOPMENT_RUNTIME_URL_REQUIRED", { category: "development_runtime_reference_required", priority: 10 }],
+  ["CRM_FORWARD_INTERNAL_DEVELOPMENT_AICHM_URL_INVALID", { category: "development_secret_invalid", priority: 10 }],
+  ["CRM_FORWARD_INTERNAL_DEVELOPMENT_RUNTIME_URL_INVALID", { category: "development_runtime_reference_invalid", priority: 10 }],
+  ["CRM_FORWARD_INTERNAL_DEVELOPMENT_ENDPOINT_REQUIRED", { category: "internal_development_endpoint_required", priority: 10 }],
+  ["CRM_FORWARD_INTERNAL_DEVELOPMENT_ENDPOINT_MISMATCH", { category: "development_endpoint_mismatch", priority: 10 }],
+  ["CRM_FORWARD_INTERNAL_DEVELOPMENT_SSLMODE_DISABLE_REQUIRED", { category: "development_non_tls_mode_required", priority: 10 }],
+  ["CRM_FORWARD_PRODUCTION_IDENTITY_REJECTED", { category: "production_identity_rejected", priority: 10 }],
+  ["CRM_FORWARD_DEVELOPMENT_IDENTITY_MISMATCH", { category: "pinned_development_identity_mismatch", priority: 10 }],
   ["ENOTFOUND", { category: "dns_resolution", priority: 5 }],
   ["EAI_AGAIN", { category: "dns_resolution", priority: 5 }],
   ["EAI_FAIL", { category: "dns_resolution", priority: 5 }],
@@ -86,6 +95,39 @@ function safeFailureCategory(error: unknown): string {
   return best?.category ?? "unknown";
 }
 
+const SAFE_USER_FACING_FAILURE_CODES = new Set([
+  "CRM_FORWARD_INTERNAL_DEVELOPMENT_AICHM_URL_REQUIRED",
+  "CRM_FORWARD_INTERNAL_DEVELOPMENT_RUNTIME_URL_REQUIRED",
+  "CRM_FORWARD_INTERNAL_DEVELOPMENT_AICHM_URL_INVALID",
+  "CRM_FORWARD_INTERNAL_DEVELOPMENT_RUNTIME_URL_INVALID",
+  "CRM_FORWARD_INTERNAL_DEVELOPMENT_ENDPOINT_REQUIRED",
+  "CRM_FORWARD_INTERNAL_DEVELOPMENT_ENDPOINT_MISMATCH",
+  "CRM_FORWARD_INTERNAL_DEVELOPMENT_SSLMODE_DISABLE_REQUIRED",
+  "CRM_FORWARD_PRODUCTION_IDENTITY_REJECTED",
+  "CRM_FORWARD_DEVELOPMENT_IDENTITY_MISMATCH",
+]);
+
+function safeUserFacingFailureCode(error: unknown): string | undefined {
+  const visited = new Set<object>();
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth += 1) {
+    if (!current || typeof current !== "object" || visited.has(current)) break;
+    visited.add(current);
+    const code = ownDataProperty(current, "code");
+    if (typeof code === "string" && SAFE_USER_FACING_FAILURE_CODES.has(code)) return code;
+    let next: unknown;
+    for (const key of CAUSE_KEYS) {
+      const candidate = ownDataProperty(current, key);
+      if (candidate && typeof candidate === "object") {
+        next = candidate;
+        break;
+      }
+    }
+    current = next;
+  }
+  return undefined;
+}
+
 function sanitizedCorrelationId(value: string): string {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
     ? value
@@ -99,11 +141,14 @@ export function formatCrmForwardStageFailure(
 ): {
   stageCode: string;
   failureCategory: string;
+  failureCode?: string;
   correlationId: string;
 } {
+  const failureCode = safeUserFacingFailureCode(error);
   return {
     stageCode: CRM_FORWARD_FAILURE_STAGE_CODES[stage],
     failureCategory: safeFailureCategory(error),
+    ...(failureCode ? { failureCode } : {}),
     correlationId: sanitizedCorrelationId(correlationId),
   };
 }

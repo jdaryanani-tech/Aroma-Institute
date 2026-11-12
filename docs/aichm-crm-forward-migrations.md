@@ -8,11 +8,31 @@ older migrations.
 
 ## Fail-closed target policy
 
-The runner reads only `AICHM_CRM_FORWARD_DATABASE_URL`. It never reads
-`DATABASE_URL` or the AICHM backup-source variable. Before any schema or ledger
-write, it opens a strict certificate- and hostname-verified TLS connection and
-checks the server in a read-only transaction. The allowlisted Development
-identity is exactly:
+**This approved CRM forward path uses a non-TLS database connection. The
+connection itself is not encrypted with TLS. This trade-off is restricted to
+the matching internal Replit Helium Development endpoint; it is not a general
+remote-database mode and must never be used for Production or arbitrary hosts.**
+
+The runner requires `AICHM_CRM_FORWARD_DATABASE_URL` as its only connection
+source. It reads `DATABASE_URL` only as an in-memory, compare-only reference; it
+never uses that value to construct a pool or as a fallback. Before opening a
+socket, it parses both URLs and requires their normalized host, effective port
+(fixed `5432` when omitted), username, and database name to match. Both hosts
+must have internal/private Replit-style syntax. Runtime URL query overrides for
+host, port, user, password, or database are rejected so the comparison cannot
+silently disagree with the app's `pg` parser.
+
+The dedicated AICHM URL must contain exactly one query parameter,
+`sslmode=disable`. Any TLS-enabled mode, duplicate, extra parameter, missing
+mode, public host, absent/malformed runtime `DATABASE_URL`, or endpoint
+mismatch fails before a socket is opened. The pool is explicitly configured
+with `ssl: false`; no TLS helper or certificate option is used in this mode.
+Stable user-facing failure codes identify these Development-only rejection
+cases without printing either URL or any component.
+
+After the endpoint preflight, the runner verifies the live server in a
+read-only transaction before any metadata query or write. The allowlisted
+Development identity is exactly:
 
 - database: `heliumdb`
 - database OID: `16384`
@@ -33,7 +53,7 @@ reports the full pinned identity, both registered SQL file names, and exactly
 which files are pending. It does not create the custom ledger:
 
 ```sh
-npx tsx script/crm-forward-migrate.ts
+npx tsx script/crm-forward-migrate.ts --preview
 ```
 
 Applying requires both `--apply-crm-migrations` and the exact confirmation
@@ -50,7 +70,8 @@ after checking identity, then rechecks identity and state under the lock before
 writing. It revalidates the pinned identity immediately before each migration
 and ledger write and releases the lock in a `finally` path; if unlock cannot be
 confirmed, it destroys the connection so PostgreSQL releases the session lock.
-The URL and database errors are never printed.
+The URL and database errors are never printed. Only allowlisted stable error
+codes/categories may appear in the sanitized runner diagnostic.
 
 ## Ordering and prerequisites
 

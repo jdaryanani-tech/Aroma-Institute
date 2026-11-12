@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   assertCrmForwardDevelopmentIdentity,
   crmForwardEffectivePort,
+  CRM_FORWARD_GUARD_ERROR_CODES,
   CRM_FORWARD_DEVELOPMENT_IDENTITY,
   requireCrmForwardConnectionUrl,
   type CrmForwardDatabaseIdentity,
@@ -21,59 +22,151 @@ const expectedIdentity: CrmForwardDatabaseIdentity = {
   defaultTransactionReadOnly: false,
 };
 
-test("CRM forward guard requires its named URL and never falls back to DATABASE_URL", () => {
+const dedicatedUrl = "postgresql://postgres:dedicated-placeholder@helium:5432/heliumdb?sslmode=disable";
+const runtimeUrl = "postgresql://postgres:runtime-placeholder@helium/heliumdb?sslmode=disable";
+
+test("CRM forward guard requires both the dedicated URL and runtime comparison reference", () => {
   assert.throws(
     () => requireCrmForwardConnectionUrl({ DATABASE_URL: "postgresql://example.invalid/neondb" }),
-    /CRM_FORWARD_EXPLICIT_DEVELOPMENT_URL_REQUIRED/,
+    (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.dedicatedUrlRequired,
+  );
+  assert.throws(
+    () => requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL: dedicatedUrl }),
+    (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.runtimeUrlRequired,
+  );
+  assert.throws(
+    () => requireCrmForwardConnectionUrl({
+      AICHM_CRM_FORWARD_DATABASE_URL: dedicatedUrl,
+      DATABASE_URL: "not a PostgreSQL URL",
+    }),
+    (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.runtimeUrlInvalid,
   );
 });
 
-test("CRM forward guard requires an explicit URL; live identity validation remains mandatory", () => {
-  const url = "postgresql://postgres:placeholder@dev.example.invalid:5432/heliumdb?sslmode=verify-full";
+test("matching internal Development endpoints pass and return only the dedicated URL", () => {
   assert.equal(requireCrmForwardConnectionUrl({
-    AICHM_CRM_FORWARD_DATABASE_URL: url,
-    DATABASE_URL: "postgresql://ignored.invalid/neondb",
-  }), url);
+    AICHM_CRM_FORWARD_DATABASE_URL: dedicatedUrl,
+    DATABASE_URL: runtimeUrl,
+  }), dedicatedUrl);
+});
+
+test("CRM forward rejects each endpoint mismatch before connecting", () => {
+  const mismatches = [
+    "postgresql://postgres:runtime-placeholder@helium-other/heliumdb?sslmode=disable",
+    "postgresql://postgres:runtime-placeholder@helium:6543/heliumdb?sslmode=disable",
+    "postgresql://other:runtime-placeholder@helium/heliumdb?sslmode=disable",
+    "postgresql://postgres:runtime-placeholder@helium/otherdb?sslmode=disable",
+  ];
+  for (const DATABASE_URL of mismatches) {
+    assert.throws(
+      () => requireCrmForwardConnectionUrl({
+        AICHM_CRM_FORWARD_DATABASE_URL: dedicatedUrl,
+        DATABASE_URL,
+      }),
+      (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.endpointMismatch,
+    );
+  }
+});
+
+test("CRM forward rejects external hosts in either URL", () => {
+  for (const [AICHM_CRM_FORWARD_DATABASE_URL, DATABASE_URL] of [
+    ["postgresql://postgres:dedicated-placeholder@db.example.com/heliumdb?sslmode=disable", "postgresql://postgres:runtime-placeholder@db.example.com/heliumdb"],
+    [dedicatedUrl, "postgresql://postgres:runtime-placeholder@db.example.com/heliumdb"],
+  ]) {
+    assert.throws(
+      () => requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL, DATABASE_URL }),
+      (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.endpointMustBeInternal,
+    );
+  }
+});
+
+test("CRM forward accepts private IP endpoints but rejects public IP endpoints", () => {
+  const privateUrl = "postgresql://postgres:placeholder@10.24.16.8/heliumdb?sslmode=disable";
+  assert.equal(requireCrmForwardConnectionUrl({
+    AICHM_CRM_FORWARD_DATABASE_URL: privateUrl,
+    DATABASE_URL: "postgresql://postgres:placeholder@10.24.16.8:5432/heliumdb",
+  }), privateUrl);
+
+  const publicUrl = "postgresql://postgres:placeholder@8.8.8.8/heliumdb?sslmode=disable";
   assert.throws(
     () => requireCrmForwardConnectionUrl({
-      AICHM_CRM_FORWARD_DATABASE_URL: "postgresql://postgres:placeholder@dev.example.invalid:5432/heliumdb?sslmode=require&sslmode=verify-full",
+      AICHM_CRM_FORWARD_DATABASE_URL: publicUrl,
+      DATABASE_URL: "postgresql://postgres:placeholder@8.8.8.8/heliumdb",
     }),
-    /CRM_FORWARD_CONNECTION_URL_REJECTED/,
-  );
-  assert.throws(
-    () => requireCrmForwardConnectionUrl({
-      AICHM_CRM_FORWARD_DATABASE_URL: "postgresql://postgres:placeholder@dev.example.invalid:5432/neondb",
-    }),
-    /CRM_FORWARD_CONNECTION_URL_REJECTED/,
+    (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.endpointMustBeInternal,
   );
 });
 
-test("CRM forward URL uses fixed port 5432 only when the URI omits its port", () => {
-  const url = "postgresql://postgres:placeholder@dev.example.invalid/heliumdb?sslmode=verify-full";
-  assert.equal(requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL: url }), url);
-  assert.equal(crmForwardEffectivePort(new URL(url)), 5432);
+test("CRM forward requires the exact dedicated non-TLS mode and rejects ambiguous options", () => {
+  const rejectedUrls = [
+    "postgresql://postgres:placeholder@helium/heliumdb",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=require",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=verify-full",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=allow",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=prefer",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=verify-ca",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=no-verify",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=disable&sslmode=disable",
+    "postgresql://postgres:placeholder@helium/heliumdb?ssl=1",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=disable&sslrootcert=ca.pem",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=disable&channel_binding=require",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=disable&application_name=test",
+    "postgresql://postgres:placeholder@helium/heliumdb?sslmode=",
+  ];
+  for (const AICHM_CRM_FORWARD_DATABASE_URL of rejectedUrls) {
+    assert.throws(
+      () => requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL, DATABASE_URL: runtimeUrl }),
+      (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.nonTlsOnly,
+    );
+  }
 });
 
-test("CRM forward URL honors an explicit valid port exactly", () => {
-  const url = "postgresql://postgres:placeholder@dev.example.invalid:6543/heliumdb?sslmode=require";
-  assert.equal(requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL: url }), url);
-  assert.equal(crmForwardEffectivePort(new URL(url)), 6543);
+test("CRM forward rejects URL fragments before endpoint comparison", () => {
+  assert.throws(
+    () => requireCrmForwardConnectionUrl({
+      AICHM_CRM_FORWARD_DATABASE_URL: "postgresql://postgres:placeholder@helium/heliumdb?sslmode=disable#",
+      DATABASE_URL: runtimeUrl,
+    }),
+    (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.dedicatedUrlInvalid,
+  );
+});
+
+test("CRM forward rejects runtime endpoint override parameters", () => {
+  for (const parameter of ["host=helium", "port=5432", "user=postgres", "password=placeholder", "database=heliumdb"]) {
+    assert.throws(
+      () => requireCrmForwardConnectionUrl({
+        AICHM_CRM_FORWARD_DATABASE_URL: dedicatedUrl,
+        DATABASE_URL: `${runtimeUrl}&${parameter}`,
+      }),
+      (error: unknown) => (error as Error & { code?: string }).code === CRM_FORWARD_GUARD_ERROR_CODES.runtimeUrlInvalid,
+    );
+  }
+});
+
+test("CRM forward uses fixed port 5432 for omitted ports and honors explicit ports", () => {
+  const omitted = new URL(runtimeUrl);
+  const explicit = new URL("postgresql://postgres:placeholder@helium:6543/heliumdb?sslmode=disable");
+  assert.equal(crmForwardEffectivePort(omitted), 5432);
+  assert.equal(crmForwardEffectivePort(explicit), 6543);
+  assert.equal(requireCrmForwardConnectionUrl({
+    AICHM_CRM_FORWARD_DATABASE_URL: "postgresql://postgres:placeholder@helium/heliumdb?sslmode=disable",
+    DATABASE_URL: runtimeUrl,
+  }), "postgresql://postgres:placeholder@helium/heliumdb?sslmode=disable");
 });
 
 test("CRM forward URL rejects explicit invalid ports", () => {
   for (const port of ["0", "65536", "not-a-port"]) {
-    const url = `postgresql://postgres:placeholder@dev.example.invalid:${port}/heliumdb`;
+    const url = `postgresql://postgres:placeholder@helium:${port}/heliumdb?sslmode=disable`;
     assert.throws(
-      () => requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL: url }),
-      /CRM_FORWARD_CONNECTION_URL_(?:INVALID|REJECTED)/,
+      () => requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL: url, DATABASE_URL: runtimeUrl }),
+      /CRM_FORWARD_INTERNAL_DEVELOPMENT_/,
       `port ${port} must be rejected`,
     );
   }
 });
 
 test("CRM forward port default does not weaken the pinned live identity check", () => {
-  const url = "postgresql://postgres:placeholder@dev.example.invalid/heliumdb";
-  assert.equal(crmForwardEffectivePort(new URL(url)), 5432);
+  assert.equal(crmForwardEffectivePort(new URL(dedicatedUrl)), 5432);
   assert.throws(
     () => assertCrmForwardDevelopmentIdentity({
       ...expectedIdentity,
@@ -85,9 +178,21 @@ test("CRM forward port default does not weaken the pinned live identity check", 
 
 test("CRM forward runner uses the resolved port explicitly and reports it", async () => {
   const runner = await readFile(new URL("../../script/crm-forward-migrate.ts", import.meta.url), "utf8");
+  const guard = await readFile(new URL("./crm-forward-migration-guard.ts", import.meta.url), "utf8");
   assert.match(runner, /port:\s*effectivePort/);
+  assert.match(runner, /ssl:\s*false/);
+  assert.doesNotMatch(runner, /crmForwardTlsOptions/);
   assert.match(runner, /effectivePort,/);
   assert.doesNotMatch(runner, /process\.env\.PGPORT/);
+  assert.doesNotMatch(runner, /process\.env\.NEON_DATABASE_URL/);
+  assert.match(guard, /environment\.AICHM_CRM_FORWARD_DATABASE_URL/);
+  assert.match(guard, /environment\.DATABASE_URL/);
+  assert.doesNotMatch(guard, /environment\.(?:NEON_DATABASE_URL|PGHOST|PGPORT|PGUSER|PGPASSWORD)/);
+  assert.ok(
+    runner.indexOf("requireCrmForwardConnectionUrl(process.env)") <
+      runner.indexOf("new Pool(pgConfig(connectionUrl, effectivePort))"),
+    "both URL checks must finish before pool construction",
+  );
 });
 
 test("CRM forward identity accepts the pinned Development tuple", () => {
@@ -188,6 +293,7 @@ test("CRM migrations are registered only in their separate forward stream", asyn
 test("CRM forward runner previews by default and applies only under explicit confirmation and lock", async () => {
   const source = await readFile("script/crm-forward-migrate.ts", "utf8");
   assert.doesNotMatch(source, /process\.env\.DATABASE_URL/);
+  assert.match(source, /requireCrmForwardConnectionUrl\(process\.env\)/);
   assert.match(source, /parseCrmForwardMigrationMode/);
   assert.match(source, /BEGIN READ ONLY/);
   assert.match(source, /pg_advisory_lock/);

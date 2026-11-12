@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 export type CrmForwardDatabaseIdentity = {
   databaseName: string;
   databaseOid: string;
@@ -8,6 +10,16 @@ export type CrmForwardDatabaseIdentity = {
 };
 
 export type CrmForwardEnvironment = Record<string, string | undefined>;
+
+export const CRM_FORWARD_GUARD_ERROR_CODES = Object.freeze({
+  dedicatedUrlRequired: "CRM_FORWARD_INTERNAL_DEVELOPMENT_AICHM_URL_REQUIRED",
+  runtimeUrlRequired: "CRM_FORWARD_INTERNAL_DEVELOPMENT_RUNTIME_URL_REQUIRED",
+  dedicatedUrlInvalid: "CRM_FORWARD_INTERNAL_DEVELOPMENT_AICHM_URL_INVALID",
+  runtimeUrlInvalid: "CRM_FORWARD_INTERNAL_DEVELOPMENT_RUNTIME_URL_INVALID",
+  endpointMustBeInternal: "CRM_FORWARD_INTERNAL_DEVELOPMENT_ENDPOINT_REQUIRED",
+  endpointMismatch: "CRM_FORWARD_INTERNAL_DEVELOPMENT_ENDPOINT_MISMATCH",
+  nonTlsOnly: "CRM_FORWARD_INTERNAL_DEVELOPMENT_SSLMODE_DISABLE_REQUIRED",
+});
 
 export const CRM_FORWARD_DEVELOPMENT_IDENTITY = Object.freeze({
   databaseName: "heliumdb",
@@ -23,70 +35,173 @@ const KNOWN_PRODUCTION_IDENTITY = Object.freeze({
 });
 
 function fail(code: string): never {
-  throw new Error(code);
+  const error = new Error(code) as Error & { code: string };
+  Object.defineProperty(error, "code", { value: code, enumerable: false });
+  throw error;
 }
 
 export function crmForwardEffectivePort(url: URL): number {
   if (url.port === "") return 5432;
-  if (!/^\d+$/.test(url.port)) fail("CRM_FORWARD_CONNECTION_URL_REJECTED");
+  if (!/^\d+$/.test(url.port)) fail(CRM_FORWARD_GUARD_ERROR_CODES.dedicatedUrlInvalid);
   const port = Number(url.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    fail("CRM_FORWARD_CONNECTION_URL_REJECTED");
+    fail(CRM_FORWARD_GUARD_ERROR_CODES.dedicatedUrlInvalid);
   }
   return port;
+}
+
+type ParsedEndpoint = {
+  url: URL;
+  host: string;
+  port: number;
+  username: string;
+  database: string;
+};
+
+const ENDPOINT_OVERRIDE_PARAMETERS = new Set([
+  "host",
+  "port",
+  "user",
+  "username",
+  "database",
+  "db",
+  "password",
+]);
+
+function normalizeHost(host: string): string {
+  return host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+}
+
+function isInternalPrivateHost(host: string): boolean {
+  const normalized = normalizeHost(host);
+  const ipVersion = isIP(normalized);
+
+  if (ipVersion === 4) {
+    const [a, b] = normalized.split(".").map(Number);
+    return a === 10 || a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168);
+  }
+
+  if (ipVersion === 6) {
+    return normalized === "::1" ||
+      /^f[cd]/.test(normalized) ||
+      /^fe[89ab]/.test(normalized);
+  }
+
+  const labels = normalized.split(".");
+  if (
+    !normalized ||
+    normalized.length > 253 ||
+    labels.some(label =>
+      label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+    )
+  ) {
+    return false;
+  }
+
+  return normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized.endsWith(".internal") ||
+    normalized.endsWith(".local") ||
+    normalized.endsWith(".svc") ||
+    normalized.endsWith(".cluster.local") ||
+    !normalized.includes(".");
+}
+
+function parseEndpoint(
+  raw: string | undefined,
+  source: "dedicated" | "runtime",
+): ParsedEndpoint {
+  const invalidCode = source === "dedicated"
+    ? CRM_FORWARD_GUARD_ERROR_CODES.dedicatedUrlInvalid
+    : CRM_FORWARD_GUARD_ERROR_CODES.runtimeUrlInvalid;
+  const requiredCode = source === "dedicated"
+    ? CRM_FORWARD_GUARD_ERROR_CODES.dedicatedUrlRequired
+    : CRM_FORWARD_GUARD_ERROR_CODES.runtimeUrlRequired;
+  if (!raw || raw.trim() !== raw || /[\r\n]/.test(raw)) fail(requiredCode);
+
+  let url: URL;
+  try {
+    if (raw.includes("#")) fail(invalidCode);
+    url = new URL(raw);
+  } catch {
+    return fail(invalidCode);
+  }
+
+  let database: string;
+  let username: string;
+  try {
+    database = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+    username = decodeURIComponent(url.username);
+  } catch {
+    return fail(invalidCode);
+  }
+
+  if (url.protocol !== "postgresql:" || !url.hostname || url.hash) fail(invalidCode);
+
+  if (
+    source === "runtime" &&
+    Array.from(url.searchParams.keys()).some(key => ENDPOINT_OVERRIDE_PARAMETERS.has(key))
+  ) {
+    fail(invalidCode);
+  }
+
+  const host = normalizeHost(url.hostname);
+  let port: number;
+  try {
+    port = crmForwardEffectivePort(url);
+  } catch {
+    fail(invalidCode);
+  }
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) fail(invalidCode);
+  return { url, host, port, username, database };
 }
 
 export function requireCrmForwardConnectionUrl(
   environment: CrmForwardEnvironment = process.env,
 ): string {
-  // URL shape is not target authorization; the runner must still verify the
-  // pinned server/database identity in a read-only transaction before writes.
-  const raw = environment.AICHM_CRM_FORWARD_DATABASE_URL;
-  if (!raw || raw.trim() !== raw || /[\r\n]/.test(raw)) {
-    fail("CRM_FORWARD_EXPLICIT_DEVELOPMENT_URL_REQUIRED");
-  }
+  // DATABASE_URL is a compare-only reference; the returned connection source is
+  // always the dedicated AICHM variable.
+  const dedicatedRaw = environment.AICHM_CRM_FORWARD_DATABASE_URL;
+  const runtimeRaw = environment.DATABASE_URL;
+  const dedicated = parseEndpoint(dedicatedRaw, "dedicated");
+  const runtime = parseEndpoint(runtimeRaw, "runtime");
 
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return fail("CRM_FORWARD_CONNECTION_URL_INVALID");
-  }
-
-  let database: string;
-  let user: string;
-  try {
-    database = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-    user = decodeURIComponent(url.username);
-  } catch {
-    return fail("CRM_FORWARD_CONNECTION_URL_INVALID");
-  }
-
-  const queryEntries = Array.from(url.searchParams.entries());
-  const allowedQuery =
-    queryEntries.filter(([key]) => key === "sslmode").length <= 1 &&
-    queryEntries.every(
-      ([key, value]) => key === "sslmode" && ["require", "verify-full"].includes(value),
-    );
-  const portIsAllowed =
-    url.port === "" ||
-    (/^\d+$/.test(url.port) &&
-      Number.isInteger(Number(url.port)) &&
-      Number(url.port) >= 1 &&
-      Number(url.port) <= 65535);
+  const queryEntries = Array.from(dedicated.url.searchParams.entries());
   if (
-    url.protocol !== "postgresql:" ||
-    !url.hostname ||
-    !portIsAllowed ||
-    user !== "postgres" ||
-    database !== CRM_FORWARD_DEVELOPMENT_IDENTITY.databaseName ||
-    url.hash ||
-    !allowedQuery
+    queryEntries.length !== 1 ||
+    queryEntries[0][0] !== "sslmode" ||
+    queryEntries[0][1] !== "disable"
   ) {
-    fail("CRM_FORWARD_CONNECTION_URL_REJECTED");
+    fail(CRM_FORWARD_GUARD_ERROR_CODES.nonTlsOnly);
   }
 
-  return raw;
+  if (
+    !isInternalPrivateHost(dedicated.host) ||
+    !isInternalPrivateHost(runtime.host)
+  ) {
+    fail(CRM_FORWARD_GUARD_ERROR_CODES.endpointMustBeInternal);
+  }
+
+  if (
+    dedicated.host !== runtime.host ||
+    dedicated.port !== runtime.port ||
+    dedicated.username !== runtime.username ||
+    dedicated.database !== runtime.database
+  ) {
+    fail(CRM_FORWARD_GUARD_ERROR_CODES.endpointMismatch);
+  }
+
+  if (
+    dedicated.username !== CRM_FORWARD_DEVELOPMENT_IDENTITY.databaseUser ||
+    dedicated.database !== CRM_FORWARD_DEVELOPMENT_IDENTITY.databaseName
+  ) {
+    fail(CRM_FORWARD_GUARD_ERROR_CODES.endpointMismatch);
+  }
+
+  return dedicatedRaw!;
 }
 
 export function assertCrmForwardDevelopmentIdentity(

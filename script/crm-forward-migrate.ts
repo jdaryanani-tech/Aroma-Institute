@@ -6,7 +6,6 @@ import {
   formatCrmForwardStageFailure,
   type CrmForwardFailureStage,
 } from "../server/db/crm-forward-migration-diagnostics";
-import { crmForwardTlsOptions } from "../server/db/crm-forward-tls";
 import {
   assertCrmAssignmentSchemaAbsent,
   assertCrmAssignmentSchemaPostconditions,
@@ -92,7 +91,9 @@ function pgConfig(connectionUrl: string, effectivePort: number) {
     password: decodeURIComponent(url.password),
     database: decodeURIComponent(url.pathname.replace(/^\/+/, "")),
     application_name: "aichm_crm_forward_migration",
-    ssl: crmForwardTlsOptions(url.hostname),
+    // Approved non-TLS transport is restricted by the guard to the matching
+    // internal Replit Development endpoint and exact live identity check.
+    ssl: false,
     max: 1,
     connectionTimeoutMillis: 8_000,
     query_timeout: 30_000,

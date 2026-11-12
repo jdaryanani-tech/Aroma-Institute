@@ -49,6 +49,25 @@ test("CRM forward failures classify only explicitly allowlisted connection codes
   }
 });
 
+test("stable Development-only guard codes remain visible without arbitrary error text", () => {
+  const error = Object.assign(
+    new Error("contains-secret-like-message"),
+    { code: "CRM_FORWARD_INTERNAL_DEVELOPMENT_SSLMODE_DISABLE_REQUIRED" },
+  );
+  const diagnostic = formatCrmForwardStageFailure(
+    "urlValidation",
+    error,
+    CORRELATION_ID,
+  );
+  assert.deepEqual(diagnostic, {
+    stageCode: "CRM_FORWARD_STAGE_URL_VALIDATION",
+    failureCategory: "development_non_tls_mode_required",
+    failureCode: "CRM_FORWARD_INTERNAL_DEVELOPMENT_SSLMODE_DISABLE_REQUIRED",
+    correlationId: CORRELATION_ID,
+  });
+  assert.equal(JSON.stringify(diagnostic).includes("contains-secret-like-message"), false);
+});
+
 test("CRM forward diagnostics traverse bounded driver causes without looping", () => {
   const wrapped = Object.assign(new Error("outer"), {
     cause: Object.assign(new Error("driver wrapper"), {
