@@ -279,9 +279,12 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       assert.equal(detail.lead.stage,"contacted");assert.equal(detail.lead.assigneeUserId,6);assert.equal(detail.activities.filter(a=>a.source==="staff").length,3);
       assert.ok(detail.activities.filter(a=>a.source==="staff").every(a=>a.actorId===1 && a.at));
       await assert.rejects(updateCrm(db,detail.lead.id,{expectedVersion:0,note:"stale"},adminPrincipal),/changed since/);
-      await assert.rejects(updateCrm(db,detail.lead.id,{expectedVersion:1,note:"restricted stage"},admissionsPrincipal),/Admissions users cannot change/);
+       await assert.rejects(
+         updateCrm(db,detail.lead.id,{expectedVersion:1,note:"other assignee's lead"},admissionsPrincipal),
+         /Lead not found/,
+       );
       assert.equal((await listCrm(db,{stage:"contacted",assignee:"6",followUp:"upcoming"},adminPrincipal)).total,1);
-      assert.equal((await listCrm(db,{dateFrom:"2000-01-01",dateTo:"2099-01-01"},adminPrincipal)).total,1);
+       assert.equal((await listCrm(db,{dateFrom:"2000-01-01",dateTo:"2099-01-01"},adminPrincipal)).total,3);
       await assert.rejects(updateCrm(db,detail.lead.id,{expectedVersion:1,stage:"counselling_booked",reason:"Booking claim"},adminPrincipal),/persisted AICHM Calendar booking/);
       await assert.rejects(updateCrm(db,detail.lead.id,{expectedVersion:1,stage:"vsl_watched",reason:"Claim",evidence:{kind:"tracked_video"}},adminPrincipal));
       await db.query("INSERT INTO admissions_vsl_events(lead_id,event,position_seconds,duration_seconds) VALUES($1,'50',50,100)",[l.id]);
@@ -302,7 +305,18 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       await db.query("UPDATE inquiries SET counselling_answers=NULL,counselling_submitted_at=NULL WHERE id=5");
       assert.deepEqual((await db.query("SELECT to_jsonb(i) data FROM inquiries i ORDER BY id")).rows,original.rows);
 
-      const {registerCrmRoutes}=await import("./routes");
+       assert.equal(process.env.DATABASE_URL, undefined, "isolated test child must not inherit DATABASE_URL");
+       const registerCrmRoutes = await (async () => {
+         // Some application modules initialize their unused default pool during import.
+         // If needed, expose only the already-verified scratch URL for that import, then remove it.
+         process.env.DATABASE_URL = target.url;
+         try {
+           return (await import("./routes")).registerCrmRoutes;
+         } finally {
+           delete process.env.DATABASE_URL;
+         }
+       })();
+       assert.equal(process.env.DATABASE_URL, undefined, "scratch import URL must not remain in the test environment");
       const app=express();app.use(express.json());
       registerCrmRoutes(app,{db,connectionPool:db,authenticate:(req,res,next)=>{
         const role=req.header("x-test-role");
