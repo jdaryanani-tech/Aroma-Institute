@@ -1,9 +1,13 @@
-import type { ApplicationPreMigrationDiagnostics } from "./application-runtime-connection";
+import type {
+  ApplicationPreMigrationDiagnostics,
+  ApplicationPreMigrationFailureDiagnostic,
+} from "./application-runtime-connection";
 
 export type CrmPreApplyRoleGate = {
   status: "ready" | "blocked";
   reason: string | null;
   diagnostics?: ApplicationPreMigrationDiagnostics;
+  failureDiagnostic?: ApplicationPreMigrationFailureDiagnostic;
 };
 
 /**

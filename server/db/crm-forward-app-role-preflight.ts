@@ -1,12 +1,16 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import {
+  applicationPreMigrationFailureDiagnosticFromError,
   applicationPreMigrationRoleChecksFromError,
   applicationRuntimeFailureCode,
   applicationDatabaseEndpointsMatch,
+  APPLICATION_PRE_MIGRATION_STAGE_CODES,
+  classifyApplicationPreMigrationSqlError,
   emptyApplicationPreMigrationRoleChecks,
   resolveApplicationRuntimeMode,
   verifyApplicationPreMigrationPool,
   type ApplicationPreMigrationDiagnostics,
+  type ApplicationPreMigrationStageCode,
   type ApplicationRuntimeMode,
 } from "./application-runtime-connection";
 import {
@@ -15,7 +19,8 @@ import {
 } from "./crm-forward-migration-guard";
 import type { CrmPreApplyRoleGate } from "./crm-forward-apply-gate";
 
-type CandidatePool = Pick<Pool, "query"> & Pick<Pool, "end">;
+type CandidatePool = Pick<Pool, "connect"> & Pick<Pool, "end">;
+type CandidateClient = Pick<PoolClient, "query"> & Pick<PoolClient, "release">;
 type CandidatePoolFactory = (
   mode: Extract<ApplicationRuntimeMode, { kind: "least_privilege" }>,
 ) => CandidatePool | Promise<CandidatePool>;
@@ -55,6 +60,9 @@ export async function inspectApplicationPreMigrationRoleGate(
   }
 
   let candidatePool: CandidatePool | undefined;
+  let candidateClient: CandidateClient | undefined;
+  let candidateStage: ApplicationPreMigrationStageCode =
+    APPLICATION_PRE_MIGRATION_STAGE_CODES.candidatePoolConnection;
   try {
     if (!diagnostics.pinnedDevelopmentIdentityMatches) {
       return {
@@ -75,12 +83,18 @@ export async function inspectApplicationPreMigrationRoleGate(
       return { status: "blocked", reason: "APP_DATABASE_TARGET_MISMATCH", diagnostics };
     }
 
-    candidatePool = await createPool(mode);
     try {
-      const roleChecks = await verifyApplicationPreMigrationPool(candidatePool, {
-        databaseName: target.databaseName,
-        databaseOid: target.databaseOid,
-      });
+      candidatePool = await createPool(mode);
+      candidateStage = APPLICATION_PRE_MIGRATION_STAGE_CODES.candidatePoolConnection;
+      candidateClient = await candidatePool.connect();
+      const roleChecks = await verifyApplicationPreMigrationPool(
+        candidateClient,
+        {
+          databaseName: target.databaseName,
+          databaseOid: target.databaseOid,
+        },
+        { setStage: stage => { candidateStage = stage; } },
+      );
       Object.assign(diagnostics, roleChecks);
       diagnostics.pinnedDevelopmentIdentityMatches =
         diagnostics.pinnedDevelopmentIdentityMatches &&
@@ -96,8 +110,13 @@ export async function inspectApplicationPreMigrationRoleGate(
       }
       return {
         status: "blocked",
-        reason: applicationRuntimeFailureCode(error) ?? "APP_DATABASE_PREMIGRATION_ROLE_CHECK_FAILED",
+        reason: applicationRuntimeFailureCode(error) ?? "APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE",
         diagnostics,
+        failureDiagnostic:
+          applicationPreMigrationFailureDiagnosticFromError(error) ?? {
+            stageCode: candidateStage,
+            categoryCode: classifyApplicationPreMigrationSqlError(error),
+          },
       };
     }
   } catch (error) {
@@ -107,6 +126,11 @@ export async function inspectApplicationPreMigrationRoleGate(
       diagnostics,
     };
   } finally {
+    try {
+      candidateClient?.release();
+    } catch {
+      // Cleanup errors must not replace the sanitized preflight result.
+    }
     if (candidatePool) await candidatePool.end().catch(() => undefined);
   }
 }

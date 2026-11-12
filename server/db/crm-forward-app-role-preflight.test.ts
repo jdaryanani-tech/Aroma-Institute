@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES,
+  APPLICATION_PRE_MIGRATION_STAGE_CODES,
+} from "./application-runtime-connection";
 import { inspectApplicationPreMigrationRoleGate } from "./crm-forward-app-role-preflight";
 import { runAfterCrmPreApplyRoleGate } from "./crm-forward-apply-gate";
 import type { CrmForwardDatabaseIdentity } from "./crm-forward-migration-guard";
@@ -51,8 +55,13 @@ function validIdentityRow() {
 
 function poolFor(row: Record<string, unknown>) {
   return {
-    async query() {
-      return { rows: [row] };
+    async connect() {
+      return {
+        async query() {
+          return { rows: [row] };
+        },
+        release() {},
+      };
     },
     async end() {},
   };
@@ -118,9 +127,12 @@ test("missing, malformed, or rejected candidate credentials never reach the appl
       openPool: () => {
         const error = new Error("credentials must not appear in the report") as Error & { code: string };
         error.code = "28P01";
-        throw error;
+        return {
+          async connect() { throw error; },
+          async end() {},
+        };
       },
-      reason: "APP_DATABASE_PREMIGRATION_ROLE_CHECK_FAILED",
+      reason: "APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE",
     },
   ];
   for (const scenario of cases) {
@@ -133,7 +145,10 @@ test("missing, malformed, or rejected candidate credentials never reach the appl
     );
     assert.equal(gate.reason, scenario.reason);
     assert.ok(gate.diagnostics);
-    assert.equal(gate.diagnostics.endpointMatches, scenario.reason === "APP_DATABASE_PREMIGRATION_ROLE_CHECK_FAILED");
+    assert.equal(
+      gate.diagnostics.endpointMatches,
+      scenario.reason === "APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE",
+    );
     assert.equal(gate.diagnostics.loginRoleExists, false);
     await assert.rejects(
       runAfterCrmPreApplyRoleGate(
@@ -301,14 +316,19 @@ test("preflight diagnostics expose booleans only and never serialize role or con
     targetIdentity,
     operatorUrl,
     () => ({
-      async query(sql: string) {
-        queryText = sql;
+      async connect() {
         return {
-          rows: [{
-            ...validIdentityRow(),
-            no_memberships_outside_app_group: false,
-            private_membership_marker: "unrelated_role_name_must_not_escape",
-          }],
+          async query(sql: string) {
+            queryText = sql;
+            return {
+              rows: [{
+                ...validIdentityRow(),
+                no_memberships_outside_app_group: false,
+                private_membership_marker: "unrelated_role_name_must_not_escape",
+              }],
+            };
+          },
+          release() {},
         };
       },
       async end() {},
@@ -331,4 +351,102 @@ test("preflight diagnostics expose booleans only and never serialize role or con
   assert.doesNotMatch(queryText, /\b(?:INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP)\b/i);
   assert.doesNotMatch(queryText, /array_agg|direct_memberships/);
   assert.equal(gate.diagnostics?.noMembershipsOutsideAichmAppRuntime, false);
+});
+
+test("candidate pool connection errors emit only stage and allowlisted category", async () => {
+  const error = new Error(
+    "postgres://sensitive-user:sensitive-password@private-host/private-db?token=private-token",
+  ) as Error & { code: string };
+  error.code = "28P01";
+  const gate = await inspectApplicationPreMigrationRoleGate(
+    baseEnvironment,
+    targetIdentity,
+    operatorUrl,
+    () => ({
+      async connect() { throw error; },
+      async end() {},
+    }),
+  );
+
+  assert.equal(gate.status, "blocked");
+  assert.equal(gate.reason, "APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE");
+  assert.deepEqual(gate.failureDiagnostic, {
+    stageCode: APPLICATION_PRE_MIGRATION_STAGE_CODES.candidatePoolConnection,
+    categoryCode: APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.invalidPassword,
+  });
+  const serialized = JSON.stringify(gate);
+  for (const forbidden of [
+    error.message,
+    "sensitive-user",
+    "sensitive-password",
+    "private-host",
+    "private-db",
+    "private-token",
+  ]) assert.equal(serialized.includes(forbidden), false);
+});
+
+test("candidate identity SELECT errors report safe SQLSTATE categories and stage", async () => {
+  const error = new Error(
+    "permission denied at postgres://user:pass@host/db?secret=never-log",
+  ) as Error & { code: string };
+  error.code = "42501";
+  const gate = await inspectApplicationPreMigrationRoleGate(
+    baseEnvironment,
+    targetIdentity,
+    operatorUrl,
+    () => ({
+      async connect() {
+        return {
+          async query() { throw error; },
+          release() {},
+        };
+      },
+      async end() {},
+    }),
+  );
+
+  assert.equal(gate.status, "blocked");
+  assert.equal(gate.reason, "APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE");
+  assert.deepEqual(gate.failureDiagnostic, {
+    stageCode: APPLICATION_PRE_MIGRATION_STAGE_CODES.identityReadinessSelect,
+    categoryCode: APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.insufficientPrivilege,
+  });
+  assert.equal(gate.diagnostics?.roleMetadataRead, false);
+  assert.equal(JSON.stringify(gate).includes(error.message), false);
+  assert.equal(JSON.stringify(gate).includes("never-log"), false);
+});
+
+test("candidate query errors without SQLSTATE remain generic and role failures identify validation stage", async () => {
+  const connectionError = new Error("sensitive text must never escape");
+  const queryFailure = await inspectApplicationPreMigrationRoleGate(
+    baseEnvironment,
+    targetIdentity,
+    operatorUrl,
+    () => ({
+      async connect() {
+        return {
+          async query() { throw connectionError; },
+          release() {},
+        };
+      },
+      async end() {},
+    }),
+  );
+  assert.deepEqual(queryFailure.failureDiagnostic, {
+    stageCode: APPLICATION_PRE_MIGRATION_STAGE_CODES.identityReadinessSelect,
+    categoryCode: APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionOrQueryFailed,
+  });
+  assert.equal(JSON.stringify(queryFailure).includes(connectionError.message), false);
+
+  const roleFailure = await inspectApplicationPreMigrationRoleGate(
+    baseEnvironment,
+    targetIdentity,
+    operatorUrl,
+    () => poolFor({ ...validIdentityRow(), login_is_superuser: true }),
+  );
+  assert.deepEqual(roleFailure.failureDiagnostic, {
+    stageCode: APPLICATION_PRE_MIGRATION_STAGE_CODES.roleMetadataValidation,
+    categoryCode: APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.roleValidationFailed,
+  });
+  assert.equal(roleFailure.diagnostics?.noSuperuser, false);
 });

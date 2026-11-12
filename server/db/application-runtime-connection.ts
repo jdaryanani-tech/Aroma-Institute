@@ -15,6 +15,100 @@ export type ApplicationRuntimeMode =
   | { kind: "legacy"; connectionString: string }
   | { kind: "least_privilege"; connectionString: string; expectedDatabase: string };
 
+export const APPLICATION_PRE_MIGRATION_STAGE_CODES = Object.freeze({
+  candidatePoolConnection: "APP_DATABASE_PREMIGRATION_STAGE_CANDIDATE_POOL_CONNECTION",
+  identityReadinessSelect: "APP_DATABASE_PREMIGRATION_STAGE_IDENTITY_READINESS_SELECT",
+  roleMetadataValidation: "APP_DATABASE_PREMIGRATION_STAGE_ROLE_METADATA_VALIDATION",
+});
+
+export const APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES = Object.freeze({
+  invalidPassword: "INVALID_PASSWORD",
+  authorizationFailed: "AUTHORIZATION_FAILED",
+  insufficientPrivilege: "INSUFFICIENT_PRIVILEGE",
+  invalidDatabase: "INVALID_DATABASE",
+  connectionFailed: "CONNECTION_FAILED",
+  databaseQueryFailed: "DATABASE_QUERY_FAILED",
+  connectionOrQueryFailed: "CONNECTION_OR_QUERY_FAILED",
+  identityValidationFailed: "IDENTITY_VALIDATION_FAILED",
+  roleValidationFailed: "ROLE_VALIDATION_FAILED",
+});
+
+export type ApplicationPreMigrationStageCode =
+  (typeof APPLICATION_PRE_MIGRATION_STAGE_CODES)[keyof typeof APPLICATION_PRE_MIGRATION_STAGE_CODES];
+export type ApplicationPreMigrationFailureCategory =
+  (typeof APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES)[keyof typeof APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES];
+export type ApplicationPreMigrationFailureDiagnostic = {
+  stageCode: ApplicationPreMigrationStageCode;
+  categoryCode: ApplicationPreMigrationFailureCategory;
+};
+
+const PRE_MIGRATION_STAGE_CODE_SET = new Set<string>(
+  Object.values(APPLICATION_PRE_MIGRATION_STAGE_CODES),
+);
+const PRE_MIGRATION_FAILURE_CATEGORY_SET = new Set<string>(
+  Object.values(APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES),
+);
+
+export function classifyApplicationPreMigrationSqlError(
+  error: unknown,
+): ApplicationPreMigrationFailureCategory {
+  if (!error || typeof error !== "object") {
+    return APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionOrQueryFailed;
+  }
+
+  let code: unknown;
+  try {
+    code = (error as { code?: unknown }).code;
+  } catch {
+    return APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionOrQueryFailed;
+  }
+  if (typeof code !== "string" || !/^[0-9A-Z]{5}$/.test(code)) {
+    return APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionOrQueryFailed;
+  }
+
+  switch (code) {
+    case "28P01":
+      return APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.invalidPassword;
+    case "28000":
+      return APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.authorizationFailed;
+    case "42501":
+      return APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.insufficientPrivilege;
+    case "3D000":
+      return APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.invalidDatabase;
+    default:
+      return code.startsWith("08")
+        ? APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionFailed
+        : APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.databaseQueryFailed;
+  }
+}
+
+export function applicationPreMigrationFailureDiagnosticFromError(
+  error: unknown,
+): ApplicationPreMigrationFailureDiagnostic | null {
+  if (!error || typeof error !== "object") return null;
+
+  let raw: unknown;
+  try {
+    raw = (error as { applicationPreMigrationFailure?: unknown }).applicationPreMigrationFailure;
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== "object") return null;
+
+  const diagnostic = raw as Record<string, unknown>;
+  if (
+    typeof diagnostic.stageCode !== "string" ||
+    !PRE_MIGRATION_STAGE_CODE_SET.has(diagnostic.stageCode) ||
+    typeof diagnostic.categoryCode !== "string" ||
+    !PRE_MIGRATION_FAILURE_CATEGORY_SET.has(diagnostic.categoryCode)
+  ) return null;
+
+  return {
+    stageCode: diagnostic.stageCode as ApplicationPreMigrationStageCode,
+    categoryCode: diagnostic.categoryCode as ApplicationPreMigrationFailureCategory,
+  };
+}
+
 const APPLICATION_RUNTIME_FAILURE_CODES = new Set([
   "APP_DATABASE_URL_INVALID",
   "APP_DATABASE_PLATFORM_REFERENCE_REQUIRED",
@@ -242,6 +336,10 @@ export type ApplicationPreMigrationDiagnostics = ApplicationPreMigrationRoleChec
   pinnedDevelopmentIdentityMatches: boolean;
 };
 
+export type ApplicationPreMigrationObserver = {
+  setStage?: (stage: ApplicationPreMigrationStageCode) => void;
+};
+
 const PRE_MIGRATION_ROLE_CHECK_KEYS: Array<keyof ApplicationPreMigrationRoleChecks> = [
   "candidateDatabaseIdentityMatches",
   "loginRoleExists",
@@ -290,13 +388,20 @@ export function applicationPreMigrationRoleChecksFromError(
 function rejectWithPreMigrationRoleChecks(
   code: string,
   checks: ApplicationPreMigrationRoleChecks,
+  categoryCode: ApplicationPreMigrationFailureCategory =
+    APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.roleValidationFailed,
 ): never {
   const error = new Error(code) as Error & {
     code: string;
     preMigrationRoleChecks: ApplicationPreMigrationRoleChecks;
+    applicationPreMigrationFailure: ApplicationPreMigrationFailureDiagnostic;
   };
   error.code = code;
   error.preMigrationRoleChecks = checks;
+  error.applicationPreMigrationFailure = {
+    stageCode: APPLICATION_PRE_MIGRATION_STAGE_CODES.roleMetadataValidation,
+    categoryCode,
+  };
   throw error;
 }
 
@@ -307,6 +412,7 @@ function rejectWithPreMigrationRoleChecks(
 export async function verifyApplicationPreMigrationPool(
   pool: Pick<Pool, "query">,
   expectedIdentity: ExpectedPreMigrationApplicationIdentity,
+  observer: ApplicationPreMigrationObserver = {},
 ): Promise<ApplicationPreMigrationRoleChecks> {
   type IdentityRow = {
     database_name: string;
@@ -338,6 +444,7 @@ export async function verifyApplicationPreMigrationPool(
   };
 
   let identity: IdentityRow | undefined;
+  observer.setStage?.(APPLICATION_PRE_MIGRATION_STAGE_CODES.identityReadinessSelect);
   try {
     ({ rows: [identity] } = await pool.query<IdentityRow>(`
       SELECT current_database() AS database_name,
@@ -399,12 +506,24 @@ export async function verifyApplicationPreMigrationPool(
       LEFT JOIN pg_roles migrator_group ON migrator_group.rolname='aichm_crm_migrator'
       WHERE d.datname=current_database()
     `));
-  } catch {
-    reject("APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE");
+  } catch (error) {
+    const failure = new Error("APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE") as Error & {
+      code: string;
+      preMigrationRoleChecks: ApplicationPreMigrationRoleChecks;
+      applicationPreMigrationFailure: ApplicationPreMigrationFailureDiagnostic;
+    };
+    failure.code = "APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE";
+    failure.preMigrationRoleChecks = emptyApplicationPreMigrationRoleChecks();
+    failure.applicationPreMigrationFailure = {
+      stageCode: APPLICATION_PRE_MIGRATION_STAGE_CODES.identityReadinessSelect,
+      categoryCode: classifyApplicationPreMigrationSqlError(error),
+    };
+    throw failure;
   }
 
   const checks = emptyApplicationPreMigrationRoleChecks();
   checks.roleMetadataRead = true;
+  observer.setStage?.(APPLICATION_PRE_MIGRATION_STAGE_CODES.roleMetadataValidation);
   if (identity) {
     checks.candidateDatabaseIdentityMatches =
       typeof identity.database_name === "string" &&
@@ -442,7 +561,11 @@ export async function verifyApplicationPreMigrationPool(
   }
 
   if (!checks.candidateDatabaseIdentityMatches) {
-    rejectWithPreMigrationRoleChecks("APP_DATABASE_PREMIGRATION_IDENTITY_MISMATCH", checks);
+    rejectWithPreMigrationRoleChecks(
+      "APP_DATABASE_PREMIGRATION_IDENTITY_MISMATCH",
+      checks,
+      APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.identityValidationFailed,
+    );
   }
 
   if (

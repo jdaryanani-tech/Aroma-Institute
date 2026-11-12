@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applicationDatabaseEndpointsMatch,
+  APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES,
   APP_DATABASE_URL_ENV,
   buildApplicationPoolConfig,
+  classifyApplicationPreMigrationSqlError,
   resolveApplicationRuntimeMode,
   verifyApplicationPreMigrationPool,
   verifyApplicationRuntimePool,
@@ -170,6 +172,41 @@ test("pre-migration app-role verifier fails closed for database, login, group, a
       },
     );
   }
+});
+
+test("pre-migration SQLSTATE classifier maps only the approved categories", () => {
+  const expected = [
+    ["28P01", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.invalidPassword],
+    ["28000", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.authorizationFailed],
+    ["42501", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.insufficientPrivilege],
+    ["3D000", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.invalidDatabase],
+    ["08000", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionFailed],
+    ["08001", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionFailed],
+    ["08003", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionFailed],
+    ["08004", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionFailed],
+    ["08006", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionFailed],
+    ["08007", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionFailed],
+    ["08P01", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionFailed],
+    ["42601", APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.databaseQueryFailed],
+  ] as const;
+  for (const [sqlState, category] of expected) {
+    assert.equal(classifyApplicationPreMigrationSqlError({ code: sqlState }), category, sqlState);
+  }
+  assert.equal(
+    classifyApplicationPreMigrationSqlError({ code: "ECONNREFUSED" }),
+    APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionOrQueryFailed,
+  );
+  assert.equal(
+    classifyApplicationPreMigrationSqlError(new Error("sensitive content")),
+    APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.connectionOrQueryFailed,
+  );
+  assert.equal(
+    classifyApplicationPreMigrationSqlError({
+      code: "XX000",
+      message: "postgres://username:password@private-host/db?token=secret",
+    }),
+    APPLICATION_PRE_MIGRATION_FAILURE_CATEGORIES.databaseQueryFailed,
+  );
 });
 
 test("an invalid explicit app URL fails closed instead of falling back", () => {
