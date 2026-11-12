@@ -353,19 +353,35 @@ export function safeCatalogIdentifierArray(value: unknown): string[] | null {
   );
 }
 
-export function postgresStoredConstraintName(declaredName: string): string {
+function truncateIdentifierComponent(value: string, maxBytes: number): string {
   let storedName = "";
-  for (const character of declaredName) {
-    if (Buffer.byteLength(storedName + character, "utf8") > 63) break;
+  for (const character of value) {
+    if (Buffer.byteLength(storedName + character, "utf8") > maxBytes) break;
     storedName += character;
   }
   return storedName;
 }
 
+export function postgresStoredConstraintName(
+  declaredName: string,
+  generated?: { table: string; type: string; columns: string[] },
+): string {
+  if (generated?.type === "f") {
+    const column = generated.columns[0];
+    const suffix = `_${column}_fkey`;
+    if (!column || declaredName !== `${generated.table}${suffix}`) {
+      fail("CRM_SCHEMA_POSTCONDITION_EXPECTED_CONSTRAINT_NAME_INVALID");
+    }
+    const tableBudget = 63 - Buffer.byteLength(suffix, "utf8");
+    return `${truncateIdentifierComponent(generated.table, tableBudget)}${suffix}`;
+  }
+  return truncateIdentifierComponent(declaredName, 63);
+}
+
 function expectedConstraintEntries(): Array<[string, string, ConstraintSpec]> {
   const entries = Object.entries(EXPECTED_CONSTRAINTS).map(([declaredName, spec]) => [
     declaredName,
-    postgresStoredConstraintName(declaredName),
+    postgresStoredConstraintName(declaredName, spec),
     spec,
   ] as [string, string, ConstraintSpec]);
   const storedNames = entries.map(([, storedName]) => storedName);
@@ -415,16 +431,31 @@ function expectedConstraintView(
   };
 }
 
-function actualConstraintView(row: CrmConstraintCatalogRow): CrmConstraintDiagnosticView {
+type NormalizedCrmConstraintCatalogRow = Omit<CrmConstraintCatalogRow, "columns" | "ref_columns"> & {
+  columns: string[] | null;
+  ref_columns: string[] | null;
+};
+
+function normalizeConstraintCatalogRow(
+  row: CrmConstraintCatalogRow,
+): NormalizedCrmConstraintCatalogRow {
+  return {
+    ...row,
+    columns: safeCatalogIdentifierArray(row.columns),
+    ref_columns: safeCatalogIdentifierArray(row.ref_columns),
+  };
+}
+
+function actualConstraintView(row: NormalizedCrmConstraintCatalogRow): CrmConstraintDiagnosticView {
   return {
     name: safeCatalogIdentifier(row.name) ?? "<invalid-identifier>",
     table: safeCatalogIdentifier(row.table_name) ?? "<invalid-identifier>",
     type: CONSTRAINT_TYPE_LABELS[row.type] ?? "UNKNOWN",
     typeCode: /^[pufc]$/.test(row.type) ? row.type : "<unknown-type>",
-    columns: safeCatalogIdentifierArray(row.columns) ?? [],
+    columns: row.columns ?? [],
     referencedSchema: safeCatalogIdentifier(row.ref_schema),
     referencedTable: safeCatalogIdentifier(row.ref_table),
-    referencedColumns: safeCatalogIdentifierArray(row.ref_columns),
+    referencedColumns: row.ref_columns,
     onDelete: actionLabel(row.delete_action),
     onUpdate: actionLabel(row.update_action),
     match: matchTypeLabel(row.match_type),
@@ -439,27 +470,29 @@ export function buildCrmConstraintComparisonDiagnostic(
   schema: string,
   rows: readonly CrmConstraintCatalogRow[],
 ): CrmConstraintComparisonDiagnostic {
-  const expectedEntries = Object.entries(EXPECTED_CONSTRAINTS);
-  const expected = expectedEntries.map(([name, spec]) => expectedConstraintView(name, spec, schema));
-  const actual = rows.map(actualConstraintView).sort((left, right) =>
+  const expectedEntries = expectedConstraintEntries();
+  const normalizedRows = rows.map(normalizeConstraintCatalogRow);
+  const expected = expectedEntries.map(([, storedName, spec]) =>
+    expectedConstraintView(storedName, spec, schema));
+  const actual = normalizedRows.map(actualConstraintView).sort((left, right) =>
     left.table.localeCompare(right.table) || left.name.localeCompare(right.name));
   const mismatches: CrmConstraintComparisonDiagnostic["mismatches"] = [];
 
-  if (rows.length !== expectedEntries.length) {
+  if (normalizedRows.length !== expectedEntries.length) {
     mismatches.push({
       constraint: "<constraint-set>",
       fields: ["count"],
     });
   }
 
-  for (const [name, spec] of expectedEntries) {
-    const matchingRows = rows.filter(row => row.name === name);
+  for (const [, storedName, spec] of expectedEntries) {
+    const matchingRows = normalizedRows.filter(row => row.name === storedName);
     if (matchingRows.length === 0) {
-      mismatches.push({ constraint: name, fields: ["missing"] });
+      mismatches.push({ constraint: storedName, fields: ["missing"] });
       continue;
     }
     if (matchingRows.length > 1) {
-      mismatches.push({ constraint: name, fields: ["duplicateName"] });
+      mismatches.push({ constraint: storedName, fields: ["duplicateName"] });
       continue;
     }
 
@@ -481,11 +514,11 @@ export function buildCrmConstraintComparisonDiagnostic(
     } else if (spec.check && !checkMatches(spec.check, row.check_expression)) {
       fields.push("checkExpression");
     }
-    if (fields.length) mismatches.push({ constraint: name, fields });
+    if (fields.length) mismatches.push({ constraint: storedName, fields });
   }
 
-  const expectedNames = new Set(expectedEntries.map(([name]) => name));
-  for (const row of rows) {
+  const expectedNames = new Set(expectedEntries.map(([, storedName]) => storedName));
+  for (const row of normalizedRows) {
     if (!expectedNames.has(row.name)) {
       mismatches.push({
         constraint: safeCatalogIdentifier(row.name) ?? "<invalid-identifier>",
@@ -496,7 +529,7 @@ export function buildCrmConstraintComparisonDiagnostic(
 
   return {
     expectedCount: expected.length,
-    actualCount: rows.length,
+    actualCount: normalizedRows.length,
     expected,
     actual,
     mismatches,
@@ -589,28 +622,29 @@ export async function assertCrmAssignmentSchemaPostconditions(
     ORDER BY t.relname,k.conname
   `, [schema, ASSIGNMENT_TABLES]);
   const constraintDiagnostic = buildCrmConstraintComparisonDiagnostic(schema, constraintRows);
-  if (constraintRows.length !== Object.keys(EXPECTED_CONSTRAINTS).length) {
-    failWithConstraintDiagnostic("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED", constraintDiagnostic);
-  }
-  for (const row of constraintRows) {
-    const expected = EXPECTED_CONSTRAINTS[row.name];
-    if (
-      !expected || row.table_name !== expected.table || row.type !== expected.type ||
-      JSON.stringify(row.columns) !== JSON.stringify(expected.columns) ||
-      !row.validated || row.deferrable || row.initially_deferred
-    ) failWithConstraintDiagnostic("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED", constraintDiagnostic);
-    if (expected.type === "f") {
-      if (
-        row.ref_schema !== schema ||
-        row.ref_table !== expected.refTable ||
-        JSON.stringify(row.ref_columns) !== JSON.stringify(expected.refColumns) ||
-        row.delete_action !== expected.deleteAction ||
-        row.update_action !== expected.updateAction ||
-        row.match_type !== "s"
-      ) failWithConstraintDiagnostic("CRM_SCHEMA_POSTCONDITION_FOREIGN_KEYS_DRIFTED", constraintDiagnostic);
-    } else if (expected.check && !checkMatches(expected.check, row.check_expression)) {
-      failWithConstraintDiagnostic("CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED", constraintDiagnostic);
-    }
+  if (constraintDiagnostic.mismatches.length > 0) {
+    const foreignKeyNames = new Set(
+      expectedConstraintEntries()
+        .filter(([, , spec]) => spec.type === "f")
+        .map(([, storedName]) => storedName),
+    );
+    const hasForeignKeyMismatch = constraintDiagnostic.mismatches.some(mismatch =>
+      foreignKeyNames.has(mismatch.constraint) ||
+      mismatch.fields.some(field => [
+        "referencedSchema",
+        "referencedTable",
+        "referencedColumns",
+        "onDelete",
+        "onUpdate",
+        "match",
+      ].includes(field)),
+    );
+    failWithConstraintDiagnostic(
+      hasForeignKeyMismatch
+        ? "CRM_SCHEMA_POSTCONDITION_FOREIGN_KEYS_DRIFTED"
+        : "CRM_SCHEMA_POSTCONDITION_CONSTRAINTS_DRIFTED",
+      constraintDiagnostic,
+    );
   }
 
   const { rows: indexRows } = await client.query<{
