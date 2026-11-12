@@ -88,7 +88,7 @@ export function crmModelSql(c: CrmSchema, admissionsUserParam?: number) {
     ), keyed AS (
       SELECT *,CASE WHEN resolved_lead_id IS NOT NULL THEN 'lead:'||resolved_lead_id ELSE 'inquiry:'||id END person_key
       FROM associated
-     ${scopedKeyed}, grouped AS (
+    )${scopedKeyed}, grouped AS (
       SELECT person_key id,max(resolved_lead_id::text) lead_id,array_agg(id ORDER BY id) inquiry_ids,
         (array_agg(name ORDER BY id DESC))[1] name,(array_agg(phone ORDER BY id DESC))[1] phone,
         coalesce((array_agg(email ORDER BY id DESC) FILTER(WHERE email<>''))[1],'') email,

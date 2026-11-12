@@ -21,6 +21,18 @@ const studentPrincipal = { id: 3, roles: ["student"] as const };
 const admissionsPrincipal = { id: 4, roles: ["admissions"] as const };
 const secondAdmissionsPrincipal = { id: 6, roles: ["admissions"] as const };
 
+function rewriteMigrationsForScratchSchema(sql: string, namespace: string): string {
+  const schemaPrefix = `"${namespace}".`;
+  return sql
+    .replaceAll("public.admissions_lead_assignment_history", `${schemaPrefix}admissions_lead_assignment_history`)
+    .replaceAll("public.admissions_lead_assignments", `${schemaPrefix}admissions_lead_assignments`)
+    .replaceAll("public.lms_users", `${schemaPrefix}lms_users`)
+    .replaceAll("public.lms_user_roles", `${schemaPrefix}lms_user_roles`)
+    .replaceAll('"public".', "")
+    .replaceAll("public.", "")
+    .replaceAll("SET search_path = pg_catalog, public", `SET search_path = pg_catalog, "${namespace}"`);
+}
+
 test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, evidence, pagination, guards and degraded schema",
   {
     skip: process.env.CRM_TEST_DB_WRITE_APPROVED !== "ISOLATED_EPHEMERAL_POSTGRES_ONLY"
@@ -90,12 +102,20 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
          INSERT INTO lms_user_roles VALUES
            (1,'admin'),(2,'admin'),(2,'admissions'),(3,'student'),(4,'admissions'),(5,'admissions'),
            (6,'admissions'),(7,'trainer');`);
-      const assignments=(await readFile("migrations/0014_crm_canonical_assignments.sql","utf8"))
-        .replaceAll('"public".',"").replaceAll("public.","")
-        .replace("SET search_path = pg_catalog, public",`SET search_path = pg_catalog, "${namespace}"`);
-       const assignmentGuards=(await readFile("migrations/0015_crm_assignment_audit_invariants.sql","utf8"))
-         .replaceAll('"public".',"").replaceAll("public.","")
-         .replace("SET search_path = pg_catalog, public",`SET search_path = pg_catalog, "${namespace}"`);
+       const assignments = rewriteMigrationsForScratchSchema(
+         await readFile("migrations/0014_crm_canonical_assignments.sql", "utf8"),
+         namespace,
+       );
+       const assignmentGuards = rewriteMigrationsForScratchSchema(
+         await readFile("migrations/0015_crm_assignment_audit_invariants.sql", "utf8"),
+         namespace,
+       );
+       const testSearchPath = `SET search_path = pg_catalog, "${namespace}"`;
+       assert.ok(assignments.includes(testSearchPath));
+       assert.ok(assignmentGuards.includes(testSearchPath));
+       assert.doesNotMatch(assignments, /SET search_path = pg_catalog, public/);
+       assert.doesNotMatch(assignmentGuards, /SET search_path = pg_catalog, public/);
+       assert.ok(assignmentGuards.includes(`FROM "${namespace}".admissions_lead_assignment_history h`));
       await db.query(`CREATE TABLE counselling_delivery_attempts(
         id integer PRIMARY KEY,inquiry_id integer,attempt_number integer,attempted_at timestamptz,
         response_at timestamptz,http_status integer,delivery_state text,error_summary text)`);
