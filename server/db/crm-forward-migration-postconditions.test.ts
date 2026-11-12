@@ -38,6 +38,8 @@ function constraint(
     ref_table?: string;
     ref_columns?: string[];
     check_expression?: string;
+    deferrable?: boolean;
+    initially_deferred?: boolean;
   } = {},
 ): FixtureRow {
   const foreignKey = type === "f";
@@ -53,8 +55,8 @@ function constraint(
     update_action: foreignKey ? "a" : " ",
     match_type: foreignKey ? "s" : " ",
     validated: true,
-    deferrable: false,
-    initially_deferred: false,
+    deferrable: options.deferrable ?? false,
+    initially_deferred: options.initially_deferred ?? false,
     check_expression: options.check_expression ?? null,
   };
 }
@@ -315,6 +317,34 @@ test("check expressions, unique constraint type, and unexpected constraints rema
   extraRows.push(constraint("unexpected_extra_ck", "admissions_lead_assignments", "c", ["lead_id"]));
   assert.ok(buildCrmConstraintComparisonDiagnostic(schema, extraRows).mismatches
     .some(mismatch => mismatch.constraint === "unexpected_extra_ck" && mismatch.fields.includes("unexpected")));
+});
+
+test("the 0015 deferred history constraint trigger is expected and still fully checked", () => {
+  const trigger = constraint(
+    "admissions_lead_assignments_history_required_trg",
+    "admissions_lead_assignments",
+    "t",
+    [],
+    { deferrable: true, initially_deferred: true },
+  );
+  const stage0015Rows = [...expectedRows(), trigger];
+
+  const stage0015 = buildCrmConstraintComparisonDiagnostic(schema, stage0015Rows, "0015");
+  assert.equal(stage0015.expectedCount, 16);
+  assert.equal(stage0015.actualCount, 16);
+  assert.deepEqual(stage0015.mismatches, []);
+  const triggerView = stage0015.actual.find(row => row.name === trigger.name);
+  assert.equal(triggerView?.type, "CONSTRAINT TRIGGER");
+  assert.equal(triggerView?.deferrable, true);
+  assert.equal(triggerView?.initiallyDeferred, true);
+
+  const stage0014 = buildCrmConstraintComparisonDiagnostic(schema, stage0015Rows, "0014");
+  assert.ok(stage0014.mismatches.some(mismatch =>
+    mismatch.constraint === trigger.name && mismatch.fields.includes("unexpected")));
+
+  const invalidTrigger = [...expectedRows(), { ...trigger, initially_deferred: false }];
+  assert.ok(buildCrmConstraintComparisonDiagnostic(schema, invalidTrigger, "0015").mismatches
+    .some(mismatch => mismatch.constraint === trigger.name && mismatch.fields.includes("initiallyDeferred")));
 });
 
 test("pg QueryResult rows normalize JSONB catalog index metadata and match all seven migration indexes", () => {

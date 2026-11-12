@@ -34,12 +34,14 @@ const EXPECTED_COLUMNS: Record<string, Record<string, {
 
 type ConstraintSpec = {
   table: string;
-  type: "p" | "u" | "f" | "c";
+  type: "p" | "u" | "f" | "c" | "t";
   columns: string[];
   refTable?: string;
   refColumns?: string[];
   deleteAction?: string;
   updateAction?: string;
+  deferrable?: boolean;
+  initiallyDeferred?: boolean;
   check?: "assignment_version" | "history_reason" | "history_source" | "history_version" | "history_changed";
 };
 
@@ -139,6 +141,16 @@ const EXPECTED_CONSTRAINTS: Record<string, ConstraintSpec> = {
   admissions_lead_assignment_history_changed_ck: {
     table: "admissions_lead_assignment_history", type: "c",
     columns: ["previous_assignee_user_id", "new_assignee_user_id"], check: "history_changed",
+  },
+};
+
+const EXPECTED_CONSTRAINT_TRIGGERS_0015: Record<string, ConstraintSpec> = {
+  admissions_lead_assignments_history_required_trg: {
+    table: "admissions_lead_assignments",
+    type: "t",
+    columns: [],
+    deferrable: true,
+    initiallyDeferred: true,
   },
 };
 
@@ -412,6 +424,7 @@ const CONSTRAINT_TYPE_LABELS: Record<string, string> = {
   u: "UNIQUE",
   f: "FOREIGN KEY",
   c: "CHECK",
+  t: "CONSTRAINT TRIGGER",
 };
 
 const REFERENTIAL_ACTION_LABELS: Record<string, string> = {
@@ -540,8 +553,11 @@ export function postgresStoredConstraintName(
   return truncateIdentifierComponent(declaredName, 63);
 }
 
-function expectedConstraintEntries(): Array<[string, string, ConstraintSpec]> {
-  const entries = Object.entries(EXPECTED_CONSTRAINTS).map(([declaredName, spec]) => [
+function expectedConstraintEntries(stage: MigrationStage = "0014"): Array<[string, string, ConstraintSpec]> {
+  const expected = stage === "0015"
+    ? { ...EXPECTED_CONSTRAINTS, ...EXPECTED_CONSTRAINT_TRIGGERS_0015 }
+    : EXPECTED_CONSTRAINTS;
+  const entries = Object.entries(expected).map(([declaredName, spec]) => [
     declaredName,
     postgresStoredConstraintName(declaredName, spec),
     spec,
@@ -955,12 +971,12 @@ function expectedConstraintView(
     referencedSchema: spec.type === "f" ? schema : null,
     referencedTable: spec.refTable ?? null,
     referencedColumns: spec.refColumns ? [...spec.refColumns] : null,
-    onDelete: actionLabel(spec.deleteAction),
-    onUpdate: actionLabel(spec.updateAction),
+    onDelete: spec.type === "f" ? actionLabel(spec.deleteAction) : null,
+    onUpdate: spec.type === "f" ? actionLabel(spec.updateAction) : null,
     match: spec.type === "f" ? "SIMPLE" : null,
     validated: true,
-    deferrable: false,
-    initiallyDeferred: false,
+    deferrable: spec.deferrable ?? false,
+    initiallyDeferred: spec.initiallyDeferred ?? false,
     checkExpression: spec.check ? CHECK_EXPRESSIONS[spec.check] : null,
   };
 }
@@ -985,14 +1001,14 @@ function actualConstraintView(row: NormalizedCrmConstraintCatalogRow): CrmConstr
     name: safeCatalogIdentifier(row.name) ?? "<invalid-identifier>",
     table: safeCatalogIdentifier(row.table_name) ?? "<invalid-identifier>",
     type: CONSTRAINT_TYPE_LABELS[row.type] ?? "UNKNOWN",
-    typeCode: /^[pufc]$/.test(row.type) ? row.type : "<unknown-type>",
+    typeCode: /^[pufct]$/.test(row.type) ? row.type : "<unknown-type>",
     columns: row.columns ?? [],
     referencedSchema: safeCatalogIdentifier(row.ref_schema),
     referencedTable: safeCatalogIdentifier(row.ref_table),
     referencedColumns: row.ref_columns,
-    onDelete: actionLabel(row.delete_action),
-    onUpdate: actionLabel(row.update_action),
-    match: matchTypeLabel(row.match_type),
+    onDelete: row.type === "f" ? actionLabel(row.delete_action) : null,
+    onUpdate: row.type === "f" ? actionLabel(row.update_action) : null,
+    match: row.type === "f" ? matchTypeLabel(row.match_type) : null,
     validated: typeof row.validated === "boolean" ? row.validated : null,
     deferrable: typeof row.deferrable === "boolean" ? row.deferrable : null,
     initiallyDeferred: typeof row.initially_deferred === "boolean" ? row.initially_deferred : null,
@@ -1003,8 +1019,9 @@ function actualConstraintView(row: NormalizedCrmConstraintCatalogRow): CrmConstr
 export function buildCrmConstraintComparisonDiagnostic(
   schema: string,
   rows: readonly CrmConstraintCatalogRow[],
+  stage: MigrationStage = "0014",
 ): CrmConstraintComparisonDiagnostic {
-  const expectedEntries = expectedConstraintEntries();
+  const expectedEntries = expectedConstraintEntries(stage);
   const normalizedRows = rows.map(normalizeConstraintCatalogRow);
   const expected = expectedEntries.map(([, storedName, spec]) =>
     expectedConstraintView(storedName, spec, schema));
@@ -1036,8 +1053,8 @@ export function buildCrmConstraintComparisonDiagnostic(
     if (row.type !== spec.type) fields.push("type");
     if (JSON.stringify(row.columns) !== JSON.stringify(spec.columns)) fields.push("columns");
     if (!row.validated) fields.push("validated");
-    if (row.deferrable) fields.push("deferrable");
-    if (row.initially_deferred) fields.push("initiallyDeferred");
+    if (row.deferrable !== (spec.deferrable ?? false)) fields.push("deferrable");
+    if (row.initially_deferred !== (spec.initiallyDeferred ?? false)) fields.push("initiallyDeferred");
     if (spec.type === "f") {
       if (row.ref_schema !== schema) fields.push("referencedSchema");
       if (row.ref_table !== spec.refTable) fields.push("referencedTable");
@@ -1162,7 +1179,7 @@ export async function assertCrmAssignmentSchemaPostconditions(
     WHERE n.nspname=$1 AND t.relname=ANY($2::text[])
     ORDER BY t.relname,k.conname
   `, [schema, ASSIGNMENT_TABLES]);
-  const constraintDiagnostic = buildCrmConstraintComparisonDiagnostic(schema, constraintRows);
+  const constraintDiagnostic = buildCrmConstraintComparisonDiagnostic(schema, constraintRows, stage);
   if (constraintDiagnostic.mismatches.length > 0) {
     const foreignKeyNames = new Set(
       expectedConstraintEntries()
