@@ -210,6 +210,96 @@ export type ExpectedPreMigrationApplicationIdentity = {
   databaseOid: string;
 };
 
+export type ApplicationPreMigrationRoleChecks = {
+  candidateDatabaseIdentityMatches: boolean;
+  loginRoleExists: boolean;
+  login: boolean;
+  noSuperuser: boolean;
+  noCreatedb: boolean;
+  noCreaterole: boolean;
+  inherit: boolean;
+  noBypassRls: boolean;
+  notOperatorUser: boolean;
+  notDatabaseOwner: boolean;
+  memberInAichmAppRuntime: boolean;
+  appRuntimeMembershipNoAdminOption: boolean;
+  noMembershipsOutsideAichmAppRuntime: boolean;
+  noAichmCrmOwnerOrMigratorMembership: boolean;
+  appRuntimeGroupExists: boolean;
+  appRuntimeGroupNoLogin: boolean;
+  appRuntimeGroupNoSuperuser: boolean;
+  appRuntimeGroupNoCreatedb: boolean;
+  appRuntimeGroupNoCreaterole: boolean;
+  appRuntimeGroupNoInherit: boolean;
+  appRuntimeGroupNoBypassRls: boolean;
+  appRuntimeGroupHasNoParentMembership: boolean;
+  appRuntimeGroupHasOnlyCandidateLogin: boolean;
+  roleMetadataRead: boolean;
+};
+
+export type ApplicationPreMigrationDiagnostics = ApplicationPreMigrationRoleChecks & {
+  endpointMatches: boolean;
+  pinnedDevelopmentIdentityMatches: boolean;
+};
+
+const PRE_MIGRATION_ROLE_CHECK_KEYS: Array<keyof ApplicationPreMigrationRoleChecks> = [
+  "candidateDatabaseIdentityMatches",
+  "loginRoleExists",
+  "login",
+  "noSuperuser",
+  "noCreatedb",
+  "noCreaterole",
+  "inherit",
+  "noBypassRls",
+  "notOperatorUser",
+  "notDatabaseOwner",
+  "memberInAichmAppRuntime",
+  "appRuntimeMembershipNoAdminOption",
+  "noMembershipsOutsideAichmAppRuntime",
+  "noAichmCrmOwnerOrMigratorMembership",
+  "appRuntimeGroupExists",
+  "appRuntimeGroupNoLogin",
+  "appRuntimeGroupNoSuperuser",
+  "appRuntimeGroupNoCreatedb",
+  "appRuntimeGroupNoCreaterole",
+  "appRuntimeGroupNoInherit",
+  "appRuntimeGroupNoBypassRls",
+  "appRuntimeGroupHasNoParentMembership",
+  "appRuntimeGroupHasOnlyCandidateLogin",
+  "roleMetadataRead",
+];
+
+export function emptyApplicationPreMigrationRoleChecks(): ApplicationPreMigrationRoleChecks {
+  return Object.fromEntries(PRE_MIGRATION_ROLE_CHECK_KEYS.map(key => [key, false])) as
+    ApplicationPreMigrationRoleChecks;
+}
+
+export function applicationPreMigrationRoleChecksFromError(
+  error: unknown,
+): ApplicationPreMigrationRoleChecks | null {
+  if (!error || typeof error !== "object" || !("preMigrationRoleChecks" in error)) return null;
+  const raw = (error as { preMigrationRoleChecks?: unknown }).preMigrationRoleChecks;
+  if (!raw || typeof raw !== "object") return null;
+  const source = raw as Record<string, unknown>;
+  if (PRE_MIGRATION_ROLE_CHECK_KEYS.some(key => typeof source[key] !== "boolean")) return null;
+  return Object.fromEntries(
+    PRE_MIGRATION_ROLE_CHECK_KEYS.map(key => [key, source[key]]),
+  ) as ApplicationPreMigrationRoleChecks;
+}
+
+function rejectWithPreMigrationRoleChecks(
+  code: string,
+  checks: ApplicationPreMigrationRoleChecks,
+): never {
+  const error = new Error(code) as Error & {
+    code: string;
+    preMigrationRoleChecks: ApplicationPreMigrationRoleChecks;
+  };
+  error.code = code;
+  error.preMigrationRoleChecks = checks;
+  throw error;
+}
+
 /**
  * Pre-migration probe: deliberately checks only the pinned database and
  * pre-provisioned role boundary. It does not require CRM assignment objects.
@@ -217,20 +307,21 @@ export type ExpectedPreMigrationApplicationIdentity = {
 export async function verifyApplicationPreMigrationPool(
   pool: Pick<Pool, "query">,
   expectedIdentity: ExpectedPreMigrationApplicationIdentity,
-): Promise<void> {
+): Promise<ApplicationPreMigrationRoleChecks> {
   type IdentityRow = {
     database_name: string;
     database_oid: string;
-    login_role: string;
     in_recovery: boolean;
     transaction_read_only: boolean;
+    login_role_exists: boolean;
+    is_operator_user: boolean;
     login_can_login: boolean;
     login_is_superuser: boolean;
     login_can_createdb: boolean;
     login_can_createrole: boolean;
     login_inherits: boolean;
     login_bypasses_rls: boolean;
-    database_owner_member: boolean;
+    not_database_owner: boolean;
     app_group_exists: boolean;
     app_group_can_login: boolean | null;
     app_group_is_superuser: boolean | null;
@@ -241,10 +332,9 @@ export async function verifyApplicationPreMigrationPool(
     app_group_is_member: boolean;
     app_group_has_memberships: boolean;
     app_group_member_count: number;
-    app_group_admin_option: boolean;
-    owner_group_member: boolean;
-    migrator_group_member: boolean;
-    direct_memberships: string[];
+    app_group_no_admin_option: boolean;
+    no_memberships_outside_app_group: boolean;
+    no_owner_or_migrator_membership: boolean;
   };
 
   let identity: IdentityRow | undefined;
@@ -252,16 +342,21 @@ export async function verifyApplicationPreMigrationPool(
     ({ rows: [identity] } = await pool.query<IdentityRow>(`
       SELECT current_database() AS database_name,
         d.oid::text AS database_oid,
-        current_user AS login_role,
         pg_is_in_recovery() AS in_recovery,
         current_setting('transaction_read_only')::boolean AS transaction_read_only,
+        login.oid IS NOT NULL AS login_role_exists,
+        current_user = 'postgres' AS is_operator_user,
         login.rolcanlogin AS login_can_login,
         login.rolsuper AS login_is_superuser,
         login.rolcreatedb AS login_can_createdb,
         login.rolcreaterole AS login_can_createrole,
         login.rolinherit AS login_inherits,
         login.rolbypassrls AS login_bypasses_rls,
-        (login.oid=d.datdba OR pg_has_role(login.oid,d.datdba,'MEMBER')) AS database_owner_member,
+        COALESCE(
+          login.oid IS NOT NULL AND login.oid<>d.datdba
+            AND NOT pg_has_role(login.oid,d.datdba,'MEMBER'),
+          false
+        ) AS not_database_owner,
         app_group.oid IS NOT NULL AS app_group_exists,
         app_group.rolcanlogin AS app_group_can_login,
         app_group.rolsuper AS app_group_is_superuser,
@@ -276,21 +371,29 @@ export async function verifyApplicationPreMigrationPool(
         ) AS app_group_has_memberships,
         (SELECT count(*)::integer FROM pg_auth_members group_member
           WHERE group_member.roleid=app_group.oid) AS app_group_member_count,
-        COALESCE((
-          SELECT membership.admin_option
-          FROM pg_auth_members membership
-          WHERE membership.member=login.oid AND membership.roleid=app_group.oid
-        ),false) AS app_group_admin_option,
-        COALESCE(pg_has_role(login.oid,owner_group.oid,'MEMBER'),false) AS owner_group_member,
-        COALESCE(pg_has_role(login.oid,migrator_group.oid,'MEMBER'),false) AS migrator_group_member,
-        COALESCE((
-          SELECT array_agg(granted.rolname::text ORDER BY granted.rolname)
-          FROM pg_auth_members membership
-          JOIN pg_roles granted ON granted.oid=membership.roleid
-          WHERE membership.member=login.oid
-        ), ARRAY[]::text[]) AS direct_memberships
+        COALESCE(
+          app_group.oid IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM pg_auth_members membership
+            WHERE membership.member=login.oid
+              AND membership.roleid=app_group.oid
+              AND membership.admin_option
+          ),
+          false
+        ) AS app_group_no_admin_option,
+        COALESCE(
+          app_group.oid IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM pg_auth_members membership
+            WHERE membership.member=login.oid
+              AND membership.roleid<>app_group.oid
+          ),
+          false
+        ) AS no_memberships_outside_app_group,
+        (
+          NOT COALESCE(pg_has_role(login.oid,owner_group.oid,'MEMBER'),false)
+          AND NOT COALESCE(pg_has_role(login.oid,migrator_group.oid,'MEMBER'),false)
+        ) AS no_owner_or_migrator_membership
       FROM pg_database d
-      JOIN pg_roles login ON login.rolname=current_user
+      LEFT JOIN pg_roles login ON login.rolname=current_user
       LEFT JOIN pg_roles app_group ON app_group.rolname='aichm_app_runtime'
       LEFT JOIN pg_roles owner_group ON owner_group.rolname='aichm_crm_owner'
       LEFT JOIN pg_roles migrator_group ON migrator_group.rolname='aichm_crm_migrator'
@@ -300,51 +403,86 @@ export async function verifyApplicationPreMigrationPool(
     reject("APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE");
   }
 
-  if (
-    !identity ||
-    typeof identity.database_name !== "string" ||
-    typeof identity.database_oid !== "string" ||
-    typeof identity.in_recovery !== "boolean" ||
-    typeof identity.transaction_read_only !== "boolean" ||
-    identity.database_name !== expectedIdentity.databaseName ||
-    identity.database_oid !== expectedIdentity.databaseOid ||
-    identity.in_recovery ||
-    identity.transaction_read_only
-  ) reject("APP_DATABASE_PREMIGRATION_IDENTITY_MISMATCH");
+  const checks = emptyApplicationPreMigrationRoleChecks();
+  checks.roleMetadataRead = true;
+  if (identity) {
+    checks.candidateDatabaseIdentityMatches =
+      typeof identity.database_name === "string" &&
+      typeof identity.database_oid === "string" &&
+      typeof identity.in_recovery === "boolean" &&
+      typeof identity.transaction_read_only === "boolean" &&
+      identity.database_name === expectedIdentity.databaseName &&
+      identity.database_oid === expectedIdentity.databaseOid &&
+      identity.in_recovery === false &&
+      identity.transaction_read_only === false;
+    checks.loginRoleExists = identity.login_role_exists === true;
+    checks.login = identity.login_can_login === true;
+    checks.noSuperuser = identity.login_is_superuser === false;
+    checks.noCreatedb = identity.login_can_createdb === false;
+    checks.noCreaterole = identity.login_can_createrole === false;
+    checks.inherit = identity.login_inherits === true;
+    checks.noBypassRls = identity.login_bypasses_rls === false;
+    checks.notOperatorUser = identity.is_operator_user === false;
+    checks.notDatabaseOwner = identity.not_database_owner === true;
+    checks.memberInAichmAppRuntime = identity.app_group_is_member === true;
+    checks.appRuntimeMembershipNoAdminOption = identity.app_group_no_admin_option === true;
+    checks.noMembershipsOutsideAichmAppRuntime =
+      identity.no_memberships_outside_app_group === true;
+    checks.noAichmCrmOwnerOrMigratorMembership =
+      identity.no_owner_or_migrator_membership === true;
+    checks.appRuntimeGroupExists = identity.app_group_exists === true;
+    checks.appRuntimeGroupNoLogin = identity.app_group_can_login === false;
+    checks.appRuntimeGroupNoSuperuser = identity.app_group_is_superuser === false;
+    checks.appRuntimeGroupNoCreatedb = identity.app_group_can_createdb === false;
+    checks.appRuntimeGroupNoCreaterole = identity.app_group_can_createrole === false;
+    checks.appRuntimeGroupNoInherit = identity.app_group_inherits === false;
+    checks.appRuntimeGroupNoBypassRls = identity.app_group_bypasses_rls === false;
+    checks.appRuntimeGroupHasNoParentMembership = identity.app_group_has_memberships === false;
+    checks.appRuntimeGroupHasOnlyCandidateLogin = identity.app_group_member_count === 1;
+  }
+
+  if (!checks.candidateDatabaseIdentityMatches) {
+    rejectWithPreMigrationRoleChecks("APP_DATABASE_PREMIGRATION_IDENTITY_MISMATCH", checks);
+  }
 
   if (
-    identity.login_role === "postgres" ||
-    typeof identity.login_role !== "string" ||
-    identity.login_can_login !== true ||
-    identity.login_is_superuser !== false ||
-    identity.login_can_createdb !== false ||
-    identity.login_can_createrole !== false ||
-    identity.login_inherits !== true ||
-    identity.login_bypasses_rls !== false ||
-    identity.database_owner_member !== false
-  ) reject("APP_DATABASE_PREMIGRATION_LOGIN_REJECTED");
+    !checks.loginRoleExists ||
+    !checks.login ||
+    !checks.noSuperuser ||
+    !checks.noCreatedb ||
+    !checks.noCreaterole ||
+    !checks.inherit ||
+    !checks.noBypassRls ||
+    !checks.notOperatorUser ||
+    !checks.notDatabaseOwner
+  ) {
+    rejectWithPreMigrationRoleChecks("APP_DATABASE_PREMIGRATION_LOGIN_REJECTED", checks);
+  }
 
   if (
-    identity.app_group_exists !== true ||
-    identity.app_group_can_login !== false ||
-    identity.app_group_is_superuser !== false ||
-    identity.app_group_can_createdb !== false ||
-    identity.app_group_can_createrole !== false ||
-    identity.app_group_inherits !== false ||
-    identity.app_group_bypasses_rls !== false ||
-    identity.app_group_has_memberships !== false ||
-    identity.app_group_member_count !== 1
-  ) reject("APP_DATABASE_PREMIGRATION_GROUP_REJECTED");
+    !checks.appRuntimeGroupExists ||
+    !checks.appRuntimeGroupNoLogin ||
+    !checks.appRuntimeGroupNoSuperuser ||
+    !checks.appRuntimeGroupNoCreatedb ||
+    !checks.appRuntimeGroupNoCreaterole ||
+    !checks.appRuntimeGroupNoInherit ||
+    !checks.appRuntimeGroupNoBypassRls ||
+    !checks.appRuntimeGroupHasNoParentMembership ||
+    !checks.appRuntimeGroupHasOnlyCandidateLogin
+  ) {
+    rejectWithPreMigrationRoleChecks("APP_DATABASE_PREMIGRATION_GROUP_REJECTED", checks);
+  }
 
   if (
-    identity.app_group_is_member !== true ||
-    identity.app_group_admin_option !== false ||
-    identity.owner_group_member !== false ||
-    identity.migrator_group_member !== false ||
-    !Array.isArray(identity.direct_memberships) ||
-    identity.direct_memberships.length !== 1 ||
-    identity.direct_memberships[0] !== "aichm_app_runtime"
-  ) reject("APP_DATABASE_PREMIGRATION_MEMBERSHIP_REJECTED");
+    !checks.memberInAichmAppRuntime ||
+    !checks.appRuntimeMembershipNoAdminOption ||
+    !checks.noMembershipsOutsideAichmAppRuntime ||
+    !checks.noAichmCrmOwnerOrMigratorMembership
+  ) {
+    rejectWithPreMigrationRoleChecks("APP_DATABASE_PREMIGRATION_MEMBERSHIP_REJECTED", checks);
+  }
+
+  return checks;
 }
 
 export async function verifyApplicationRuntimePool(

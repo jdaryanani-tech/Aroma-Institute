@@ -22,16 +22,17 @@ function validIdentityRow() {
   return {
     database_name: "heliumdb",
     database_oid: "16384",
-    login_role: "aichm_dev_login",
     in_recovery: false,
     transaction_read_only: false,
+    login_role_exists: true,
+    is_operator_user: false,
     login_can_login: true,
     login_is_superuser: false,
     login_can_createdb: false,
     login_can_createrole: false,
     login_inherits: true,
     login_bypasses_rls: false,
-    database_owner_member: false,
+    not_database_owner: true,
     app_group_exists: true,
     app_group_can_login: false,
     app_group_is_superuser: false,
@@ -42,10 +43,9 @@ function validIdentityRow() {
     app_group_is_member: true,
     app_group_has_memberships: false,
     app_group_member_count: 1,
-    app_group_admin_option: false,
-    owner_group_member: false,
-    migrator_group_member: false,
-    direct_memberships: ["aichm_app_runtime"],
+    app_group_no_admin_option: true,
+    no_memberships_outside_app_group: true,
+    no_owner_or_migrator_membership: true,
   };
 }
 
@@ -69,7 +69,10 @@ test("preflight blocks missing app secret without opening the candidate pool", a
       return poolFor(validIdentityRow());
     },
   );
-  assert.deepEqual(gate, { status: "blocked", reason: "APP_DATABASE_URL_NOT_CONFIGURED" });
+  assert.equal(gate.status, "blocked");
+  assert.equal(gate.reason, "APP_DATABASE_URL_NOT_CONFIGURED");
+  assert.equal(gate.diagnostics?.endpointMatches, false);
+  assert.equal(gate.diagnostics?.pinnedDevelopmentIdentityMatches, true);
   assert.equal(poolOpened, false);
 });
 
@@ -93,6 +96,7 @@ test("preflight blocks invalid URL and endpoint mismatch before candidate connec
     );
     assert.equal(gate.status, "blocked");
     assert.equal(gate.reason, reason);
+    assert.equal(gate.diagnostics?.endpointMatches, false);
     assert.equal(poolOpened, false);
   }
 });
@@ -128,6 +132,9 @@ test("missing, malformed, or rejected candidate credentials never reach the appl
       scenario.openPool,
     );
     assert.equal(gate.reason, scenario.reason);
+    assert.ok(gate.diagnostics);
+    assert.equal(gate.diagnostics.endpointMatches, scenario.reason === "APP_DATABASE_PREMIGRATION_ROLE_CHECK_FAILED");
+    assert.equal(gate.diagnostics.loginRoleExists, false);
     await assert.rejects(
       runAfterCrmPreApplyRoleGate(
         async () => gate,
@@ -152,7 +159,10 @@ test("valid pre-provisioned app login passes the role-only preflight before CRM 
       async end() { ended = true; },
     }),
   );
-  assert.deepEqual(gate, { status: "ready", reason: null });
+  assert.equal(gate.status, "ready");
+  assert.equal(gate.reason, null);
+  assert.ok(gate.diagnostics);
+  assert.ok(Object.values(gate.diagnostics).every(value => value === true));
   assert.equal(ended, true);
 });
 
@@ -165,10 +175,12 @@ test("bad role membership blocks with zero ledger and schema writes", async () =
     operatorUrl,
     () => poolFor({
       ...validIdentityRow(),
-      direct_memberships: ["aichm_app_runtime", "aichm_crm_owner"],
-      owner_group_member: true,
+      no_memberships_outside_app_group: false,
+      no_owner_or_migrator_membership: false,
     }),
   );
+  assert.equal(gate.diagnostics?.noMembershipsOutsideAichmAppRuntime, false);
+  assert.equal(gate.diagnostics?.noAichmCrmOwnerOrMigratorMembership, false);
   await assert.rejects(
     runAfterCrmPreApplyRoleGate(
       async () => gate,
@@ -212,4 +224,111 @@ test("invalid app role attributes block with zero writes, while valid login reac
   );
   assert.equal(applied, "write callback reached");
   assert.equal(writes, 1);
+});
+
+test("preflight diagnostics identify each failed login, membership, group, endpoint, and identity check", async () => {
+  const cases: Array<{
+    label: string;
+    row: Record<string, unknown>;
+    field: keyof NonNullable<Awaited<ReturnType<typeof inspectApplicationPreMigrationRoleGate>>["diagnostics"]>;
+  }> = [
+    { label: "login role missing", row: { login_role_exists: false }, field: "loginRoleExists" },
+    { label: "LOGIN disabled", row: { login_can_login: false }, field: "login" },
+    { label: "superuser", row: { login_is_superuser: true }, field: "noSuperuser" },
+    { label: "createdb", row: { login_can_createdb: true }, field: "noCreatedb" },
+    { label: "createrole", row: { login_can_createrole: true }, field: "noCreaterole" },
+    { label: "no inherit", row: { login_inherits: false }, field: "inherit" },
+    { label: "bypass RLS", row: { login_bypasses_rls: true }, field: "noBypassRls" },
+    { label: "operator user", row: { is_operator_user: true }, field: "notOperatorUser" },
+    { label: "database owner", row: { not_database_owner: false }, field: "notDatabaseOwner" },
+    { label: "not an app-group member", row: { app_group_is_member: false }, field: "memberInAichmAppRuntime" },
+    { label: "admin option", row: { app_group_no_admin_option: false }, field: "appRuntimeMembershipNoAdminOption" },
+    { label: "extra membership", row: { no_memberships_outside_app_group: false }, field: "noMembershipsOutsideAichmAppRuntime" },
+    { label: "owner or migrator membership", row: { no_owner_or_migrator_membership: false }, field: "noAichmCrmOwnerOrMigratorMembership" },
+    { label: "group missing", row: { app_group_exists: false }, field: "appRuntimeGroupExists" },
+    { label: "group login enabled", row: { app_group_can_login: true }, field: "appRuntimeGroupNoLogin" },
+    { label: "group superuser", row: { app_group_is_superuser: true }, field: "appRuntimeGroupNoSuperuser" },
+    { label: "group createdb", row: { app_group_can_createdb: true }, field: "appRuntimeGroupNoCreatedb" },
+    { label: "group createrole", row: { app_group_can_createrole: true }, field: "appRuntimeGroupNoCreaterole" },
+    { label: "group inherits", row: { app_group_inherits: true }, field: "appRuntimeGroupNoInherit" },
+    { label: "group bypass RLS", row: { app_group_bypasses_rls: true }, field: "appRuntimeGroupNoBypassRls" },
+    { label: "group has parent membership", row: { app_group_has_memberships: true }, field: "appRuntimeGroupHasNoParentMembership" },
+    { label: "group has more than one login", row: { app_group_member_count: 2 }, field: "appRuntimeGroupHasOnlyCandidateLogin" },
+    { label: "candidate database mismatch", row: { database_oid: "16395" }, field: "candidateDatabaseIdentityMatches" },
+  ];
+
+  for (const scenario of cases) {
+    const gate = await inspectApplicationPreMigrationRoleGate(
+      baseEnvironment,
+      targetIdentity,
+      operatorUrl,
+      () => poolFor({ ...validIdentityRow(), ...scenario.row }),
+    );
+    assert.equal(gate.status, "blocked", scenario.label);
+    assert.equal(gate.diagnostics?.[scenario.field], false, scenario.label);
+    assert.equal(gate.diagnostics?.endpointMatches, true, scenario.label);
+  }
+
+  const endpointBlocked = await inspectApplicationPreMigrationRoleGate(
+    {
+      DATABASE_URL: baseEnvironment.DATABASE_URL,
+      AICHM_APP_DATABASE_URL: "postgresql://app-role:app-pass@other.replit.internal/heliumdb?sslmode=disable",
+    },
+    targetIdentity,
+    operatorUrl,
+    () => {
+      throw new Error("candidate pool must not open");
+    },
+  );
+  assert.equal(endpointBlocked.diagnostics?.endpointMatches, false);
+
+  const identityBlocked = await inspectApplicationPreMigrationRoleGate(
+    baseEnvironment,
+    { ...targetIdentity, systemIdentifier: "wrong-system" },
+    operatorUrl,
+    () => {
+      throw new Error("candidate pool must not open");
+    },
+  );
+  assert.equal(identityBlocked.diagnostics?.pinnedDevelopmentIdentityMatches, false);
+  assert.equal(identityBlocked.diagnostics?.endpointMatches, false);
+});
+
+test("preflight diagnostics expose booleans only and never serialize role or connection details", async () => {
+  let queryText = "";
+  const gate = await inspectApplicationPreMigrationRoleGate(
+    baseEnvironment,
+    targetIdentity,
+    operatorUrl,
+    () => ({
+      async query(sql: string) {
+        queryText = sql;
+        return {
+          rows: [{
+            ...validIdentityRow(),
+            no_memberships_outside_app_group: false,
+            private_membership_marker: "unrelated_role_name_must_not_escape",
+          }],
+        };
+      },
+      async end() {},
+    }),
+  );
+
+  const serialized = JSON.stringify(gate);
+  for (const forbidden of [
+    "platform-pass",
+    "app-pass",
+    "operator-pass",
+    "app-role",
+    "db.replit.internal",
+    "unrelated_role_name_must_not_escape",
+    "direct_memberships",
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+  assert.match(queryText.trimStart(), /^SELECT\b/);
+  assert.doesNotMatch(queryText, /\b(?:INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP)\b/i);
+  assert.doesNotMatch(queryText, /array_agg|direct_memberships/);
+  assert.equal(gate.diagnostics?.noMembershipsOutsideAichmAppRuntime, false);
 });

@@ -704,17 +704,8 @@ async function run(): Promise<void> {
       output = {
         status: preApplyRoleGate.status,
         mode,
-        targetIdentity: {
-          expectedPinnedDevelopment: CRM_FORWARD_DEVELOPMENT_IDENTITY,
-          verified: {
-            databaseName: identity.databaseName,
-            databaseOid: identity.databaseOid,
-            databaseUser: identity.databaseUser,
-            systemIdentifier: identity.systemIdentifier,
-            inRecovery: identity.inRecovery,
-            defaultTransactionReadOnly: identity.defaultTransactionReadOnly,
-          },
-        },
+        pinnedDevelopmentIdentityMatches:
+          preApplyRoleGate.diagnostics?.pinnedDevelopmentIdentityMatches === true,
         preApplyRoleGate,
         postMigrationRuntimeGate: "not_checked_before_crm_schema_exists",
       };
