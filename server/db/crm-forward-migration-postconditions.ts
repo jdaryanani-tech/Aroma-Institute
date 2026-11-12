@@ -273,9 +273,28 @@ function safeCatalogIdentifier(value: string | null | undefined): string | null 
   return SAFE_IDENTIFIER.test(value) ? value : "<invalid-identifier>";
 }
 
-function safeCatalogIdentifierArray(value: string[] | null | undefined): string[] | null {
+export function safeCatalogIdentifierArray(value: unknown): string[] | null {
   if (value === null || value === undefined) return null;
-  return value.map(item => safeCatalogIdentifier(item) ?? "<invalid-identifier>");
+
+  let identifiers: unknown[];
+  if (Array.isArray(value)) {
+    identifiers = value;
+  } else if (typeof value === "string") {
+    // pg 8.16.3 has no text parser for PostgreSQL name[] (OID 1003), so
+    // catalog ARRAY(name) values arrive as their raw PostgreSQL array literal.
+    // Accept only the unquoted identifier form used by these catalog names.
+    const match = /^\{([A-Za-z_][A-Za-z0-9_$]{0,62}(?:,[A-Za-z_][A-Za-z0-9_$]{0,62})*)?\}$/.exec(value);
+    if (!match) return null;
+    identifiers = match[1] === undefined ? [] : match[1].split(",");
+  } else {
+    return null;
+  }
+
+  return identifiers.map(item =>
+    typeof item === "string"
+      ? safeCatalogIdentifier(item) ?? "<invalid-identifier>"
+      : "<invalid-identifier>",
+  );
 }
 
 function safeCheckExpression(value: string | null | undefined): string | null {
