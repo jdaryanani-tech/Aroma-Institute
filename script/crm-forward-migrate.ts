@@ -8,6 +8,7 @@ import {
 } from "../server/db/crm-forward-migration-postconditions";
 import {
   assertCrmForwardDevelopmentIdentity,
+  crmForwardEffectivePort,
   CRM_FORWARD_DEVELOPMENT_IDENTITY,
   requireCrmForwardConnectionUrl,
   type CrmForwardDatabaseIdentity,
@@ -76,11 +77,11 @@ function validateRegistry(registry: Registry): void {
   ) fail("CRM_FORWARD_REGISTRY_INVALID");
 }
 
-function pgConfig(connectionUrl: string) {
+function pgConfig(connectionUrl: string, effectivePort: number) {
   const url = new URL(connectionUrl);
   return {
     host: url.hostname,
-    port: Number(url.port),
+    port: effectivePort,
     user: decodeURIComponent(url.username),
     password: decodeURIComponent(url.password),
     database: decodeURIComponent(url.pathname.replace(/^\/+/, "")),
@@ -248,10 +249,12 @@ function previewRecord(
   registry: Registry,
   pending: Migration[],
   mode: CrmForwardMigrationMode,
+  effectivePort: number,
 ) {
   return {
     status: "preview",
     mode,
+    effectivePort,
     targetIdentity: {
       expectedPinnedDevelopment: CRM_FORWARD_DEVELOPMENT_IDENTITY,
       verified: {
@@ -295,6 +298,7 @@ async function applyPlan(
   registry: Registry,
   artifacts: Map<string, MigrationArtifact>,
   connectionState: { released: boolean },
+  effectivePort: number,
 ): Promise<string[]> {
   let lockAcquired = false;
   try {
@@ -313,7 +317,13 @@ async function applyPlan(
     // Re-read identity and state after acquiring the session lock; another
     // forward-runner cannot race the plan between preview and execution.
     const lockedPlan = await readOnlyPlan(client, registry, artifacts);
-    console.log(JSON.stringify(previewRecord(lockedPlan.identity, registry, lockedPlan.plan.pending, "apply")));
+    console.log(JSON.stringify(previewRecord(
+      lockedPlan.identity,
+      registry,
+      lockedPlan.plan.pending,
+      "apply",
+      effectivePort,
+    )));
 
     await client.query("BEGIN");
     try {
@@ -413,19 +423,20 @@ async function applyPlan(
 async function run(): Promise<void> {
   const mode = parseCrmForwardMigrationMode(process.argv.slice(2), process.env);
   const connectionUrl = requireCrmForwardConnectionUrl(process.env);
+  const effectivePort = crmForwardEffectivePort(new URL(connectionUrl));
   const registry = JSON.parse(await readFile(REGISTRY_PATH, "utf8")) as Registry;
   validateRegistry(registry);
   const artifacts = await loadArtifacts(registry);
-  const pool = new Pool(pgConfig(connectionUrl));
+  const pool = new Pool(pgConfig(connectionUrl, effectivePort));
   let client: PoolClient | undefined;
   const connectionState = { released: false };
   try {
     client = await pool.connect();
     const { identity, plan } = await readOnlyPlan(client, registry, artifacts);
-    console.log(JSON.stringify(previewRecord(identity, registry, plan.pending, mode)));
+    console.log(JSON.stringify(previewRecord(identity, registry, plan.pending, mode, effectivePort)));
     if (mode === "preview") return;
 
-    const appliedNow = await applyPlan(client, registry, artifacts, connectionState);
+    const appliedNow = await applyPlan(client, registry, artifacts, connectionState, effectivePort);
     const finalState = await readOnlyPlan(client, registry, artifacts);
     console.log(JSON.stringify({
       status: "verified",

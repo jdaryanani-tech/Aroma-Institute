@@ -26,6 +26,16 @@ function fail(code: string): never {
   throw new Error(code);
 }
 
+export function crmForwardEffectivePort(url: URL): number {
+  if (url.port === "") return 5432;
+  if (!/^\d+$/.test(url.port)) fail("CRM_FORWARD_CONNECTION_URL_REJECTED");
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    fail("CRM_FORWARD_CONNECTION_URL_REJECTED");
+  }
+  return port;
+}
+
 export function requireCrmForwardConnectionUrl(
   environment: CrmForwardEnvironment = process.env,
 ): string {
@@ -58,12 +68,16 @@ export function requireCrmForwardConnectionUrl(
     queryEntries.every(
       ([key, value]) => key === "sslmode" && ["require", "verify-full"].includes(value),
     );
+  const portIsAllowed =
+    url.port === "" ||
+    (/^\d+$/.test(url.port) &&
+      Number.isInteger(Number(url.port)) &&
+      Number(url.port) >= 1 &&
+      Number(url.port) <= 65535);
   if (
     url.protocol !== "postgresql:" ||
     !url.hostname ||
-    !url.port ||
-    !/^[1-9]\d{0,4}$/.test(url.port) ||
-    Number(url.port) > 65535 ||
+    !portIsAllowed ||
     user !== "postgres" ||
     database !== CRM_FORWARD_DEVELOPMENT_IDENTITY.databaseName ||
     url.hash ||

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   assertCrmForwardDevelopmentIdentity,
+  crmForwardEffectivePort,
   CRM_FORWARD_DEVELOPMENT_IDENTITY,
   requireCrmForwardConnectionUrl,
   type CrmForwardDatabaseIdentity,
@@ -45,6 +46,48 @@ test("CRM forward guard requires an explicit URL; live identity validation remai
     }),
     /CRM_FORWARD_CONNECTION_URL_REJECTED/,
   );
+});
+
+test("CRM forward URL uses fixed port 5432 only when the URI omits its port", () => {
+  const url = "postgresql://postgres:placeholder@dev.example.invalid/heliumdb?sslmode=verify-full";
+  assert.equal(requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL: url }), url);
+  assert.equal(crmForwardEffectivePort(new URL(url)), 5432);
+});
+
+test("CRM forward URL honors an explicit valid port exactly", () => {
+  const url = "postgresql://postgres:placeholder@dev.example.invalid:6543/heliumdb?sslmode=require";
+  assert.equal(requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL: url }), url);
+  assert.equal(crmForwardEffectivePort(new URL(url)), 6543);
+});
+
+test("CRM forward URL rejects explicit invalid ports", () => {
+  for (const port of ["0", "65536", "not-a-port"]) {
+    const url = `postgresql://postgres:placeholder@dev.example.invalid:${port}/heliumdb`;
+    assert.throws(
+      () => requireCrmForwardConnectionUrl({ AICHM_CRM_FORWARD_DATABASE_URL: url }),
+      /CRM_FORWARD_CONNECTION_URL_(?:INVALID|REJECTED)/,
+      `port ${port} must be rejected`,
+    );
+  }
+});
+
+test("CRM forward port default does not weaken the pinned live identity check", () => {
+  const url = "postgresql://postgres:placeholder@dev.example.invalid/heliumdb";
+  assert.equal(crmForwardEffectivePort(new URL(url)), 5432);
+  assert.throws(
+    () => assertCrmForwardDevelopmentIdentity({
+      ...expectedIdentity,
+      systemIdentifier: "1",
+    }),
+    /CRM_FORWARD_DEVELOPMENT_IDENTITY_MISMATCH/,
+  );
+});
+
+test("CRM forward runner uses the resolved port explicitly and reports it", async () => {
+  const runner = await readFile(new URL("../../script/crm-forward-migrate.ts", import.meta.url), "utf8");
+  assert.match(runner, /port:\s*effectivePort/);
+  assert.match(runner, /effectivePort,/);
+  assert.doesNotMatch(runner, /process\.env\.PGPORT/);
 });
 
 test("CRM forward identity accepts the pinned Development tuple", () => {
