@@ -136,8 +136,10 @@ export async function assertCrmRuntimeRoleSeparationPostconditions(
     member_is_owner: boolean;
     member_is_migrator: boolean;
     member_has_other_groups: boolean;
+    membership_admin_option: boolean;
   }>(`
     SELECT granted.rolname AS granted_role,member.rolname AS member_role,
+      m.admin_option AS membership_admin_option,
       member.rolcanlogin AS member_login,member.rolsuper AS member_superuser,
       member.rolcreatedb AS member_createdb,member.rolcreaterole AS member_createrole,
       member.rolinherit AS member_inherit,member.rolbypassrls AS member_bypass_rls,
@@ -166,6 +168,7 @@ export async function assertCrmRuntimeRoleSeparationPostconditions(
     row.granted_role === "aichm_crm_migrator" && row.member_login,
   ).length;
   const invalidMembership = memberships.some(row =>
+    row.membership_admin_option ||
     row.member_role === "aichm_app_runtime" ||
     (row.member_role === "aichm_crm_owner") ||
     (row.member_role === "aichm_crm_migrator" && row.granted_role !== "aichm_crm_owner") ||
@@ -176,8 +179,8 @@ export async function assertCrmRuntimeRoleSeparationPostconditions(
        !row.member_is_app_runtime || row.member_has_other_groups)) ||
     (row.granted_role === "aichm_crm_migrator" &&
       (!row.member_login || row.member_superuser || row.member_createdb || row.member_createrole ||
-       row.member_bypass_rls || row.member_is_app_runtime || row.member_is_owner ||
-       row.member_has_other_groups))
+        row.member_bypass_rls || row.member_is_app_runtime || !row.member_is_owner ||
+        !row.member_is_migrator || row.member_has_other_groups))
   );
   if (ownerGrantCount !== 1 || appMemberCount > 1 || migratorLoginCount > 1 || invalidMembership) {
     fail("CRM_RUNTIME_ROLE_MEMBERSHIP_DRIFTED");

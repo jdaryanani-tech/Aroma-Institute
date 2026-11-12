@@ -14,11 +14,17 @@ import {
   assertCrmRuntimeAssignmentFunctionAbsent,
   assertCrmRuntimeRoleSeparationPostconditions,
 } from "../server/db/crm-runtime-role-postconditions";
+import { inspectApplicationPreMigrationRoleGate } from "../server/db/crm-forward-app-role-preflight";
 import {
+  applicationRuntimeFailureCode,
   buildApplicationPoolConfig,
   resolveApplicationRuntimeMode,
   verifyApplicationRuntimePool,
 } from "../server/db/application-runtime-connection";
+import {
+  runAfterCrmPreApplyRoleGate,
+  type CrmPreApplyRoleGate,
+} from "../server/db/crm-forward-apply-gate";
 import {
   assertCrmForwardDevelopmentIdentity,
   crmForwardEffectivePort,
@@ -45,6 +51,7 @@ type Registry = {
 type Queryable = Pick<PoolClient, "query">;
 type MigrationArtifact = { sql: string; hash: string };
 type StageSetter = (stage: CrmForwardFailureStage) => void;
+type RuntimeRoleGate = CrmPreApplyRoleGate;
 
 const REGISTRY_PATH = path.resolve("migrations/crm-forward/registry.json");
 const EXPECTED_MIGRATIONS = [
@@ -370,11 +377,6 @@ async function collectPlan(
   };
 }
 
-type RuntimeRoleGate = {
-  status: "ready" | "blocked";
-  reason: string | null;
-};
-
 async function inspectApplicationRuntimeRoleGate(
   environment: Record<string, string | undefined>,
   target: CrmForwardDatabaseIdentity,
@@ -396,12 +398,9 @@ async function inspectApplicationRuntimeRoleGate(
     });
     return { status: "ready", reason: null };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "";
     return {
       status: "blocked",
-      reason: /^APP_DATABASE_[A-Z_]+$/.test(message)
-        ? message
-        : "APP_DATABASE_RUNTIME_IDENTITY_UNAVAILABLE",
+      reason: applicationRuntimeFailureCode(error) ?? "APP_DATABASE_RUNTIME_IDENTITY_UNAVAILABLE",
     };
   } finally {
     if (candidatePool) await candidatePool.end().catch(() => undefined);
@@ -413,8 +412,9 @@ function previewRecord(
   registry: Registry,
   plan: Awaited<ReturnType<typeof collectPlan>>,
   artifacts: Map<string, MigrationArtifact>,
-  mode: CrmForwardMigrationMode,
+  mode: "preview" | "apply",
   effectivePort: number,
+  preApplyRoleGate: RuntimeRoleGate,
   runtimeRoleGate: RuntimeRoleGate,
 ) {
   return {
@@ -453,6 +453,7 @@ function previewRecord(
       postconditionsVerified: true,
     },
     runtimeAccess: plan.runtimeAccess,
+    preApplyRoleGate,
     runtimeRoleGate,
     wouldRun: plan.pending.map(migration => ({ id: migration.id, file: migration.file })),
     message: mode === "preview"
@@ -483,12 +484,30 @@ async function readOnlyPlan(
   }
 }
 
+async function readPinnedDevelopmentIdentity(
+  client: PoolClient,
+  setStage: StageSetter,
+): Promise<CrmForwardDatabaseIdentity> {
+  setStage("readOnlyTransactionStart");
+  try {
+    await client.query("BEGIN READ ONLY");
+    setStage("livePinnedIdentityVerification");
+    const identity = await inspectIdentity(client);
+    assertCrmForwardDevelopmentIdentity(identity);
+    await client.query("COMMIT");
+    return identity;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
+}
+
 async function applyPlan(
   client: PoolClient,
   registry: Registry,
   artifacts: Map<string, MigrationArtifact>,
   connectionState: { released: boolean },
-  effectivePort: number,
+  operatorConnectionUrl: string,
   setStage: StageSetter,
 ): Promise<string[]> {
   let lockAcquired = false;
@@ -508,115 +527,121 @@ async function applyPlan(
     // Re-read identity and state after acquiring the session lock; another
     // forward-runner cannot race the plan between preview and execution.
     const lockedPlan = await readOnlyPlan(client, registry, artifacts, setStage);
-    const runtimeRoleGate = await inspectApplicationRuntimeRoleGate(process.env, lockedPlan.identity);
-    console.log(JSON.stringify(previewRecord(
+    const preApplyRoleGate = await inspectApplicationPreMigrationRoleGate(
+      process.env,
       lockedPlan.identity,
-      registry,
-      lockedPlan.plan,
-      artifacts,
-      "apply",
-      effectivePort,
-      runtimeRoleGate,
-    )));
+      operatorConnectionUrl,
+      mode => new Pool(buildApplicationPoolConfig(mode)),
+    );
 
-    await client.query("BEGIN");
-    try {
-      await ensureLedger(client, registry, async () => {
-        const identity = await inspectIdentity(client);
-        assertCrmForwardDevelopmentIdentity(identity);
-      });
-      await client.query("COMMIT");
-    } catch {
-      await client.query("ROLLBACK").catch(() => undefined);
-      fail("CRM_FORWARD_LEDGER_SETUP_FAILED");
-    }
+    return await runAfterCrmPreApplyRoleGate(
+      async () => preApplyRoleGate,
+      async () => {
+        console.log(JSON.stringify({
+          status: "pre-apply-app-role-verified",
+          preApplyRoleGate,
+        }));
 
-    const appliedNow: string[] = [];
-    for (const migration of lockedPlan.plan.pending) {
-      const sql = artifact(artifacts, migration.id).sql;
-      await client.query("BEGIN");
-      try {
-        assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
-        const latestLedger = await readExistingLedger(client, registry);
-        if (latestLedger.some(row => !registry.migrations.some(item => item.id === row.migration_id))) {
-          fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
-        }
-        const alreadyApplied = latestLedger.find(row => row.migration_id === migration.id);
-        if (alreadyApplied) {
-          if (alreadyApplied.sha256 !== artifact(artifacts, migration.id).hash) {
-            fail("CRM_FORWARD_LEDGER_HASH_MISMATCH");
-          }
+        await client.query("BEGIN");
+        try {
+          await ensureLedger(client, registry, async () => {
+            const identity = await inspectIdentity(client);
+            assertCrmForwardDevelopmentIdentity(identity);
+          });
           await client.query("COMMIT");
-          continue;
+        } catch {
+          await client.query("ROLLBACK").catch(() => undefined);
+          fail("CRM_FORWARD_LEDGER_SETUP_FAILED");
         }
-        if (migration.id === EXPECTED_MIGRATIONS[1]) {
-          const prerequisiteLedger = latestLedger.find(row => row.migration_id === EXPECTED_MIGRATIONS[0]);
-          if (prerequisiteLedger?.sha256 !== artifact(artifacts, EXPECTED_MIGRATIONS[0]).hash) {
-            fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
+
+        const appliedNow: string[] = [];
+        for (const migration of lockedPlan.plan.pending) {
+          const sql = artifact(artifacts, migration.id).sql;
+          await client.query("BEGIN");
+          try {
+            assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
+            const latestLedger = await readExistingLedger(client, registry);
+            if (latestLedger.some(row => !registry.migrations.some(item => item.id === row.migration_id))) {
+              fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
+            }
+            const alreadyApplied = latestLedger.find(row => row.migration_id === migration.id);
+            if (alreadyApplied) {
+              if (alreadyApplied.sha256 !== artifact(artifacts, migration.id).hash) {
+                fail("CRM_FORWARD_LEDGER_HASH_MISMATCH");
+              }
+              await client.query("COMMIT");
+              continue;
+            }
+            if (migration.id === EXPECTED_MIGRATIONS[1]) {
+              const prerequisiteLedger = latestLedger.find(row => row.migration_id === EXPECTED_MIGRATIONS[0]);
+              if (prerequisiteLedger?.sha256 !== artifact(artifacts, EXPECTED_MIGRATIONS[0]).hash) {
+                fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
+              }
+              await assertCrmAssignmentSchemaPostconditions(
+                client,
+                "public",
+                "0014",
+                artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+                artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+              );
+            } else if (migration.id === EXPECTED_MIGRATIONS[2]) {
+              const prerequisiteLedger = latestLedger.find(row => row.migration_id === EXPECTED_MIGRATIONS[1]);
+              if (prerequisiteLedger?.sha256 !== artifact(artifacts, EXPECTED_MIGRATIONS[1]).hash) {
+                fail("CRM_FORWARD_0015_LEDGER_PREREQUISITE_MISSING");
+              }
+              await assertCrmAssignmentSchemaPostconditions(
+                client,
+                "public",
+                "0015",
+                artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+                artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+              );
+              await assertCrmRuntimeAssignmentFunctionAbsent(client);
+            } else {
+              await assertCrmAssignmentSchemaAbsent(
+                client,
+                "public",
+                artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+                artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+              );
+            }
+            await client.query("SET LOCAL search_path = public, pg_catalog");
+            // The final identity assertion is immediately before the migration SQL.
+            const identityBeforeWrite = await inspectIdentity(client);
+            assertCrmForwardDevelopmentIdentity(identityBeforeWrite);
+            await client.query(unwrapMigration(sql));
+            const completedStage = migration.id === EXPECTED_MIGRATIONS[0]
+              ? "0014"
+              : migration.id === EXPECTED_MIGRATIONS[1] ? "0015" : "0016";
+            await assertCrmAssignmentSchemaPostconditions(
+              client,
+              "public",
+              completedStage,
+              artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+              artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+            );
+            if (migration.id === EXPECTED_MIGRATIONS[2]) {
+              await assertCrmRuntimeRoleSeparationPostconditions(
+                client,
+                "public",
+                artifact(artifacts, EXPECTED_MIGRATIONS[2]).sql,
+              );
+            }
+            assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
+            await client.query(
+              `INSERT INTO ${registry.ledger.schema}.${registry.ledger.table}(migration_id,sha256) VALUES($1,$2)`,
+              [migration.id, artifact(artifacts, migration.id).hash],
+            );
+            await client.query("COMMIT");
+            appliedNow.push(migration.id);
+          } catch {
+            await client.query("ROLLBACK").catch(() => undefined);
+            fail("CRM_FORWARD_MIGRATION_FAILED");
           }
-          await assertCrmAssignmentSchemaPostconditions(
-            client,
-            "public",
-            "0014",
-            artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
-            artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
-          );
-        } else if (migration.id === EXPECTED_MIGRATIONS[2]) {
-          const prerequisiteLedger = latestLedger.find(row => row.migration_id === EXPECTED_MIGRATIONS[1]);
-          if (prerequisiteLedger?.sha256 !== artifact(artifacts, EXPECTED_MIGRATIONS[1]).hash) {
-            fail("CRM_FORWARD_0015_LEDGER_PREREQUISITE_MISSING");
-          }
-          await assertCrmAssignmentSchemaPostconditions(
-            client,
-            "public",
-            "0015",
-            artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
-            artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
-          );
-          await assertCrmRuntimeAssignmentFunctionAbsent(client);
-        } else {
-          await assertCrmAssignmentSchemaAbsent(
-            client,
-            "public",
-            artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
-            artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
-          );
         }
-        await client.query("SET LOCAL search_path = public, pg_catalog");
-        // The final identity assertion is immediately before the migration SQL.
-        const identityBeforeWrite = await inspectIdentity(client);
-        assertCrmForwardDevelopmentIdentity(identityBeforeWrite);
-        await client.query(unwrapMigration(sql));
-        const completedStage = migration.id === EXPECTED_MIGRATIONS[0]
-          ? "0014"
-          : migration.id === EXPECTED_MIGRATIONS[1] ? "0015" : "0016";
-        await assertCrmAssignmentSchemaPostconditions(
-          client,
-          "public",
-          completedStage,
-          artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
-          artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
-        );
-        if (migration.id === EXPECTED_MIGRATIONS[2]) {
-          await assertCrmRuntimeRoleSeparationPostconditions(
-            client,
-            "public",
-            artifact(artifacts, EXPECTED_MIGRATIONS[2]).sql,
-          );
-        }
-        assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
-        await client.query(
-          `INSERT INTO ${registry.ledger.schema}.${registry.ledger.table}(migration_id,sha256) VALUES($1,$2)`,
-          [migration.id, artifact(artifacts, migration.id).hash],
-        );
-        await client.query("COMMIT");
-        appliedNow.push(migration.id);
-      } catch {
-        await client.query("ROLLBACK").catch(() => undefined);
-        fail("CRM_FORWARD_MIGRATION_FAILED");
-      }
-    }
-    return appliedNow;
+        return appliedNow;
+      },
+    );
   } finally {
     if (lockAcquired) {
       let unlockFailed = false;
@@ -650,6 +675,7 @@ async function run(): Promise<void> {
   let failed = false;
   let failure: unknown;
   let output: unknown;
+  let resultExitCode = 0;
 
   try {
     setStage("urlValidation");
@@ -667,37 +693,73 @@ async function run(): Promise<void> {
 
     setStage("tcpConnectionTlsNegotiation");
     client = await pool.connect();
-    const { identity, plan } = await readOnlyPlan(client, registry, artifacts, setStage);
-    if (mode === "preview") {
-      setStage("previewPlanAssembly");
-      output = previewRecord(
+    if (mode === "preflight-app-role") {
+      const identity = await readPinnedDevelopmentIdentity(client, setStage);
+      const preApplyRoleGate = await inspectApplicationPreMigrationRoleGate(
+        process.env,
         identity,
-        registry,
-        plan,
-        artifacts,
-        mode,
-        effectivePort,
-        await inspectApplicationRuntimeRoleGate(process.env, identity),
+        connectionUrl,
+        mode => new Pool(buildApplicationPoolConfig(mode)),
       );
-    } else {
-      const appliedNow = await applyPlan(
-        client,
-        registry,
-        artifacts,
-        connectionState,
-        effectivePort,
-        setStage,
-      );
-      const finalState = await readOnlyPlan(client, registry, artifacts, setStage);
-      setStage("previewPlanAssembly");
-      const runtimeRoleGate = await inspectApplicationRuntimeRoleGate(process.env, finalState.identity);
       output = {
-        status: "verified",
-        stream: registry.stream,
-        appliedNow,
-        remaining: finalState.plan.pending.map(migration => migration.id),
-        rolloutReadiness: runtimeRoleGate,
+        status: preApplyRoleGate.status,
+        mode,
+        targetIdentity: {
+          expectedPinnedDevelopment: CRM_FORWARD_DEVELOPMENT_IDENTITY,
+          verified: {
+            databaseName: identity.databaseName,
+            databaseOid: identity.databaseOid,
+            databaseUser: identity.databaseUser,
+            systemIdentifier: identity.systemIdentifier,
+            inRecovery: identity.inRecovery,
+            defaultTransactionReadOnly: identity.defaultTransactionReadOnly,
+          },
+        },
+        preApplyRoleGate,
+        postMigrationRuntimeGate: "not_checked_before_crm_schema_exists",
       };
+      if (preApplyRoleGate.status !== "ready") resultExitCode = 1;
+    } else {
+      const { identity, plan } = await readOnlyPlan(client, registry, artifacts, setStage);
+      if (mode === "preview") {
+        setStage("previewPlanAssembly");
+        const preApplyRoleGate = await inspectApplicationPreMigrationRoleGate(
+          process.env,
+          identity,
+          connectionUrl,
+          mode => new Pool(buildApplicationPoolConfig(mode)),
+        );
+        output = previewRecord(
+          identity,
+          registry,
+          plan,
+          artifacts,
+          mode,
+          effectivePort,
+          preApplyRoleGate,
+          await inspectApplicationRuntimeRoleGate(process.env, identity),
+        );
+      } else {
+        const appliedNow = await applyPlan(
+          client,
+          registry,
+          artifacts,
+          connectionState,
+          connectionUrl,
+          setStage,
+        );
+        const finalState = await readOnlyPlan(client, registry, artifacts, setStage);
+        setStage("previewPlanAssembly");
+        const runtimeRoleGate = await inspectApplicationRuntimeRoleGate(process.env, finalState.identity);
+        output = {
+          status: runtimeRoleGate.status === "ready" ? "verified" : "runtime_role_blocked",
+          stream: registry.stream,
+          appliedNow,
+          remaining: finalState.plan.pending.map(migration => migration.id),
+          rolloutReadiness: runtimeRoleGate,
+        };
+        if (runtimeRoleGate.status !== "ready") resultExitCode = 1;
+      }
     }
   } catch (error) {
     failed = true;
@@ -732,6 +794,7 @@ async function run(): Promise<void> {
   }
 
   console.log(JSON.stringify(output));
+  process.exitCode = resultExitCode;
 }
 
 void run().catch(error => {

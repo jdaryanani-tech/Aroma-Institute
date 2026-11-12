@@ -46,13 +46,15 @@ function mockClient(overrides: Record<string, unknown> = {}) {
           granted_role: "aichm_crm_owner", member_role: "aichm_crm_migrator",
           member_login: false, member_superuser: false, member_createdb: false,
           member_createrole: false, member_inherit: false, member_bypass_rls: false,
+          membership_admin_option: false,
           member_is_app_runtime: false,
-          member_is_owner: false, member_is_migrator: true, member_has_other_groups: false,
+          member_is_owner: true, member_is_migrator: true, member_has_other_groups: false,
         },
         {
           granted_role: "aichm_app_runtime", member_role: "aichm_runtime_login",
           member_login: true, member_superuser: false, member_createdb: false,
           member_createrole: false, member_inherit: true, member_bypass_rls: false,
+          membership_admin_option: false,
           member_is_app_runtime: true,
           member_is_owner: false, member_is_migrator: false, member_has_other_groups: false,
         },
@@ -121,11 +123,70 @@ test("role migration can prepare ACLs before the app login is provisioned", asyn
       granted_role: "aichm_crm_owner", member_role: "aichm_crm_migrator",
       member_login: false, member_superuser: false, member_createdb: false,
       member_createrole: false, member_inherit: false, member_bypass_rls: false,
+      membership_admin_option: false,
       member_is_app_runtime: false, member_is_owner: false, member_is_migrator: true,
       member_has_other_groups: false,
     }],
   });
   await assertCrmRuntimeRoleSeparationPostconditions(client as never, "public", migrationSql);
+});
+
+test("a dedicated migrator login may reach the owner only through migrator membership", async () => {
+  const migrationSql = await readFile("migrations/0016_crm_runtime_role_separation.sql", "utf8");
+  const memberships = [
+    {
+      granted_role: "aichm_crm_owner", member_role: "aichm_crm_migrator",
+      member_login: false, member_superuser: false, member_createdb: false,
+      member_createrole: false, member_inherit: false, member_bypass_rls: false,
+      member_is_app_runtime: false, member_is_owner: true, member_is_migrator: true,
+      member_has_other_groups: false,
+    },
+    {
+      granted_role: "aichm_app_runtime", member_role: "aichm_runtime_login",
+      member_login: true, member_superuser: false, member_createdb: false,
+      member_createrole: false, member_inherit: true, member_bypass_rls: false,
+      membership_admin_option: false,
+      member_is_app_runtime: true, member_is_owner: false, member_is_migrator: false,
+      member_has_other_groups: false,
+    },
+    {
+      granted_role: "aichm_crm_migrator", member_role: "aichm_migrator_login",
+      member_login: true, member_superuser: false, member_createdb: false,
+      member_createrole: false, member_inherit: true, member_bypass_rls: false,
+      membership_admin_option: false,
+      member_is_app_runtime: false, member_is_owner: true, member_is_migrator: true,
+      member_has_other_groups: false,
+    },
+  ];
+  const client = mockClient({ migrationSql, memberships });
+  await assertCrmRuntimeRoleSeparationPostconditions(client as never, "public", migrationSql);
+});
+
+test("runtime role postconditions reject role-membership admin option", async () => {
+  const migrationSql = await readFile("migrations/0016_crm_runtime_role_separation.sql", "utf8");
+  const client = mockClient({
+    migrationSql,
+    memberships: [
+      {
+        granted_role: "aichm_crm_owner", member_role: "aichm_crm_migrator",
+        member_login: false, member_superuser: false, member_createdb: false,
+        member_createrole: false, member_inherit: false, member_bypass_rls: false,
+        member_is_app_runtime: false, member_is_owner: true, member_is_migrator: true,
+        member_has_other_groups: false, membership_admin_option: false,
+      },
+      {
+        granted_role: "aichm_app_runtime", member_role: "aichm_runtime_login",
+        member_login: true, member_superuser: false, member_createdb: false,
+        member_createrole: false, member_inherit: true, member_bypass_rls: false,
+        member_is_app_runtime: true, member_is_owner: false, member_is_migrator: false,
+        member_has_other_groups: false, membership_admin_option: true,
+      },
+    ],
+  });
+  await assert.rejects(
+    assertCrmRuntimeRoleSeparationPostconditions(client as never, "public", migrationSql),
+    /CRM_RUNTIME_ROLE_MEMBERSHIP_DRIFTED/,
+  );
 });
 
 test("forward migration table grants match the reviewed runtime privilege matrix", async () => {

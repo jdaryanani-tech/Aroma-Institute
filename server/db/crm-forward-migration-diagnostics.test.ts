@@ -68,6 +68,23 @@ test("stable Development-only guard codes remain visible without arbitrary error
   assert.equal(JSON.stringify(diagnostic).includes("contains-secret-like-message"), false);
 });
 
+test("app-role preflight blockers are reported as stable codes without raw errors", () => {
+  for (const [code, category] of [
+    ["APP_DATABASE_URL_NOT_CONFIGURED", "application_database_url_required"],
+    ["APP_DATABASE_ENDPOINT_MISMATCH", "application_endpoint_mismatch"],
+    ["APP_DATABASE_PREMIGRATION_MEMBERSHIP_REJECTED", "application_premigration_membership_rejected"],
+  ] as const) {
+    const diagnostic = formatCrmForwardStageFailure(
+      "previewPlanAssembly",
+      Object.assign(new Error("credential-like raw text"), { code }),
+      CORRELATION_ID,
+    );
+    assert.equal(diagnostic.failureCode, code);
+    assert.equal(diagnostic.failureCategory, category);
+    assert.equal(JSON.stringify(diagnostic).includes("credential-like"), false);
+  }
+});
+
 test("CRM forward diagnostics traverse bounded driver causes without looping", () => {
   const wrapped = Object.assign(new Error("outer"), {
     cause: Object.assign(new Error("driver wrapper"), {

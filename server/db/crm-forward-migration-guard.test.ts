@@ -13,6 +13,7 @@ import {
   CRM_FORWARD_APPLY_CONFIRM_ENV,
   CRM_FORWARD_APPLY_CONFIRM_VALUE,
   CRM_FORWARD_APPLY_FLAG,
+  CRM_FORWARD_APP_PREFLIGHT_FLAG,
   parseCrmForwardMigrationMode,
 } from "./crm-forward-migration-mode";
 
@@ -232,10 +233,29 @@ test("CRM forward identity rejects unknown database, OID, user, system, replica,
 test("CRM forward runner defaults to read-only preview", () => {
   assert.equal(parseCrmForwardMigrationMode([], {}), "preview");
   assert.equal(parseCrmForwardMigrationMode(["--preview"], {}), "preview");
+  assert.equal(parseCrmForwardMigrationMode([CRM_FORWARD_APP_PREFLIGHT_FLAG], {}), "preflight-app-role");
   assert.equal(
     parseCrmForwardMigrationMode([], { [CRM_FORWARD_APPLY_CONFIRM_ENV]: CRM_FORWARD_APPLY_CONFIRM_VALUE }),
     "preview",
   );
+});
+
+test("dedicated app-role preflight mode is read-only and separate from apply", () => {
+  assert.equal(
+    parseCrmForwardMigrationMode([CRM_FORWARD_APP_PREFLIGHT_FLAG], {}),
+    "preflight-app-role",
+  );
+});
+
+test("dedicated app-role preflight pins Development before role checks and skips CRM schema inspection", async () => {
+  const source = await readFile("script/crm-forward-migrate.ts", "utf8");
+  const start = source.indexOf('if (mode === "preflight-app-role")');
+  const end = source.indexOf("} else {", start);
+  assert.ok(start >= 0 && end > start);
+  const branch = source.slice(start, end);
+  assert.ok(branch.indexOf("readPinnedDevelopmentIdentity") >= 0);
+  assert.ok(branch.indexOf("readPinnedDevelopmentIdentity") < branch.indexOf("inspectApplicationPreMigrationRoleGate"));
+  assert.doesNotMatch(branch, /readOnlyPlan|collectPlan|ensureLedger|unwrapMigration/);
 });
 
 test("CRM forward runner requires both the apply flag and exact confirmation value", () => {
@@ -304,6 +324,23 @@ test("CRM forward runner previews by default and applies only under explicit con
   assert.match(source, /assertCrmForwardDevelopmentIdentity/);
   assert.match(source, /assertCrmAssignmentSchemaPostconditions/);
   assert.match(source, /CRM_FORWARD_DEVELOPMENT_IDENTITY/);
+});
+
+test("blocked app-role gate is awaited before migration-ledger or schema writes", async () => {
+  const source = await readFile("script/crm-forward-migrate.ts", "utf8");
+  const preflightSource = await readFile("server/db/crm-forward-app-role-preflight.ts", "utf8");
+  const applyStart = source.indexOf("async function applyPlan");
+  const applyEnd = source.indexOf("async function run()", applyStart);
+  assert.ok(applyStart >= 0 && applyEnd > applyStart);
+  const applyBody = source.slice(applyStart, applyEnd);
+  const gate = applyBody.indexOf("runAfterCrmPreApplyRoleGate");
+  const ledgerWrite = applyBody.indexOf("ensureLedger");
+  const schemaWrite = applyBody.indexOf("unwrapMigration(sql)");
+  assert.ok(gate >= 0);
+  assert.ok(ledgerWrite > gate);
+  assert.ok(schemaWrite > gate);
+  assert.match(source, /inspectApplicationPreMigrationRoleGate/);
+  assert.match(preflightSource, /verifyApplicationPreMigrationPool/);
 });
 
 test("isolated CRM test launcher bounds child work and cleans up after signals", async () => {

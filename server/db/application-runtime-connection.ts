@@ -15,8 +15,32 @@ export type ApplicationRuntimeMode =
   | { kind: "legacy"; connectionString: string }
   | { kind: "least_privilege"; connectionString: string; expectedDatabase: string };
 
+const APPLICATION_RUNTIME_FAILURE_CODES = new Set([
+  "APP_DATABASE_URL_INVALID",
+  "APP_DATABASE_PLATFORM_REFERENCE_REQUIRED",
+  "APP_DATABASE_PLATFORM_REFERENCE_INVALID",
+  "APP_DATABASE_ENDPOINT_NOT_INTERNAL",
+  "APP_DATABASE_ENDPOINT_MISMATCH",
+  "APP_DATABASE_RUNTIME_IDENTITY_UNAVAILABLE",
+  "APP_DATABASE_RUNTIME_IDENTITY_REJECTED",
+  "APP_DATABASE_RUNTIME_PRIVILEGES_NOT_READY",
+  "APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE",
+  "APP_DATABASE_PREMIGRATION_IDENTITY_MISMATCH",
+  "APP_DATABASE_PREMIGRATION_LOGIN_REJECTED",
+  "APP_DATABASE_PREMIGRATION_GROUP_REJECTED",
+  "APP_DATABASE_PREMIGRATION_MEMBERSHIP_REJECTED",
+]);
+
+export function applicationRuntimeFailureCode(error: unknown): string | null {
+  if (!error || typeof error !== "object" || !("code" in error)) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && APPLICATION_RUNTIME_FAILURE_CODES.has(code) ? code : null;
+}
+
 function reject(code: string): never {
-  throw new Error(code);
+  const error = new Error(code) as Error & { code: string };
+  error.code = code;
+  throw error;
 }
 
 function isPrivateDatabaseHost(host: string): boolean {
@@ -126,6 +150,28 @@ export function resolveApplicationRuntimeMode(
   };
 }
 
+/**
+ * Compare only endpoint and transport policy. The application login is
+ * deliberately different from the platform/migration login.
+ */
+export function applicationDatabaseEndpointsMatch(
+  applicationUrl: string,
+  referenceUrl: string,
+): boolean {
+  try {
+    const application = endpointFrom(applicationUrl, "app");
+    const reference = endpointFrom(referenceUrl, "platform");
+    return isPrivateDatabaseHost(application.host) &&
+      isPrivateDatabaseHost(reference.host) &&
+      application.host === reference.host &&
+      application.port === reference.port &&
+      application.database === reference.database &&
+      JSON.stringify(application.queryPolicy) === JSON.stringify(reference.queryPolicy);
+  } catch {
+    return false;
+  }
+}
+
 export function buildApplicationPoolConfig(
   mode: ApplicationRuntimeMode,
 ): PoolConfig {
@@ -157,6 +203,148 @@ export type ExpectedApplicationDatabaseIdentity = {
   databaseName: string;
   databaseOid: string;
 };
+
+export type ExpectedPreMigrationApplicationIdentity = {
+  databaseName: string;
+  databaseOid: string;
+};
+
+/**
+ * Pre-migration probe: deliberately checks only the pinned database and
+ * pre-provisioned role boundary. It does not require CRM assignment objects.
+ */
+export async function verifyApplicationPreMigrationPool(
+  pool: Pick<Pool, "query">,
+  expectedIdentity: ExpectedPreMigrationApplicationIdentity,
+): Promise<void> {
+  type IdentityRow = {
+    database_name: string;
+    database_oid: string;
+    login_role: string;
+    in_recovery: boolean;
+    transaction_read_only: boolean;
+    login_can_login: boolean;
+    login_is_superuser: boolean;
+    login_can_createdb: boolean;
+    login_can_createrole: boolean;
+    login_inherits: boolean;
+    login_bypasses_rls: boolean;
+    database_owner_member: boolean;
+    app_group_exists: boolean;
+    app_group_can_login: boolean | null;
+    app_group_is_superuser: boolean | null;
+    app_group_can_createdb: boolean | null;
+    app_group_can_createrole: boolean | null;
+    app_group_inherits: boolean | null;
+    app_group_bypasses_rls: boolean | null;
+    app_group_is_member: boolean;
+    app_group_has_memberships: boolean;
+    app_group_member_count: number;
+    app_group_admin_option: boolean;
+    owner_group_member: boolean;
+    migrator_group_member: boolean;
+    direct_memberships: string[];
+  };
+
+  let identity: IdentityRow | undefined;
+  try {
+    ({ rows: [identity] } = await pool.query<IdentityRow>(`
+      SELECT current_database() AS database_name,
+        d.oid::text AS database_oid,
+        current_user AS login_role,
+        pg_is_in_recovery() AS in_recovery,
+        current_setting('transaction_read_only')::boolean AS transaction_read_only,
+        login.rolcanlogin AS login_can_login,
+        login.rolsuper AS login_is_superuser,
+        login.rolcreatedb AS login_can_createdb,
+        login.rolcreaterole AS login_can_createrole,
+        login.rolinherit AS login_inherits,
+        login.rolbypassrls AS login_bypasses_rls,
+        (login.oid=d.datdba OR pg_has_role(login.oid,d.datdba,'MEMBER')) AS database_owner_member,
+        app_group.oid IS NOT NULL AS app_group_exists,
+        app_group.rolcanlogin AS app_group_can_login,
+        app_group.rolsuper AS app_group_is_superuser,
+        app_group.rolcreatedb AS app_group_can_createdb,
+        app_group.rolcreaterole AS app_group_can_createrole,
+        app_group.rolinherit AS app_group_inherits,
+        app_group.rolbypassrls AS app_group_bypasses_rls,
+        COALESCE(pg_has_role(login.oid,app_group.oid,'MEMBER'),false) AS app_group_is_member,
+        EXISTS (
+          SELECT 1 FROM pg_auth_members group_membership
+          WHERE group_membership.member=app_group.oid
+        ) AS app_group_has_memberships,
+        (SELECT count(*)::integer FROM pg_auth_members group_member
+          WHERE group_member.roleid=app_group.oid) AS app_group_member_count,
+        COALESCE((
+          SELECT membership.admin_option
+          FROM pg_auth_members membership
+          WHERE membership.member=login.oid AND membership.roleid=app_group.oid
+        ),false) AS app_group_admin_option,
+        COALESCE(pg_has_role(login.oid,owner_group.oid,'MEMBER'),false) AS owner_group_member,
+        COALESCE(pg_has_role(login.oid,migrator_group.oid,'MEMBER'),false) AS migrator_group_member,
+        COALESCE((
+          SELECT array_agg(granted.rolname::text ORDER BY granted.rolname)
+          FROM pg_auth_members membership
+          JOIN pg_roles granted ON granted.oid=membership.roleid
+          WHERE membership.member=login.oid
+        ), ARRAY[]::text[]) AS direct_memberships
+      FROM pg_database d
+      JOIN pg_roles login ON login.rolname=current_user
+      LEFT JOIN pg_roles app_group ON app_group.rolname='aichm_app_runtime'
+      LEFT JOIN pg_roles owner_group ON owner_group.rolname='aichm_crm_owner'
+      LEFT JOIN pg_roles migrator_group ON migrator_group.rolname='aichm_crm_migrator'
+      WHERE d.datname=current_database()
+    `));
+  } catch {
+    reject("APP_DATABASE_PREMIGRATION_IDENTITY_UNAVAILABLE");
+  }
+
+  if (
+    !identity ||
+    typeof identity.database_name !== "string" ||
+    typeof identity.database_oid !== "string" ||
+    typeof identity.in_recovery !== "boolean" ||
+    typeof identity.transaction_read_only !== "boolean" ||
+    identity.database_name !== expectedIdentity.databaseName ||
+    identity.database_oid !== expectedIdentity.databaseOid ||
+    identity.in_recovery ||
+    identity.transaction_read_only
+  ) reject("APP_DATABASE_PREMIGRATION_IDENTITY_MISMATCH");
+
+  if (
+    identity.login_role === "postgres" ||
+    typeof identity.login_role !== "string" ||
+    identity.login_can_login !== true ||
+    identity.login_is_superuser !== false ||
+    identity.login_can_createdb !== false ||
+    identity.login_can_createrole !== false ||
+    identity.login_inherits !== true ||
+    identity.login_bypasses_rls !== false ||
+    identity.database_owner_member !== false
+  ) reject("APP_DATABASE_PREMIGRATION_LOGIN_REJECTED");
+
+  if (
+    identity.app_group_exists !== true ||
+    identity.app_group_can_login !== false ||
+    identity.app_group_is_superuser !== false ||
+    identity.app_group_can_createdb !== false ||
+    identity.app_group_can_createrole !== false ||
+    identity.app_group_inherits !== false ||
+    identity.app_group_bypasses_rls !== false ||
+    identity.app_group_has_memberships !== false ||
+    identity.app_group_member_count !== 1
+  ) reject("APP_DATABASE_PREMIGRATION_GROUP_REJECTED");
+
+  if (
+    identity.app_group_is_member !== true ||
+    identity.app_group_admin_option !== false ||
+    identity.owner_group_member !== false ||
+    identity.migrator_group_member !== false ||
+    !Array.isArray(identity.direct_memberships) ||
+    identity.direct_memberships.length !== 1 ||
+    identity.direct_memberships[0] !== "aichm_app_runtime"
+  ) reject("APP_DATABASE_PREMIGRATION_MEMBERSHIP_REJECTED");
+}
 
 export async function verifyApplicationRuntimePool(
   pool: Pick<Pool, "query">,
