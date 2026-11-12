@@ -18,36 +18,76 @@ test("CRM forward failures map every requested stage to a stable sanitized code"
     );
     assert.deepEqual(diagnostic, {
       stageCode,
-      errorClass: "ERROR",
+      failureCategory: "unknown",
       correlationId: CORRELATION_ID,
     });
   }
 });
 
-test("CRM forward stage diagnostics use only recognized SQLSTATE and transport classes", () => {
+test("CRM forward failures classify only explicitly allowlisted connection codes", () => {
+  const cases = [
+    ["ENOTFOUND", "dns_resolution"],
+    ["EAI_AGAIN", "dns_resolution"],
+    ["ECONNREFUSED", "tcp_connection"],
+    ["ETIMEDOUT", "tcp_connection"],
+    ["ERR_TLS_CERT_ALTNAME_INVALID", "tls_hostname_verification"],
+    ["CERT_HAS_EXPIRED", "tls_certificate_verification"],
+    ["ERR_SSL_WRONG_VERSION_NUMBER", "tls_protocol_negotiation"],
+    ["28P01", "postgres_authentication"],
+    ["08006", "postgres_connection"],
+    ["UNRECOGNIZED_CODE", "unknown"],
+  ] as const;
+  for (const [code, expected] of cases) {
+    assert.equal(
+      formatCrmForwardStageFailure(
+        "tcpConnectionTlsNegotiation",
+        Object.assign(new Error("hidden"), { code }),
+        CORRELATION_ID,
+      ).failureCategory,
+      expected,
+    );
+  }
+});
+
+test("CRM forward diagnostics traverse bounded driver causes without looping", () => {
+  const wrapped = Object.assign(new Error("outer"), {
+    cause: Object.assign(new Error("driver wrapper"), {
+      original: Object.assign(new Error("socket"), { code: "ECONNREFUSED" }),
+    }),
+  });
   assert.equal(
     formatCrmForwardStageFailure(
       "tcpConnectionTlsNegotiation",
-      Object.assign(new Error("hidden"), { code: "28P01" }),
+      wrapped,
       CORRELATION_ID,
-    ).errorClass,
-    "SQLSTATE_INVALID_AUTHORIZATION",
+    ).failureCategory,
+    "tcp_connection",
   );
+
+  const cyclic: { code?: string; cause?: unknown } = { code: "NOT_ALLOWLISTED" };
+  cyclic.cause = cyclic;
   assert.equal(
     formatCrmForwardStageFailure(
       "tcpConnectionTlsNegotiation",
-      Object.assign(new Error("hidden"), { code: "ECONNREFUSED" }),
+      cyclic,
       CORRELATION_ID,
-    ).errorClass,
-    "NETWORK_CONNECTION_REFUSED",
+    ).failureCategory,
+    "unknown",
   );
+});
+
+test("CRM forward cause traversal is bounded", () => {
+  let wrapped: { cause?: unknown } = {};
+  const root = wrapped;
+  for (let i = 0; i < 6; i += 1) wrapped = wrapped.cause = {};
+  wrapped.cause = { code: "ECONNREFUSED" };
   assert.equal(
     formatCrmForwardStageFailure(
       "tcpConnectionTlsNegotiation",
-      Object.assign(new Error("hidden"), { code: "ERR_TLS_CERT_ALTNAME_INVALID" }),
+      root,
       CORRELATION_ID,
-    ).errorClass,
-    "TLS_CERTIFICATE_NAME_REJECTED",
+    ).failureCategory,
+    "unknown",
   );
 });
 
@@ -67,17 +107,21 @@ test("unknown errors redact message, stack, URL, credentials, and arbitrary fiel
     stack: sensitiveMarkers.join(" "),
     connectionString: sensitiveMarkers.join(" "),
     environment: { DATABASE_URL: sensitiveMarkers.join(" ") },
+    cause: Object.assign(new Error(sensitiveMarkers.join(" ")), {
+      code: "secret-token",
+      host: sensitiveMarkers.join(" "),
+    }),
   });
   const serialized = JSON.stringify(formatCrmForwardStageFailure(
     "clientPoolConstruction",
     error,
     CORRELATION_ID,
   ));
-  assert.equal(JSON.parse(serialized).errorClass, "UNKNOWN");
+  assert.equal(JSON.parse(serialized).failureCategory, "unknown");
   for (const marker of sensitiveMarkers) assert.equal(serialized.includes(marker), false);
   assert.deepEqual(Object.keys(JSON.parse(serialized)).sort(), [
     "correlationId",
-    "errorClass",
+    "failureCategory",
     "stageCode",
   ]);
 });
