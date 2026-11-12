@@ -174,7 +174,7 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
         /permission denied/,
       );
       await assert.rejects(
-        appDb.query("INSERT INTO admissions_lead_assignment_history(lead_id,assignment_version,actor_user_id,old_assignee_user_id,new_assignee_user_id,reason,request_id) VALUES(gen_random_uuid(),1,1,NULL,NULL,'direct mutation',gen_random_uuid())"),
+        appDb.query("INSERT INTO admissions_lead_assignment_history(lead_id,previous_assignee_user_id,new_assignee_user_id,actor_user_id,reason,source,request_id,assignment_version) VALUES(gen_random_uuid(),NULL,NULL,1,'direct mutation','admin_ui',gen_random_uuid(),1)"),
         /permission denied/,
       );
       await assert.rejects(
@@ -250,7 +250,7 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       assert.equal(replayed.replayed,true);
       await assert.rejects(assignCrmLead(appDb!,l.id,{
         expectedVersion:0,assigneeUserId:6,reason:"Different intent",requestId,
-      },adminPrincipal),/already used for a different assignment/);
+       },adminPrincipal),/request ID was already used/);
        await assert.rejects(
          db.query("UPDATE admissions_lead_assignments SET assignee_user_id=6 WHERE lead_id=$1",[l.id]),
          /version must increase by exactly one/,
@@ -309,10 +309,10 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       },admissionsPrincipal),/Only administrators/);
       await assert.rejects(assignCrmLead(appDb!,l.id,{
         expectedVersion:1,assigneeUserId:2,reason:"Reject admin as target",requestId:randomUUID(),
-      },adminPrincipal),/active admissions user/);
+       },adminPrincipal),/not authorized/);
       await assert.rejects(assignCrmLead(appDb!,l.id,{
         expectedVersion:1,assigneeUserId:5,reason:"Reject inactive target",requestId:randomUUID(),
-      },adminPrincipal),/active admissions user/);
+       },adminPrincipal),/not authorized/);
       await assert.rejects(assignCrmLead(appDb!,l.id,{
         expectedVersion:0,assigneeUserId:6,reason:"Reject stale assignment",requestId:randomUUID(),
       },adminPrincipal),/assignment changed/);
