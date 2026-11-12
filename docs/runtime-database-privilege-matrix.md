@@ -235,55 +235,62 @@ Production role provisioning require separate approval.
 
 ### Controlled Development role bootstrap and rollout sequence
 
-1. Use the Replit Development Database SQL console for role statements only
-   after separately confirming that the console supports the needed role
-   attributes and membership operations for this project. Never run these
-   statements against Production.
-2. Pre-create `aichm_app_runtime` as the NOLOGIN group with the attributes
-   listed above. Create a dedicated LOGIN with LOGIN, NOSUPERUSER, NOCREATEDB,
-   NOCREATEROLE, INHERIT, NOBYPASSRLS, then grant it membership only in
-   `aichm_app_runtime`. Do not grant owner/migrator membership, database
-   ownership, or unrelated groups.
-   The password-free role statements are:
+1. Stop the Development app workflow before adding
+   `AICHM_APP_DATABASE_URL`. When this secret is present, app startup switches
+   to it and requires the post-migration CRM objects. Starting the app before
+   0014–0016 are applied can therefore fail closed.
+2. Create a strong alphanumeric password of at least 32 characters and store it
+   only as the temporary Replit Secret `AICHM_APP_ROLE_PASSWORD`. Do not put it
+   in chat, source, a command argument, SQL text, shell history, or logs.
+3. Run the helper without arguments for its read-only preview:
 
-   ```sql
-   CREATE ROLE aichm_app_runtime NOLOGIN NOSUPERUSER NOCREATEDB
-     NOCREATEROLE NOINHERIT NOBYPASSRLS;
-   CREATE ROLE aichm_app_login LOGIN NOSUPERUSER NOCREATEDB
-     NOCREATEROLE INHERIT NOBYPASSRLS;
-   GRANT aichm_app_runtime TO aichm_app_login;
+   ```sh
+   npx tsx script/provision-crm-app-role.ts
    ```
 
-   If either role already exists, inspect its attributes and memberships first;
-   do not blindly rerun these statements or repair drift automatically.
-3. Do not include a password in source, a saved SQL file, chat, shell history,
-   or logs. The Replit documentation identifies the SQL console as the role
-   administration path but does not document a separate secure password-entry
-   prompt. If the console would retain a password-bearing statement, stop and
-   obtain a supported secure credential-provisioning method rather than
-   exposing the password in query history.
-4. Add the resulting connection string only as the Development Replit Secret
-   `AICHM_APP_DATABASE_URL`; do not paste its value into chat or code. First
-   confirm that making it available to the runner will not restart the app
-   against the incomplete CRM schema; otherwise obtain explicit maintenance
-   approval. Run `npx tsx script/crm-forward-migrate.ts --preflight-app-role`.
-   It is read-only and must report the pinned Development identity and
-   candidate role boundary as ready. Do not proceed if it is blocked or
-   ambiguous.
-5. Separately approve a Development-only migration apply. The runner requires
-   both its existing explicit apply flag and exact confirmation value, then
-   repeats the read-only app-role check under the advisory lock before it
-   creates/updates the ledger or executes migration SQL.
-6. After migrations, run ordinary `--preview` to verify full postconditions and
-   runtime grants. Review the output before a separately approved app restart
-   or secret switch. Test authentication, admissions, LMS, CRM list/detail,
-   assignment, and history-read routes on a controlled Development preview.
-7. Keep the prior runtime configuration available through the approved secret
+   It connects only through `AICHM_CRM_FORWARD_DATABASE_URL`, checks the full
+   pinned Development identity, and reports safe role-state and planned-action
+   fields. Do not proceed if identity or existing role state is unsafe.
+4. Provision only after separately approving the role writes. Both the flag and
+   exact confirmation are required:
+
+   ```sh
+   AICHM_CRM_APP_ROLE_PROVISION_CONFIRM=PROVISION_AICHM_APP_LOGIN_IN_PINNED_DEVELOPMENT \
+     npx tsx script/provision-crm-app-role.ts --apply-development-app-role
+   ```
+
+   The helper creates or validates `aichm_app_runtime` and
+   `aichm_app_login`, grants only the runtime-group membership, and verifies
+   the result. It rejects unsafe pre-existing attributes or memberships instead
+   of changing them. Applying also sets the login password to the supplied
+   temporary secret, including when the valid login already exists.
+5. Construct the app URL locally by copying the current Development
+   `DATABASE_URL` and replacing only the username with `aichm_app_login` and the
+   password with the secret value. Preserve the host, port, database path, and
+   query policy (including `sslmode`) exactly. Do not paste or print the URL.
+6. Add that URL as the Replit Secret `AICHM_APP_DATABASE_URL`. After confirming
+   it is saved, remove the temporary `AICHM_APP_ROLE_PASSWORD` secret; it is
+   not needed by the application. Then run the read-only candidate check:
+
+   ```sh
+   npx tsx script/crm-forward-migrate.ts --preflight-app-role
+   ```
+
+   It must verify the pinned Development identity and the candidate login/group
+   boundary. Stop if blocked or ambiguous.
+7. Only after reviewing the read-only migration preview, separately authorize
+   the CRM migration apply. It requires the existing explicit apply flag and
+   confirmation value, and reruns the app-role check under the advisory lock
+   before creating/updating the ledger or executing migration SQL.
+8. After migrations, run ordinary `--preview` to verify full postconditions and
+   runtime grants. Restart the Development app only with separate approval;
+   test authentication, admissions, LMS, CRM list/detail, assignment, and
+   history-read routes on a controlled Development preview.
+9. Keep the prior runtime configuration available through the approved secret
    workflow for rollback. If `AICHM_APP_DATABASE_URL` is removed, current code
    falls back to legacy `DATABASE_URL` with a warning; that is emergency
-   rollback, not a least-privilege state. Confirm restart/outage behavior
-   before any live secret change.
-8. Treat Production as a separate future operation. Replit's Publish database
+   rollback, not a least-privilege state.
+10. Treat Production as a separate future operation. Replit's Publish database
    migration does not carry custom roles, function bodies, triggers or grants;
    each must be separately provisioned, reviewed, and approved before a
    Production application credential or deployment is changed.
