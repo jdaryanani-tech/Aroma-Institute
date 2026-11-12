@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { PoolClient } from "pg";
 
 type Queryable = Pick<PoolClient, "query">;
@@ -46,10 +47,10 @@ export type CrmConstraintCatalogRow = {
   name: string;
   table_name: string;
   type: string;
-  columns: string[];
+  columns: unknown;
   ref_schema: string | null;
   ref_table: string | null;
-  ref_columns: string[] | null;
+  ref_columns: unknown;
   delete_action: string;
   update_action: string;
   match_type: string;
@@ -273,6 +274,59 @@ function safeCatalogIdentifier(value: string | null | undefined): string | null 
   return SAFE_IDENTIFIER.test(value) ? value : "<invalid-identifier>";
 }
 
+function parseCatalogArrayLiteral(value: string): string[] | null {
+  if (value.length > 8192 || value.length < 2 || value[0] !== "{" || value[value.length - 1] !== "}") {
+    return null;
+  }
+
+  const body = value.slice(1, -1);
+  if (body === "") return [];
+
+  const items: string[] = [];
+  let index = 0;
+  while (index < body.length) {
+    let item = "";
+    if (body[index] === '"') {
+      index += 1;
+      let closed = false;
+      while (index < body.length) {
+        const character = body[index]!;
+        if (character === "\\") {
+          index += 1;
+          if (index >= body.length) return null;
+          item += body[index]!;
+          index += 1;
+        } else if (character === '"') {
+          index += 1;
+          closed = true;
+          break;
+        } else {
+          item += character;
+          index += 1;
+        }
+      }
+      if (!closed) return null;
+      if (index < body.length && body[index] !== ",") return null;
+    } else {
+      const start = index;
+      while (index < body.length && body[index] !== ",") {
+        const character = body[index]!;
+        if (/[{}"\\\s]/.test(character)) return null;
+        index += 1;
+      }
+      item = body.slice(start, index);
+      if (item === "" || item.toUpperCase() === "NULL") return null;
+    }
+
+    items.push(item);
+    if (index === body.length) break;
+    if (body[index] !== ",") return null;
+    index += 1;
+    if (index === body.length) return null;
+  }
+  return items;
+}
+
 export function safeCatalogIdentifierArray(value: unknown): string[] | null {
   if (value === null || value === undefined) return null;
 
@@ -281,13 +335,15 @@ export function safeCatalogIdentifierArray(value: unknown): string[] | null {
     identifiers = value;
   } else if (typeof value === "string") {
     // pg 8.16.3 has no text parser for PostgreSQL name[] (OID 1003), so
-    // catalog ARRAY(name) values arrive as their raw PostgreSQL array literal.
-    // Accept only the unquoted identifier form used by these catalog names.
-    const match = /^\{([A-Za-z_][A-Za-z0-9_$]{0,62}(?:,[A-Za-z_][A-Za-z0-9_$]{0,62})*)?\}$/.exec(value);
-    if (!match) return null;
-    identifiers = match[1] === undefined ? [] : match[1].split(",");
+    // catalog ARRAY(name) values arrive as raw PostgreSQL array literals.
+    const parsed = parseCatalogArrayLiteral(value);
+    if (!parsed) {
+      if (value === "{}") return [];
+      throw new Error("CRM_SCHEMA_POSTCONDITION_CATALOG_ARRAY_INVALID");
+    }
+    identifiers = parsed;
   } else {
-    return null;
+    throw new Error("CRM_SCHEMA_POSTCONDITION_CATALOG_ARRAY_INVALID");
   }
 
   return identifiers.map(item =>
@@ -295,6 +351,28 @@ export function safeCatalogIdentifierArray(value: unknown): string[] | null {
       ? safeCatalogIdentifier(item) ?? "<invalid-identifier>"
       : "<invalid-identifier>",
   );
+}
+
+export function postgresStoredConstraintName(declaredName: string): string {
+  let storedName = "";
+  for (const character of declaredName) {
+    if (Buffer.byteLength(storedName + character, "utf8") > 63) break;
+    storedName += character;
+  }
+  return storedName;
+}
+
+function expectedConstraintEntries(): Array<[string, string, ConstraintSpec]> {
+  const entries = Object.entries(EXPECTED_CONSTRAINTS).map(([declaredName, spec]) => [
+    declaredName,
+    postgresStoredConstraintName(declaredName),
+    spec,
+  ] as [string, string, ConstraintSpec]);
+  const storedNames = entries.map(([, storedName]) => storedName);
+  if (new Set(storedNames).size !== storedNames.length) {
+    fail("CRM_SCHEMA_POSTCONDITION_EXPECTED_CONSTRAINT_NAMES_COLLIDE");
+  }
+  return entries;
 }
 
 function safeCheckExpression(value: string | null | undefined): string | null {
