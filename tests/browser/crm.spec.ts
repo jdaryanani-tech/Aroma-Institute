@@ -27,7 +27,7 @@ const people = Array.from({ length: 14 }, (_, index) => ({
   registeredAt: "2025-04-10T10:00:00.000Z", questionnaireCompletedAt: null,
   lastActivityAt: "2025-04-10T10:00:00.000Z", lastVideoMilestone: null, videoCompleted: false,
   hasVerifiedForm: false, hasVerifiedCalendarBooking: false, verifiedBookingReference: null,
-  assigneeUserId: index === 0 ? 4 : index === 1 ? null : index % 2 ? 6 : 4,
+  assigneeUserId: index === 0 ? 4 : index === 1 ? null : index === 2 ? 6 : index % 2 ? 6 : 4,
   assigneeName: index === 0 ? "Admissions One" : index === 1 ? null : index % 2 ? "Admissions Two" : "Admissions One",
   assigneeNeedsReassignment: false, assignmentVersion: index === 0 ? 1 : 0,
   followUpAt: null, version: 1,
@@ -183,7 +183,7 @@ test("Chromium: admissions see only their assigned lead and cannot open other or
   await expect(page.getByTestId("crm-lead-card").filter({ hasText: "Prospect 01" })).toBeVisible();
   await expect(page.getByTestId("crm-lead-card").filter({ hasText: "Prospect 02" })).toHaveCount(0);
   await expect(page.getByTestId("crm-lead-card").filter({ hasText: "Prospect 03" })).toHaveCount(0);
-  await expect(page.getByText("Assigned to you")).toBeVisible();
+  await expect(page.getByText("Assigned to you", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Canonical lead assignment" })).toHaveCount(0);
   await expect(page.getByTestId("crm-assignee")).toHaveCount(0);
   await expect(page.getByTestId("crm-assignee-filter")).toHaveCount(0);

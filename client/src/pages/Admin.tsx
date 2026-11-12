@@ -60,7 +60,7 @@ export default function Admin() {
   const [retryPersonConfirmed, setRetryPersonConfirmed] = useState(false);
   const [retryError, setRetryError] = useState("");
   const crmScope = isAdmin ? "admin" : `admissions:${session.data?.id ?? "unknown"}`;
-  const previousCrmScope = useRef(crmScope);
+  const previousCrmScope = useRef<string | null>(null);
   const leadsQuery = useCrmLeads(filters, hasCrmAccess && !accessCheckBlocked, crmScope);
   const detailQuery = useCrmDetail(selectedId, hasCrmAccess && !accessCheckBlocked, crmScope);
   const avniHealthQuery=useQuery<AvniHealth>({
@@ -84,6 +84,11 @@ export default function Admin() {
   );
 
   useEffect(() => {
+    if (!session.data) return;
+    if (previousCrmScope.current === null) {
+      previousCrmScope.current = crmScope;
+      return;
+    }
     if (previousCrmScope.current === crmScope) return;
     clearPrivateCache(client);
     setSelectedId(null);
@@ -91,7 +96,7 @@ export default function Admin() {
     setAccessCheckBlocked(false);
     if (!isAdmin) setFilters((current) => ({ ...current, assignee: "" }));
     previousCrmScope.current = crmScope;
-  }, [crmScope, isAdmin, client]);
+  }, [crmScope, isAdmin, client, session.data]);
   useEffect(() => {
     if (!selectedId && leads.length) setSelectedId(leads[0].id);
     else if (selectedId && leads.length && !leads.some((item) => item.id === selectedId) && !detailQuery.isLoading) setSelectedId(leads[0].id);
@@ -248,7 +253,7 @@ export default function Admin() {
               <div className="crm-filter-actions"><span className="crm-results-caption">{leadsQuery.data ? `${leadsQuery.data.total.toLocaleString()} matches` : "Loading matches"}</span><button className="crm-text-button" type="button" onClick={reset}>Clear filters</button></div>
             </div>
             <div className="crm-lead-list" aria-live="polite">
-              {leadsQuery.isLoading ? <><div className="crm-skeleton" /><div className="crm-skeleton" /><div className="crm-skeleton" /></> : leadsQuery.data && !leads.length ? <div className="crm-empty"><Users size={23} /><strong>No people match these filters</strong><p>{isAdmin ? "Try another stage, assignee, or search. New enquiries appear here when recorded." : "Only leads assigned to your account are shown here."}</p><button type="button" className="crm-button" onClick={reset}>Show assigned leads</button></div> : leads.map((item) => (
+              {leadsQuery.isLoading ? <><div className="crm-skeleton" /><div className="crm-skeleton" /><div className="crm-skeleton" /></> : leadsQuery.data && !leads.length ? <div className="crm-empty"><Users size={23} /><strong>No people match these filters</strong><p>{isAdmin ? "Try another stage, assignee, or search. New enquiries appear here when recorded." : "Only leads assigned to your account are shown here."}</p><button type="button" className="crm-button" onClick={reset}>{isAdmin ? "Show all records" : "Show assigned leads"}</button></div> : leads.map((item) => (
                 <button className="crm-lead-card" type="button" key={item.id} onClick={(event) => selectLead(item.id, event.currentTarget)} aria-current={item.id === selectedId} data-testid="crm-lead-card">
                   <span className="crm-lead-card-head"><span><span className="crm-lead-name">{item.name || "Name not recorded"}</span><span className="crm-lead-meta">{item.phone || item.email || "No contact details"}{item.phone && item.email ? ` · ${item.email}` : ""}</span></span>{item.followUpAt && <span className="crm-follow-flag"><Clock3 size={13} />{formatDate(item.followUpAt)}</span>}</span>
                   <span className="crm-lead-foot"><span className="crm-stage-pill" data-stage={item.stage}>{CRM_STAGE_LABELS[item.stage]}</span><span className="crm-stage-source">{stageOrigin(item)}</span><span className="crm-card-program">{item.programs[0] || "Program not recorded"} · {isAdmin ? item.assigneeName || "Unassigned" : "Assigned to you"}</span></span>
