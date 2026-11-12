@@ -10,7 +10,19 @@ import {
   type CrmPrincipal,
 } from "./authorization";
 
-export async function findPerson(db: SqlDb, c: CrmSchema, id: string, principal: CrmPrincipal) {
+export class CrmLeadScopeDeniedError extends CrmError {
+  constructor() {
+    super(404, "Lead not found.");
+  }
+}
+
+export async function findPerson(
+  db: SqlDb,
+  c: CrmSchema,
+  id: string,
+  principal: CrmPrincipal,
+  options: { auditDeniedAttempt?: boolean } = {},
+) {
   const access = requireCrmAccess(principal);
   if (access === "admissions" && !c.canonicalAssignments) {
     throw new CrmError(503, "Canonical CRM assignments are unavailable.");
@@ -23,14 +35,17 @@ export async function findPerson(db: SqlDb, c: CrmSchema, id: string, principal:
     (id=$1 OR EXISTS(SELECT 1 FROM unnest(inquiry_ids) a(inquiry_id) WHERE 'inquiry:'||a.inquiry_id=$1))
     ${scope} LIMIT 1`, values);
   if (!row) {
-    if (access === "admissions") await recordCrmDeniedAttempt(db, principal, "lead_detail");
+    if (access === "admissions") {
+      if (options.auditDeniedAttempt !== false) await recordCrmDeniedAttempt(db, principal, "lead_detail");
+      throw new CrmLeadScopeDeniedError();
+    }
     throw new CrmError(404, "Lead not found.");
   }
   if (crmAccessLevel(principal) === "admissions") {
     if (!c.canonicalAssignments) throw new CrmError(503, "Canonical CRM assignments are unavailable.");
     if (!canReadCanonicalLead(principal, row.lead_id, row.assignee_user_id)) {
-      await recordCrmDeniedAttempt(db, principal, "lead_detail");
-      throw new CrmError(404, "Lead not found.");
+      if (options.auditDeniedAttempt !== false) await recordCrmDeniedAttempt(db, principal, "lead_detail");
+      throw new CrmLeadScopeDeniedError();
     }
   }
   return row;

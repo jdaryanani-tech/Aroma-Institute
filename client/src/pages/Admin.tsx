@@ -88,6 +88,7 @@ export default function Admin() {
     clearPrivateCache(client);
     setSelectedId(null);
     setMobileDetail(false);
+    setAccessCheckBlocked(false);
     if (!isAdmin) setFilters((current) => ({ ...current, assignee: "" }));
     previousCrmScope.current = crmScope;
   }, [crmScope, isAdmin, client]);

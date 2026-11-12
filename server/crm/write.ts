@@ -1,7 +1,7 @@
 import type { CrmDetail, CrmUpdate } from "@shared/crm";
 import type { Pool, PoolClient } from "pg";
 import { CrmError, validateStageEvidence } from "./evidence";
-import { findPerson, detailCrm } from "./read";
+import { CrmLeadScopeDeniedError, findPerson, detailCrm } from "./read";
 import { inspectCrmSchema, leadDto } from "./model";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
 import {
@@ -12,23 +12,25 @@ import {
   type CrmPrincipal,
 } from "./authorization";
 
-export async function updateCrm(pool: Pick<Pool,"connect">, id:string, update:CrmUpdate, principal:CrmPrincipal):Promise<CrmDetail> {
+export async function updateCrm(pool: Pick<Pool,"connect" | "query">, id:string, update:CrmUpdate, principal:CrmPrincipal):Promise<CrmDetail> {
   const access = requireCrmAccess(principal);
   const db: PoolClient = await pool.connect();
+  let released = false;
+  let deniedAuditAction: string | undefined;
   try {
     await db.query("BEGIN");
     const c = await inspectCrmSchema(db);
     if(!c.crmPersistence) throw new CrmError(503,"CRM migration is pending. No changes were saved.");
-    const beforeLock = await findPerson(db,c,id,principal);
+    const beforeLock = await findPerson(db,c,id,principal,{auditDeniedAttempt:false});
     const lockKey = normalizeIndianMobile(beforeLock.phone) || beforeLock.id;
     await db.query("SELECT pg_advisory_xact_lock(hashtext($1))",[lockKey]);
-    const row = await findPerson(db,c,id,principal), lead=leadDto(row);
+    const row = await findPerson(db,c,id,principal,{auditDeniedAttempt:false}), lead=leadDto(row);
     if(lead.version!==update.expectedVersion) throw new CrmError(409,"This lead changed since you opened it. Refresh and review before saving.");
     if (access === "admissions") {
       if (!c.canonicalAssignments) throw new CrmError(503, "Canonical CRM assignments are unavailable.");
       const forbidden = validateAdmissionsUpdate(update);
       if (forbidden) {
-        await recordCrmDeniedAttempt(db, principal, `stage_${forbidden}`);
+        deniedAuditAction = `stage_${forbidden}`;
         throw new CrmError(403, "Admissions users cannot change this CRM stage.");
       }
     }
@@ -65,6 +67,24 @@ export async function updateCrm(pool: Pick<Pool,"connect">, id:string, update:Cr
     const result=await detailCrm(db,row.id,principal);
     await db.query("COMMIT");
     return result;
-  } catch(error) { await db.query("ROLLBACK"); throw error; }
-  finally { db.release(); }
+  } catch(error) {
+    let rollbackError: Error | undefined;
+    try {
+      await db.query("ROLLBACK");
+    } catch (failure) {
+      rollbackError = failure instanceof Error ? failure : new Error("CRM update rollback failed");
+    }
+
+    const auditAction = error instanceof CrmLeadScopeDeniedError ? "lead_update" : deniedAuditAction;
+    if (auditAction || rollbackError) {
+      // Release the rolled-back transaction first so the audit write obtains a
+      // separate pool connection and cannot be rolled back with the denied edit.
+      db.release(rollbackError);
+      released = true;
+      if (auditAction) await recordCrmDeniedAttempt(pool, principal, auditAction);
+    }
+    throw error;
+  } finally {
+    if (!released) db.release();
+  }
 }
