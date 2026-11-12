@@ -1,7 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Pool, type PoolClient } from "pg";
+import {
+  formatCrmForwardStageFailure,
+  type CrmForwardFailureStage,
+} from "../server/db/crm-forward-migration-diagnostics";
 import {
   assertCrmAssignmentSchemaAbsent,
   assertCrmAssignmentSchemaPostconditions,
@@ -31,6 +35,7 @@ type Registry = {
 };
 type Queryable = Pick<PoolClient, "query">;
 type MigrationArtifact = { sql: string; hash: string };
+type StageSetter = (stage: CrmForwardFailureStage) => void;
 
 const REGISTRY_PATH = path.resolve("migrations/crm-forward/registry.json");
 const EXPECTED_MIGRATIONS = [
@@ -139,6 +144,70 @@ async function presentBaseTables(client: Queryable): Promise<string[]> {
     .map(item => `public.${item.table}.${item.column}`);
 }
 
+async function inspectReadOnlyRuntimeAccess(client: Queryable) {
+  const { rows: [role] } = await client.query<{
+    connection_role: string;
+    connection_role_is_superuser: boolean;
+  }>(`
+    SELECT current_user AS connection_role,
+      r.rolsuper AS connection_role_is_superuser
+    FROM pg_roles r
+    WHERE r.rolname = current_user
+  `);
+  if (!role) fail("CRM_FORWARD_CONNECTION_ROLE_UNAVAILABLE");
+
+  const { rows: [admissions] } = await client.query<{ active_admissions_users: number }>(`
+    SELECT count(DISTINCT u.id)::integer AS active_admissions_users
+    FROM public.lms_users u
+    JOIN public.lms_user_roles r ON r.user_id = u.id
+    WHERE r.role::text = 'admissions'
+      AND u.is_active IS TRUE
+  `);
+
+  const { rows } = await client.query<{
+    table_name: string;
+    exists: boolean;
+    owner: string | null;
+    can_select: boolean;
+    can_insert: boolean;
+    can_update: boolean;
+    can_delete: boolean;
+    can_truncate: boolean;
+  }>(`
+    WITH expected(table_name) AS (
+      SELECT unnest($1::text[])
+    )
+    SELECT e.table_name,
+      c.oid IS NOT NULL AS exists,
+      owner_role.rolname AS owner,
+      CASE WHEN c.oid IS NULL THEN false ELSE has_table_privilege(current_user, c.oid, 'SELECT') END AS can_select,
+      CASE WHEN c.oid IS NULL THEN false ELSE has_table_privilege(current_user, c.oid, 'INSERT') END AS can_insert,
+      CASE WHEN c.oid IS NULL THEN false ELSE has_table_privilege(current_user, c.oid, 'UPDATE') END AS can_update,
+      CASE WHEN c.oid IS NULL THEN false ELSE has_table_privilege(current_user, c.oid, 'DELETE') END AS can_delete,
+      CASE WHEN c.oid IS NULL THEN false ELSE has_table_privilege(current_user, c.oid, 'TRUNCATE') END AS can_truncate
+    FROM expected e
+    LEFT JOIN pg_class c
+      ON c.relnamespace = 'public'::regnamespace
+      AND c.relname = e.table_name
+      AND c.relkind IN ('r', 'p')
+    LEFT JOIN pg_roles owner_role ON owner_role.oid = c.relowner
+    ORDER BY e.table_name
+  `, [[
+    "admissions_leads",
+    "lms_users",
+    "lms_user_roles",
+    "admissions_lead_assignments",
+    "admissions_lead_assignment_history",
+  ]]);
+
+  return {
+    connectionRole: role.connection_role,
+    connectionRoleIsSuperuser: role.connection_role_is_superuser,
+    activeAdmissionsUsers: admissions?.active_admissions_users ?? 0,
+    tables: rows,
+  };
+}
+
 async function readExistingLedger(client: Queryable, registry: Registry) {
   const regclass = `${registry.ledger.schema}.${registry.ledger.table}`;
   const { rows: [table] } = await client.query<{ exists: boolean }>(
@@ -202,10 +271,20 @@ async function collectPlan(
   client: Queryable,
   registry: Registry,
   artifacts: Map<string, MigrationArtifact>,
-): Promise<{ ledger: Map<string, string>; pending: Migration[] }> {
+  setStage: StageSetter,
+): Promise<{
+  ledger: Map<string, string>;
+  pending: Migration[];
+  basePrerequisites: "present";
+  schemaState: "absent" | "0014_complete" | "0014_0015_complete";
+  runtimeAccess: Awaited<ReturnType<typeof inspectReadOnlyRuntimeAccess>>;
+}> {
+  setStage("prerequisiteSchemaDriftInspection");
   const missingBase = await presentBaseTables(client);
   if (missingBase.length) fail("CRM_FORWARD_BASE_PREREQUISITES_MISSING");
+  const runtimeAccess = await inspectReadOnlyRuntimeAccess(client);
 
+  setStage("migrationLedgerRead");
   const rows = await readExistingLedger(client, registry);
   const allowed = new Set(registry.migrations.map(migration => migration.id));
   if (rows.some(row => !allowed.has(row.migration_id))) fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
@@ -219,6 +298,7 @@ async function collectPlan(
 
   const recorded14 = ledger.has(EXPECTED_MIGRATIONS[0]);
   const recorded15 = ledger.has(EXPECTED_MIGRATIONS[1]);
+  setStage("prerequisiteSchemaDriftInspection");
   if (recorded15 && !recorded14) fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
   if (!recorded14) {
     if (rows.length) fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
@@ -238,16 +318,25 @@ async function collectPlan(
     );
   }
 
+  setStage("previewPlanAssembly");
   return {
     ledger,
     pending: registry.migrations.filter(migration => !ledger.has(migration.id)),
+    basePrerequisites: "present",
+    schemaState: !recorded14
+      ? "absent"
+      : recorded15
+        ? "0014_0015_complete"
+        : "0014_complete",
+    runtimeAccess,
   };
 }
 
 function previewRecord(
   identity: CrmForwardDatabaseIdentity,
   registry: Registry,
-  pending: Migration[],
+  plan: Awaited<ReturnType<typeof collectPlan>>,
+  artifacts: Map<string, MigrationArtifact>,
   mode: CrmForwardMigrationMode,
   effectivePort: number,
 ) {
@@ -262,13 +351,32 @@ function previewRecord(
         databaseOid: identity.databaseOid,
         databaseUser: identity.databaseUser,
         systemIdentifier: identity.systemIdentifier,
+        inRecovery: identity.inRecovery,
+        defaultTransactionReadOnly: identity.defaultTransactionReadOnly,
       },
     },
     migrationFiles: registry.migrations.map(migration => ({
       id: migration.id,
       file: migration.file,
     })),
-    wouldRun: pending.map(migration => ({ id: migration.id, file: migration.file })),
+    ledger: registry.migrations.map(migration => {
+      const recordedHash = plan.ledger.get(migration.id);
+      return {
+        id: migration.id,
+        status: recordedHash ? "applied" : "pending",
+        checksumMatches: recordedHash
+          ? recordedHash === artifact(artifacts, migration.id).hash
+          : null,
+      };
+    }),
+    schemaAssessment: {
+      basePrerequisites: plan.basePrerequisites,
+      crmAssignments: plan.schemaState,
+      conflicts: "none",
+      postconditionsVerified: true,
+    },
+    runtimeAccess: plan.runtimeAccess,
+    wouldRun: plan.pending.map(migration => ({ id: migration.id, file: migration.file })),
     message: mode === "preview"
       ? "No schema writes were made. Use the explicit apply flag and confirmation variable to apply."
       : "Apply was explicitly confirmed; the verified plan will be rechecked under an advisory lock.",
@@ -279,12 +387,16 @@ async function readOnlyPlan(
   client: PoolClient,
   registry: Registry,
   artifacts: Map<string, MigrationArtifact>,
+  setStage: StageSetter,
 ) {
-  await client.query("BEGIN READ ONLY");
+  setStage("readOnlyTransactionStart");
   try {
+    await client.query("BEGIN READ ONLY");
+    setStage("livePinnedIdentityVerification");
     const identity = await inspectIdentity(client);
     assertCrmForwardDevelopmentIdentity(identity);
-    const plan = await collectPlan(client, registry, artifacts);
+    const plan = await collectPlan(client, registry, artifacts, setStage);
+    setStage("previewPlanAssembly");
     await client.query("COMMIT");
     return { identity, plan };
   } catch (error) {
@@ -299,6 +411,7 @@ async function applyPlan(
   artifacts: Map<string, MigrationArtifact>,
   connectionState: { released: boolean },
   effectivePort: number,
+  setStage: StageSetter,
 ): Promise<string[]> {
   let lockAcquired = false;
   try {
@@ -316,11 +429,12 @@ async function applyPlan(
 
     // Re-read identity and state after acquiring the session lock; another
     // forward-runner cannot race the plan between preview and execution.
-    const lockedPlan = await readOnlyPlan(client, registry, artifacts);
+    const lockedPlan = await readOnlyPlan(client, registry, artifacts, setStage);
     console.log(JSON.stringify(previewRecord(
       lockedPlan.identity,
       registry,
-      lockedPlan.plan.pending,
+      lockedPlan.plan,
+      artifacts,
       "apply",
       effectivePort,
     )));
@@ -421,39 +535,94 @@ async function applyPlan(
 }
 
 async function run(): Promise<void> {
-  const mode = parseCrmForwardMigrationMode(process.argv.slice(2), process.env);
-  const connectionUrl = requireCrmForwardConnectionUrl(process.env);
-  const effectivePort = crmForwardEffectivePort(new URL(connectionUrl));
-  const registry = JSON.parse(await readFile(REGISTRY_PATH, "utf8")) as Registry;
-  validateRegistry(registry);
-  const artifacts = await loadArtifacts(registry);
-  const pool = new Pool(pgConfig(connectionUrl, effectivePort));
+  const correlationId = randomUUID();
+  let currentStage: CrmForwardFailureStage = "previewPlanAssembly";
+  const setStage: StageSetter = stage => {
+    currentStage = stage;
+  };
+  let pool: Pool | undefined;
   let client: PoolClient | undefined;
   const connectionState = { released: false };
-  try {
-    client = await pool.connect();
-    const { identity, plan } = await readOnlyPlan(client, registry, artifacts);
-    console.log(JSON.stringify(previewRecord(identity, registry, plan.pending, mode, effectivePort)));
-    if (mode === "preview") return;
+  let failed = false;
+  let failure: unknown;
+  let output: unknown;
 
-    const appliedNow = await applyPlan(client, registry, artifacts, connectionState, effectivePort);
-    const finalState = await readOnlyPlan(client, registry, artifacts);
-    console.log(JSON.stringify({
-      status: "verified",
-      stream: registry.stream,
-      appliedNow,
-      remaining: finalState.plan.pending.map(migration => migration.id),
-    }));
+  try {
+    setStage("urlValidation");
+    const connectionUrl = requireCrmForwardConnectionUrl(process.env);
+    const effectivePort = crmForwardEffectivePort(new URL(connectionUrl));
+
+    setStage("previewPlanAssembly");
+    const mode = parseCrmForwardMigrationMode(process.argv.slice(2), process.env);
+    const registry = JSON.parse(await readFile(REGISTRY_PATH, "utf8")) as Registry;
+    validateRegistry(registry);
+    const artifacts = await loadArtifacts(registry);
+
+    setStage("clientPoolConstruction");
+    pool = new Pool(pgConfig(connectionUrl, effectivePort));
+
+    setStage("tcpConnectionTlsNegotiation");
+    client = await pool.connect();
+    const { identity, plan } = await readOnlyPlan(client, registry, artifacts, setStage);
+    if (mode === "preview") {
+      setStage("previewPlanAssembly");
+      output = previewRecord(identity, registry, plan, artifacts, mode, effectivePort);
+    } else {
+      const appliedNow = await applyPlan(
+        client,
+        registry,
+        artifacts,
+        connectionState,
+        effectivePort,
+        setStage,
+      );
+      const finalState = await readOnlyPlan(client, registry, artifacts, setStage);
+      setStage("previewPlanAssembly");
+      output = {
+        status: "verified",
+        stream: registry.stream,
+        appliedNow,
+        remaining: finalState.plan.pending.map(migration => migration.id),
+      };
+    }
+  } catch (error) {
+    failed = true;
+    failure = error;
   } finally {
-    if (client && !connectionState.released) client.release();
-    await pool.end();
+    try {
+      if (client && !connectionState.released) client.release();
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+        setStage("clientPoolConstruction");
+      }
+    }
+    try {
+      if (pool) await pool.end();
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+        setStage("clientPoolConstruction");
+      }
+    }
   }
+
+  if (failed) {
+    console.error(JSON.stringify(
+      formatCrmForwardStageFailure(currentStage, failure, correlationId),
+    ));
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(JSON.stringify(output));
 }
 
-void run().catch((error: unknown) => {
-  const code = error instanceof Error && /^CRM_(?:FORWARD|SCHEMA_POSTCONDITION)_[A-Z0-9_]+$/.test(error.message)
-    ? error.message
-    : "CRM_FORWARD_FAILED";
-  console.error(JSON.stringify({ status: "failed", code }));
+void run().catch(error => {
+  console.error(JSON.stringify(
+    formatCrmForwardStageFailure("previewPlanAssembly", error, "unavailable"),
+  ));
   process.exitCode = 1;
 });
