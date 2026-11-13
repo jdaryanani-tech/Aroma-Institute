@@ -25,6 +25,21 @@ function jsonResponse(value: unknown, status = 200) {
   };
 }
 
+function graphErrorResponse(
+  error: unknown,
+  status: number,
+  jsonFailure?: Error,
+) {
+  return {
+    ok: false,
+    status,
+    json: async () => {
+      if (jsonFailure) throw jsonFailure;
+      return { error };
+    },
+  };
+}
+
 function requestUrl(input: string | URL | Request) {
   return input instanceof Request ? input.url : String(input);
 }
@@ -197,6 +212,157 @@ test("Graph failures never echo IDs, token, URL, or raw error body", async () =>
 
   assert.equal(result.errorCategory, "permission_denied");
   for (const sensitive of [ACCESS_TOKEN, PAGE_ID, APP_ID, sensitiveUrl, rawMessage, "private@example.invalid"]) {
+    assert.equal(serialized.includes(sensitive), false);
+  }
+});
+
+const graphErrorCases = [
+  {
+    name: "invalid or expired token",
+    status: 400,
+    error: {
+      type: "OAuthException",
+      code: 190,
+      error_subcode: 463,
+      is_transient: false,
+      message: "synthetic invalid-token detail",
+    },
+    category: "request_rejected",
+  },
+  {
+    name: "missing permission",
+    status: 403,
+    error: {
+      type: "GraphMethodException",
+      code: 10,
+      error_subcode: 200,
+      is_transient: false,
+      message: "synthetic permission detail",
+    },
+    category: "permission_denied",
+  },
+  {
+    name: "unsupported Graph API version",
+    status: 400,
+    error: {
+      type: "OAuthException",
+      code: 12,
+      error_subcode: 0,
+      is_transient: false,
+      message: "synthetic version detail",
+    },
+    category: "request_rejected",
+  },
+  {
+    name: "rate limit",
+    status: 429,
+    error: {
+      type: "OAuthException",
+      code: 4,
+      error_subcode: 0,
+      is_transient: true,
+      message: "synthetic rate-limit detail",
+    },
+    category: "rate_limited",
+  },
+  {
+    name: "transient server error",
+    status: 503,
+    error: {
+      type: "GraphAPIException",
+      code: 2,
+      error_subcode: 1,
+      is_transient: true,
+      message: "synthetic server detail",
+    },
+    category: "graph_unavailable",
+  },
+] as const;
+
+for (const scenario of graphErrorCases) {
+  test(`captures bounded safe Graph diagnostics for ${scenario.name}`, async () => {
+    const result = await runMetaPageSubscription(env, {
+      apply: false,
+      confirmationMatches: false,
+      fetcher: async () => graphErrorResponse(scenario.error, scenario.status),
+    });
+
+    assert.equal(result.errorCategory, scenario.category);
+    assert.equal(result.graphHttpStatus, scenario.status);
+    assert.equal(result.graphErrorType, scenario.error.type);
+    assert.equal(result.graphErrorCode, scenario.error.code);
+    assert.equal(result.graphErrorSubcode, scenario.error.error_subcode);
+    assert.equal(result.graphErrorIsTransient, scenario.error.is_transient);
+    assert.equal(result.pageIdentityChecked, false);
+    assert.equal(result.postAttempted, false);
+  });
+}
+
+test("malformed Graph error response returns only stable safe diagnostics", async () => {
+  const rawFailure = `body ${ACCESS_TOKEN} ${PAGE_ID} ${APP_ID} private@example.invalid`;
+  const result = await runMetaPageSubscription(env, {
+    apply: false,
+    confirmationMatches: false,
+    fetcher: async () => graphErrorResponse(
+      null,
+      400,
+      new Error(rawFailure),
+    ),
+  });
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.errorCategory, "invalid_response");
+  assert.equal(result.graphHttpStatus, 400);
+  assert.equal(result.graphErrorType, null);
+  assert.equal(result.graphErrorCode, null);
+  assert.equal(result.graphErrorSubcode, null);
+  assert.equal(result.graphErrorIsTransient, null);
+  for (const sensitive of [rawFailure, ACCESS_TOKEN, PAGE_ID, APP_ID, "private@example.invalid"]) {
+    assert.equal(serialized.includes(sensitive), false);
+  }
+});
+
+test("transport failures expose only a stable category", async () => {
+  const result = await runMetaPageSubscription(env, {
+    apply: false,
+    confirmationMatches: false,
+    fetcher: async () => {
+      throw new Error(`transport ${ACCESS_TOKEN} ${PAGE_ID} ${APP_ID}`);
+    },
+  });
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.errorCategory, "network_error");
+  assert.equal(result.graphHttpStatus, undefined);
+  for (const sensitive of [ACCESS_TOKEN, PAGE_ID, APP_ID]) {
+    assert.equal(serialized.includes(sensitive), false);
+  }
+});
+
+test("unrecognized Graph error primitives are bounded and never echo IDs or secrets", async () => {
+  const rawMessage = `private ${ACCESS_TOKEN} ${PAGE_ID} ${APP_ID} https://example.invalid/?token=x`;
+  const result = await runMetaPageSubscription(env, {
+    apply: false,
+    confirmationMatches: false,
+    fetcher: async () => graphErrorResponse({
+      type: ACCESS_TOKEN,
+      code: Number(PAGE_ID),
+      error_subcode: Number(APP_ID),
+      is_transient: "true",
+      message: rawMessage,
+      error_user_title: rawMessage,
+      error_user_msg: rawMessage,
+      fbtrace_id: rawMessage,
+    }, 400),
+  });
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.graphHttpStatus, 400);
+  assert.equal(result.graphErrorType, null);
+  assert.equal(result.graphErrorCode, null);
+  assert.equal(result.graphErrorSubcode, null);
+  assert.equal(result.graphErrorIsTransient, null);
+  for (const sensitive of [ACCESS_TOKEN, PAGE_ID, APP_ID, rawMessage, "example.invalid"]) {
     assert.equal(serialized.includes(sensitive), false);
   }
 });
