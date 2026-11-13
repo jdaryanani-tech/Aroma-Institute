@@ -51,8 +51,10 @@ code change. Inability to read the system identifier also stops the runner.
 The runner is not a startup or publish hook. It defaults to a read-only preview
 and requires the named Development URL even for that preview. The preview
 connects only to verify the pinned identity and current migration state; it
-reports the full pinned identity, both registered SQL file names, and exactly
-which files are pending. It does not create the custom ledger:
+reports a sanitized identity match, migration registry/ledger status, whether
+the ledger schema and table exist and contain rows, per-migration recorded
+checksum matches, schema state, prerequisites, conflicts, and exactly which
+files are pending. It does not create the custom ledger:
 
 ```sh
 npx tsx script/crm-forward-migrate.ts --preview
@@ -73,17 +75,24 @@ writing. It revalidates the pinned identity immediately before each migration
 and ledger write and releases the lock in a `finally` path; if unlock cannot be
 confirmed, it destroys the connection so PostgreSQL releases the session lock.
 The URL and database errors are never printed. Only allowlisted stable error
-codes/categories may appear in the sanitized runner diagnostic.
+codes/categories may appear in the sanitized runner diagnostic. Failures also
+identify the phase (including lock, app-role gate, ledger setup, individual
+migration execution/postcondition/ledger commit, unlock, and final readiness);
+when a migration phase fails, its ID is limited to the three registered CRM
+migrations. Raw error text, stack traces, SQL, URLs, and credentials are never
+reported.
 
 ## Ordering and prerequisites
 
-The dedicated order is `0014_crm_canonical_assignments` followed by
-`0015_crm_assignment_audit_invariants`. Before 0014, the runner requires the
+The dedicated order is `0014_crm_canonical_assignments`, then
+`0015_crm_assignment_audit_invariants`, then
+`0016_crm_runtime_role_separation`. Before 0014, the runner requires the
 existing `admissions_leads`, `lms_users`, and `lms_user_roles` tables and the
 columns used by the new constraints. Before 0015, it requires a recorded 0014
 entry plus the 0014 assignment/history tables, functions, and validation and
-immutability triggers. It also verifies the deferred history-pairing trigger
-after 0015.
+immutability triggers. Before 0016, it requires a recorded 0015 entry and the
+assignment/history tables and deferred history-pairing trigger. It verifies
+the complete stage-specific postconditions after each migration.
 
 If a prerequisite is missing, or if migration objects exist without matching
 entries in the dedicated ledger, the runner fails for review. Postconditions
@@ -95,7 +104,9 @@ Unexpected, missing, disabled, or drifted objects fail closed. It does not run
 insert a synthetic baseline/history row. A migration and its checksum row in
 `aichm_crm_forward_meta.schema_migrations` are committed in one transaction;
 that row is written only after that migration's SQL actually ran and its
-postconditions passed.
+postconditions passed. The control ledger schema/table may be created and
+committed separately before the first migration transaction, so a failed first
+migration can leave an empty ledger without any migration entry.
 
 The database checks enforce active-administrator actor and active admissions
 assignee membership, assignment-version progression, and an immutable

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  buildCrmForwardLedgerDiagnostics,
   CRM_FORWARD_FAILURE_STAGE_CODES,
   formatCrmForwardStageFailure,
   type CrmForwardFailureStage,
@@ -83,6 +84,102 @@ test("app-role preflight blockers are reported as stable codes without raw error
     assert.equal(diagnostic.failureCategory, category);
     assert.equal(JSON.stringify(diagnostic).includes("credential-like"), false);
   }
+});
+
+test("apply diagnostics preserve allowlisted wrapper and inner failure fields", () => {
+  const sensitive = "credential-like raw text";
+  const inner = Object.assign(new Error(sensitive), {
+    code: "CRM_SCHEMA_POSTCONDITION_INDEX_METADATA_INVALID",
+  });
+  const wrapped = Object.assign(new Error(sensitive), {
+    code: "CRM_FORWARD_MIGRATION_FAILED",
+    cause: inner,
+  });
+  const diagnostic = formatCrmForwardStageFailure(
+    "migrationPostcondition",
+    wrapped,
+    CORRELATION_ID,
+    "0014_crm_canonical_assignments",
+  );
+  assert.deepEqual(diagnostic, {
+    stageCode: "CRM_FORWARD_STAGE_MIGRATION_POSTCONDITION",
+    failureCategory: "schema_postcondition_catalog_invalid",
+    failureCode: "CRM_SCHEMA_POSTCONDITION_INDEX_METADATA_INVALID",
+    migrationId: "0014_crm_canonical_assignments",
+    correlationId: CORRELATION_ID,
+  });
+  assert.equal(JSON.stringify(diagnostic).includes(sensitive), false);
+});
+
+test("generic apply wrapper retains a safe SQLSTATE category without printing SQLSTATE", () => {
+  const wrapped = Object.assign(new Error("hidden database text"), {
+    code: "CRM_FORWARD_MIGRATION_FAILED",
+    cause: Object.assign(new Error("hidden driver text"), { code: "42501" }),
+  });
+  const diagnostic = formatCrmForwardStageFailure(
+    "migrationSqlExecution",
+    wrapped,
+    CORRELATION_ID,
+    "0016_crm_runtime_role_separation",
+  );
+  assert.equal(diagnostic.failureCode, "CRM_FORWARD_MIGRATION_FAILED");
+  assert.equal(diagnostic.failureCategory, "postgres_insufficient_privilege");
+  assert.equal(diagnostic.migrationId, "0016_crm_runtime_role_separation");
+  assert.doesNotMatch(JSON.stringify(diagnostic), /42501|hidden database text|hidden driver text/);
+});
+
+test("ledger diagnostics report control objects, row presence, migration status and checksum matches only", () => {
+  const result = buildCrmForwardLedgerDiagnostics({
+    schemaExists: true,
+    tableExists: true,
+    registeredMigrations: [
+      { id: "0014_crm_canonical_assignments", sha256: "a".repeat(64) },
+      { id: "0015_crm_assignment_audit_invariants", sha256: "b".repeat(64) },
+      { id: "0016_crm_runtime_role_separation", sha256: "c".repeat(64) },
+    ],
+    ledgerRows: [
+      { migration_id: "0014_crm_canonical_assignments", sha256: "a".repeat(64) },
+      { migration_id: "0015_crm_assignment_audit_invariants", sha256: "d".repeat(64) },
+    ],
+  });
+  assert.deepEqual(result, {
+    schemaExists: true,
+    tableExists: true,
+    rowCount: 2,
+    hasRows: true,
+    migrations: [
+      { id: "0014_crm_canonical_assignments", status: "applied", checksumMatches: true },
+      { id: "0015_crm_assignment_audit_invariants", status: "applied", checksumMatches: false },
+      { id: "0016_crm_runtime_role_separation", status: "pending", checksumMatches: null },
+    ],
+  });
+  const serialized = JSON.stringify(result);
+  for (const hash of ["a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64)]) {
+    assert.equal(serialized.includes(hash), false);
+  }
+});
+
+test("ledger diagnostics report an absent empty ledger and redact unknown migration identifiers", () => {
+  const result = buildCrmForwardLedgerDiagnostics({
+    schemaExists: false,
+    tableExists: false,
+    registeredMigrations: [
+      { id: "0014_crm_canonical_assignments", sha256: "a".repeat(64) },
+      { id: "private_identifier", sha256: "b".repeat(64) },
+    ],
+    ledgerRows: [],
+  });
+  assert.deepEqual(result, {
+    schemaExists: false,
+    tableExists: false,
+    rowCount: 0,
+    hasRows: false,
+    migrations: [
+      { id: "0014_crm_canonical_assignments", status: "pending", checksumMatches: null },
+      { id: "unrecognized", status: "pending", checksumMatches: null },
+    ],
+  });
+  assert.equal(JSON.stringify(result).includes("private_identifier"), false);
 });
 
 test("CRM forward diagnostics traverse bounded driver causes without looping", () => {

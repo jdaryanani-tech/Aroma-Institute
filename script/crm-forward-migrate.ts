@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Pool, type PoolClient } from "pg";
 import {
+  buildCrmForwardLedgerDiagnostics,
   formatCrmForwardStageFailure,
   type CrmForwardFailureStage,
 } from "../server/db/crm-forward-migration-diagnostics";
@@ -50,7 +51,7 @@ type Registry = {
 };
 type Queryable = Pick<PoolClient, "query">;
 type MigrationArtifact = { sql: string; hash: string };
-type StageSetter = (stage: CrmForwardFailureStage) => void;
+type StageSetter = (stage: CrmForwardFailureStage, migrationId?: string) => void;
 type RuntimeRoleGate = CrmPreApplyRoleGate;
 
 const REGISTRY_PATH = path.resolve("migrations/crm-forward/registry.json");
@@ -71,8 +72,11 @@ const BASE_COLUMNS: Record<string, string[]> = {
   lms_user_roles: ["user_id", "role"],
 };
 
-function fail(code: string): never {
-  throw new Error(code);
+function fail(code: string, cause?: unknown): never {
+  const error = new Error(code) as Error & { code: string; cause?: unknown };
+  error.code = code;
+  if (cause !== undefined) error.cause = cause;
+  throw error;
 }
 
 function validateRegistry(registry: Registry): void {
@@ -241,15 +245,28 @@ async function inspectReadOnlyRuntimeAccess(client: Queryable) {
 
 async function readExistingLedger(client: Queryable, registry: Registry) {
   const regclass = `${registry.ledger.schema}.${registry.ledger.table}`;
-  const { rows: [table] } = await client.query<{ exists: boolean }>(
-    "SELECT to_regclass($1) IS NOT NULL AS exists",
-    [regclass],
+  const { rows: [state] } = await client.query<{
+    schema_exists: boolean;
+    table_exists: boolean;
+  }>(
+    `SELECT
+       EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS schema_exists,
+       to_regclass($2) IS NOT NULL AS table_exists`,
+    [registry.ledger.schema, regclass],
   );
-  if (!table?.exists) return [];
+  const schemaExists = state?.schema_exists === true;
+  const tableExists = state?.table_exists === true;
+  if (!tableExists) {
+    return {
+      schemaExists,
+      tableExists,
+      rows: [] as Array<{ migration_id: string; sha256: string }>,
+    };
+  }
   const { rows } = await client.query<{ migration_id: string; sha256: string }>(
     `SELECT migration_id,sha256 FROM ${registry.ledger.schema}.${registry.ledger.table} ORDER BY migration_id`,
   );
-  return rows;
+  return { schemaExists, tableExists, rows };
 }
 
 async function ensureLedger(
@@ -305,6 +322,7 @@ async function collectPlan(
   setStage: StageSetter,
 ): Promise<{
   ledger: Map<string, string>;
+  ledgerState: ReturnType<typeof buildCrmForwardLedgerDiagnostics>;
   pending: Migration[];
   basePrerequisites: "present";
   schemaState: "absent" | "0014_complete" | "0014_0015_complete" | "0014_0015_0016_complete";
@@ -316,7 +334,8 @@ async function collectPlan(
   const runtimeAccess = await inspectReadOnlyRuntimeAccess(client);
 
   setStage("migrationLedgerRead");
-  const rows = await readExistingLedger(client, registry);
+  const ledgerRead = await readExistingLedger(client, registry);
+  const rows = ledgerRead.rows;
   const allowed = new Set(registry.migrations.map(migration => migration.id));
   if (rows.some(row => !allowed.has(row.migration_id))) fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
   const ledger = new Map(rows.map(row => [row.migration_id, row.sha256]));
@@ -326,6 +345,15 @@ async function collectPlan(
       fail("CRM_FORWARD_LEDGER_HASH_MISMATCH");
     }
   }
+  const ledgerState = buildCrmForwardLedgerDiagnostics({
+    schemaExists: ledgerRead.schemaExists,
+    tableExists: ledgerRead.tableExists,
+    registeredMigrations: registry.migrations.map(migration => ({
+      id: migration.id,
+      sha256: artifact(artifacts, migration.id).hash,
+    })),
+    ledgerRows: rows,
+  });
 
   const recorded14 = ledger.has(EXPECTED_MIGRATIONS[0]);
   const recorded15 = ledger.has(EXPECTED_MIGRATIONS[1]);
@@ -364,6 +392,7 @@ async function collectPlan(
   setStage("previewPlanAssembly");
   return {
     ledger,
+    ledgerState,
     pending: registry.migrations.filter(migration => !ledger.has(migration.id)),
     basePrerequisites: "present",
     schemaState: !recorded14
@@ -446,6 +475,7 @@ function previewRecord(
           : null,
       };
     }),
+    ledgerState: plan.ledgerState,
     schemaAssessment: {
       basePrerequisites: plan.basePrerequisites,
       crmAssignments: plan.schemaState,
@@ -467,6 +497,7 @@ async function readOnlyPlan(
   registry: Registry,
   artifacts: Map<string, MigrationArtifact>,
   setStage: StageSetter,
+  completionStage: CrmForwardFailureStage = "previewPlanAssembly",
 ) {
   setStage("readOnlyTransactionStart");
   try {
@@ -475,7 +506,7 @@ async function readOnlyPlan(
     const identity = await inspectIdentity(client);
     assertCrmForwardDevelopmentIdentity(identity);
     const plan = await collectPlan(client, registry, artifacts, setStage);
-    setStage("previewPlanAssembly");
+    setStage(completionStage);
     await client.query("COMMIT");
     return { identity, plan };
   } catch (error) {
@@ -511,7 +542,9 @@ async function applyPlan(
   setStage: StageSetter,
 ): Promise<string[]> {
   let lockAcquired = false;
+  let operationFailure: unknown;
   try {
+    setStage("advisoryLockAcquisition");
     await client.query("BEGIN");
     try {
       assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
@@ -519,14 +552,16 @@ async function applyPlan(
       await client.query("SELECT pg_advisory_lock($1::integer,$2::integer)", [...ADVISORY_LOCK_KEYS]);
       lockAcquired = true;
       await client.query("COMMIT");
-    } catch {
+    } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      fail("CRM_FORWARD_ADVISORY_LOCK_FAILED");
+      fail("CRM_FORWARD_ADVISORY_LOCK_FAILED", error);
     }
 
     // Re-read identity and state after acquiring the session lock; another
     // forward-runner cannot race the plan between preview and execution.
-    const lockedPlan = await readOnlyPlan(client, registry, artifacts, setStage);
+    setStage("lockedReplan");
+    const lockedPlan = await readOnlyPlan(client, registry, artifacts, setStage, "lockedReplan");
+    setStage("preApplyRoleGate");
     const preApplyRoleGate = await inspectApplicationPreMigrationRoleGate(
       process.env,
       lockedPlan.identity,
@@ -542,6 +577,7 @@ async function applyPlan(
           preApplyRoleGate,
         }));
 
+        setStage("ledgerSchemaTableSetup");
         await client.query("BEGIN");
         try {
           await ensureLedger(client, registry, async () => {
@@ -549,18 +585,19 @@ async function applyPlan(
             assertCrmForwardDevelopmentIdentity(identity);
           });
           await client.query("COMMIT");
-        } catch {
+        } catch (error) {
           await client.query("ROLLBACK").catch(() => undefined);
-          fail("CRM_FORWARD_LEDGER_SETUP_FAILED");
+          fail("CRM_FORWARD_LEDGER_SETUP_FAILED", error);
         }
 
         const appliedNow: string[] = [];
         for (const migration of lockedPlan.plan.pending) {
           const sql = artifact(artifacts, migration.id).sql;
+          setStage("migrationPrerequisiteCheck", migration.id);
           await client.query("BEGIN");
           try {
             assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
-            const latestLedger = await readExistingLedger(client, registry);
+            const latestLedger = (await readExistingLedger(client, registry)).rows;
             if (latestLedger.some(row => !registry.migrations.some(item => item.id === row.migration_id))) {
               fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
             }
@@ -569,6 +606,7 @@ async function applyPlan(
               if (alreadyApplied.sha256 !== artifact(artifacts, migration.id).hash) {
                 fail("CRM_FORWARD_LEDGER_HASH_MISMATCH");
               }
+              setStage("migrationLedgerInsertCommit", migration.id);
               await client.query("COMMIT");
               continue;
             }
@@ -607,9 +645,11 @@ async function applyPlan(
             }
             await client.query("SET LOCAL search_path = public, pg_catalog");
             // The final identity assertion is immediately before the migration SQL.
+            setStage("migrationSqlExecution", migration.id);
             const identityBeforeWrite = await inspectIdentity(client);
             assertCrmForwardDevelopmentIdentity(identityBeforeWrite);
             await client.query(unwrapMigration(sql));
+            setStage("migrationPostcondition", migration.id);
             const completedStage = migration.id === EXPECTED_MIGRATIONS[0]
               ? "0014"
               : migration.id === EXPECTED_MIGRATIONS[1] ? "0015" : "0016";
@@ -628,36 +668,45 @@ async function applyPlan(
               );
             }
             assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
+            setStage("migrationLedgerInsertCommit", migration.id);
             await client.query(
               `INSERT INTO ${registry.ledger.schema}.${registry.ledger.table}(migration_id,sha256) VALUES($1,$2)`,
               [migration.id, artifact(artifacts, migration.id).hash],
             );
             await client.query("COMMIT");
             appliedNow.push(migration.id);
-          } catch {
+          } catch (error) {
             await client.query("ROLLBACK").catch(() => undefined);
-            fail("CRM_FORWARD_MIGRATION_FAILED");
+            fail("CRM_FORWARD_MIGRATION_FAILED", error);
           }
         }
         return appliedNow;
       },
     );
+  } catch (error) {
+    operationFailure = error;
+    throw error;
   } finally {
     if (lockAcquired) {
       let unlockFailed = false;
+      let unlockError: unknown;
+      if (operationFailure === undefined) setStage("advisoryUnlock");
       try {
         const { rows: [row] } = await client.query<{ unlocked: boolean }>(
           "SELECT pg_advisory_unlock($1::integer,$2::integer) AS unlocked",
           [...ADVISORY_LOCK_KEYS],
         );
         unlockFailed = row?.unlocked !== true;
-      } catch {
+      } catch (error) {
         unlockFailed = true;
+        unlockError = error;
       }
       if (unlockFailed) {
         connectionState.released = true;
         client.release(new Error("CRM_FORWARD_ADVISORY_UNLOCK_FAILED"));
-        fail("CRM_FORWARD_ADVISORY_UNLOCK_FAILED");
+        if (operationFailure === undefined) {
+          fail("CRM_FORWARD_ADVISORY_UNLOCK_FAILED", unlockError);
+        }
       }
     }
   }
@@ -666,8 +715,10 @@ async function applyPlan(
 async function run(): Promise<void> {
   const correlationId = randomUUID();
   let currentStage: CrmForwardFailureStage = "previewPlanAssembly";
-  const setStage: StageSetter = stage => {
+  let currentMigrationId: string | undefined;
+  const setStage: StageSetter = (stage, migrationId) => {
     currentStage = stage;
+    currentMigrationId = migrationId;
   };
   let pool: Pool | undefined;
   let client: PoolClient | undefined;
@@ -713,13 +764,15 @@ async function run(): Promise<void> {
     } else {
       const { identity, plan } = await readOnlyPlan(client, registry, artifacts, setStage);
       if (mode === "preview") {
-        setStage("previewPlanAssembly");
+        setStage("preApplyRoleGate");
         const preApplyRoleGate = await inspectApplicationPreMigrationRoleGate(
           process.env,
           identity,
           connectionUrl,
           mode => new Pool(buildApplicationPoolConfig(mode)),
         );
+        setStage("finalReadiness");
+        const runtimeRoleGate = await inspectApplicationRuntimeRoleGate(process.env, identity);
         output = previewRecord(
           identity,
           registry,
@@ -728,7 +781,7 @@ async function run(): Promise<void> {
           mode,
           effectivePort,
           preApplyRoleGate,
-          await inspectApplicationRuntimeRoleGate(process.env, identity),
+          runtimeRoleGate,
         );
       } else {
         const appliedNow = await applyPlan(
@@ -740,14 +793,29 @@ async function run(): Promise<void> {
           setStage,
         );
         const finalState = await readOnlyPlan(client, registry, artifacts, setStage);
-        setStage("previewPlanAssembly");
+        setStage("finalReadiness");
         const runtimeRoleGate = await inspectApplicationRuntimeRoleGate(process.env, finalState.identity);
+        const readinessFailure = runtimeRoleGate.status === "blocked"
+          ? Object.assign(
+            new Error(runtimeRoleGate.reason ?? "CRM_FORWARD_FINAL_RUNTIME_READINESS_FAILED"),
+            { code: runtimeRoleGate.reason ?? "CRM_FORWARD_FINAL_RUNTIME_READINESS_FAILED" },
+          )
+          : undefined;
         output = {
           status: runtimeRoleGate.status === "ready" ? "verified" : "runtime_role_blocked",
           stream: registry.stream,
           appliedNow,
           remaining: finalState.plan.pending.map(migration => migration.id),
           rolloutReadiness: runtimeRoleGate,
+          ...(readinessFailure
+            ? {
+              failureDiagnostic: formatCrmForwardStageFailure(
+                "finalReadiness",
+                readinessFailure,
+                correlationId,
+              ),
+            }
+            : {}),
         };
         if (runtimeRoleGate.status !== "ready") resultExitCode = 1;
       }
@@ -778,7 +846,7 @@ async function run(): Promise<void> {
 
   if (failed) {
     console.error(JSON.stringify(
-      formatCrmForwardStageFailure(currentStage, failure, correlationId),
+      formatCrmForwardStageFailure(currentStage, failure, correlationId, currentMigrationId),
     ));
     process.exitCode = 1;
     return;
