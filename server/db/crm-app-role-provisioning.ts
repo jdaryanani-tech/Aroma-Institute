@@ -1,6 +1,12 @@
 import type { PoolClient } from "pg";
+import { parse as parsePgConnectionString } from "pg-connection-string";
+import {
+  APP_DATABASE_URL_ENV,
+  applicationDatabaseEndpointsMatch,
+} from "./application-runtime-connection";
 import {
   assertCrmForwardDevelopmentIdentity,
+  CRM_FORWARD_DEVELOPMENT_IDENTITY,
   CRM_FORWARD_GUARD_ERROR_CODES,
   type CrmForwardDatabaseIdentity,
 } from "./crm-forward-migration-guard";
@@ -10,16 +16,29 @@ export const CRM_APP_ROLE_CONFIRM_ENV = "AICHM_CRM_APP_ROLE_PROVISION_CONFIRM";
 export const CRM_APP_ROLE_CONFIRM_VALUE = "PROVISION_AICHM_APP_LOGIN_IN_PINNED_DEVELOPMENT";
 export const CRM_APP_ROLE_PASSWORD_ENV = "AICHM_APP_ROLE_PASSWORD";
 export const CRM_APP_ROLE_PASSWORD_MIN_LENGTH = 32;
+export const CRM_APP_ROLE_PASSWORD_MAX_LENGTH = 128;
 
 export type CrmAppRolePasswordReadiness = {
   passwordSecretPresent: boolean;
   passwordIsString: boolean;
-  passwordLengthAccepted: boolean;
-  passwordLettersAndDigitsOnly: boolean;
-  passwordHasLowercase: boolean;
-  passwordHasUppercase: boolean;
-  passwordHasDigit: boolean;
-  passwordFormatValid: boolean;
+  lengthAccepted: boolean;
+  hasWhitespace: boolean;
+  asciiAlphanumericOnly: boolean;
+  hasNonAscii: boolean;
+  hasControlCharacter: boolean;
+  hasLowercase: boolean;
+  hasUppercase: boolean;
+  hasDigit: boolean;
+  overallFormatValid: boolean;
+};
+
+export type CrmAppRolePreviewDiagnostics = CrmAppRolePasswordReadiness & {
+  appUrlSecretPresent: boolean;
+  appUrlParses: boolean;
+  appUrlUsernameIsExpected: boolean;
+  appUrlPasswordMatchesRoleSecret: boolean;
+  appUrlEndpointMatchesRuntime: boolean;
+  appUrlDatabaseIsExpected: boolean;
 };
 
 export const CRM_APP_ROLE_STAGE_CODES = Object.freeze({
@@ -109,34 +128,109 @@ export function summarizeCrmAppRolePasswordReadiness(value: unknown): CrmAppRole
   const passwordValue = typeof value === "string" ? value : null;
   const passwordIsString = passwordValue !== null;
   const passwordSecretPresent = value !== undefined;
-  const passwordLengthAccepted = passwordIsString &&
+  const lengthAccepted = passwordIsString &&
     passwordValue.length >= CRM_APP_ROLE_PASSWORD_MIN_LENGTH &&
-    passwordValue.length <= 128;
-  const passwordLettersAndDigitsOnly = passwordIsString && /^[A-Za-z0-9]+$/.test(passwordValue);
-  const passwordHasLowercase = passwordIsString && /[a-z]/.test(passwordValue);
-  const passwordHasUppercase = passwordIsString && /[A-Z]/.test(passwordValue);
-  const passwordHasDigit = passwordIsString && /\d/.test(passwordValue);
-  const passwordFormatValid = passwordSecretPresent &&
+    passwordValue.length <= CRM_APP_ROLE_PASSWORD_MAX_LENGTH;
+  const hasWhitespace = passwordIsString && /\s/.test(passwordValue);
+  // Avoid `$` because JavaScript permits it to match before a final line
+  // terminator. Every code unit must be an allowed ASCII letter or digit.
+  const asciiAlphanumericOnly = passwordIsString &&
+    passwordValue.length > 0 &&
+    !/[^A-Za-z0-9]/.test(passwordValue);
+  const hasNonAscii = passwordIsString && /[^\x00-\x7F]/.test(passwordValue);
+  const hasControlCharacter = passwordIsString && /[\u0000-\u001F\u007F-\u009F]/.test(passwordValue);
+  const hasLowercase = passwordIsString && /[a-z]/.test(passwordValue);
+  const hasUppercase = passwordIsString && /[A-Z]/.test(passwordValue);
+  const hasDigit = passwordIsString && /[0-9]/.test(passwordValue);
+  const overallFormatValid = passwordSecretPresent &&
     passwordIsString &&
-    passwordLengthAccepted &&
-    passwordLettersAndDigitsOnly &&
-    passwordHasLowercase &&
-    passwordHasUppercase &&
-    passwordHasDigit;
+    lengthAccepted &&
+    !hasWhitespace &&
+    asciiAlphanumericOnly &&
+    !hasNonAscii &&
+    !hasControlCharacter &&
+    hasLowercase &&
+    hasUppercase &&
+    hasDigit;
   return {
     passwordSecretPresent,
     passwordIsString,
-    passwordLengthAccepted,
-    passwordLettersAndDigitsOnly,
-    passwordHasLowercase,
-    passwordHasUppercase,
-    passwordHasDigit,
-    passwordFormatValid,
+    lengthAccepted,
+    hasWhitespace,
+    asciiAlphanumericOnly,
+    hasNonAscii,
+    hasControlCharacter,
+    hasLowercase,
+    hasUppercase,
+    hasDigit,
+    overallFormatValid,
   };
 }
 
 export function isStrongAlphanumericAppRolePassword(value: unknown): value is string {
-  return summarizeCrmAppRolePasswordReadiness(value).passwordFormatValid;
+  return summarizeCrmAppRolePasswordReadiness(value).overallFormatValid;
+}
+
+function parseApplicationUrlWithPgCredentials(value: unknown): {
+  url: URL;
+  user: unknown;
+  password: unknown;
+  database: unknown;
+} | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return null;
+
+    // pg-connection-string is the parser used by pg. Remove only certificate
+    // file parameters before parsing so diagnostics never read arbitrary paths;
+    // these options cannot change the driver's username/password decoding.
+    const parseUrl = new URL(url.toString());
+    parseUrl.searchParams.delete("sslrootcert");
+    parseUrl.searchParams.delete("sslcert");
+    parseUrl.searchParams.delete("sslkey");
+    const config = parsePgConnectionString(parseUrl.toString());
+    return {
+      url,
+      user: config.user,
+      password: config.password,
+      database: config.database,
+    };
+  } catch {
+    // Parser errors can contain input details; expose only a false result.
+    return null;
+  }
+}
+
+export function summarizeCrmAppRolePreviewDiagnostics(input: {
+  rolePassword: unknown;
+  appDatabaseUrl: unknown;
+  runtimeDatabaseUrl: unknown;
+}): CrmAppRolePreviewDiagnostics {
+  const password = summarizeCrmAppRolePasswordReadiness(input.rolePassword);
+  const appUrl = parseApplicationUrlWithPgCredentials(input.appDatabaseUrl);
+  const appUrlSecretPresent = input.appDatabaseUrl !== undefined;
+  const appUrlValue = typeof input.appDatabaseUrl === "string"
+    ? input.appDatabaseUrl
+    : undefined;
+  const runtimeUrlValue = typeof input.runtimeDatabaseUrl === "string"
+    ? input.runtimeDatabaseUrl
+    : undefined;
+
+  return {
+    ...password,
+    appUrlSecretPresent,
+    appUrlParses: appUrl !== null,
+    appUrlUsernameIsExpected: appUrl?.user === "aichm_app_login",
+    appUrlPasswordMatchesRoleSecret: password.passwordIsString &&
+      appUrl?.password === input.rolePassword,
+    appUrlEndpointMatchesRuntime: appUrlValue !== undefined &&
+      runtimeUrlValue !== undefined &&
+      applicationDatabaseEndpointsMatch(appUrlValue, runtimeUrlValue),
+    appUrlDatabaseIsExpected:
+      appUrl?.database === CRM_FORWARD_DEVELOPMENT_IDENTITY.databaseName,
+  };
 }
 
 function codedError(code: string): Error & { code: string } {

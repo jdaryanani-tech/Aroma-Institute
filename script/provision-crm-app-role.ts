@@ -12,6 +12,7 @@ import {
   parseCrmAppRoleProvisionMode,
   runCrmAppRoleProvisioning,
   selectCrmAppRoleFailure,
+  summarizeCrmAppRolePreviewDiagnostics,
   CRM_APP_ROLE_CONFIRM_ENV,
   CRM_APP_ROLE_PASSWORD_ENV,
   type CrmAppRoleStageCode,
@@ -85,7 +86,7 @@ async function run(): Promise<void> {
 
     setStage(CRM_APP_ROLE_STAGE_CODES.poolConnection);
     client = await pool.connect();
-    output = await runCrmAppRoleProvisioning(
+    const provisionResult = await runCrmAppRoleProvisioning(
       client,
       mode,
       password,
@@ -95,6 +96,13 @@ async function run(): Promise<void> {
         onCleanupFailure: recordCleanupFailure,
       },
     );
+    output = mode === "preview"
+      ? summarizeCrmAppRolePreviewDiagnostics({
+        rolePassword: password,
+        appDatabaseUrl: process.env.AICHM_APP_DATABASE_URL,
+        runtimeDatabaseUrl: process.env.DATABASE_URL,
+      })
+      : provisionResult;
   } catch (error) {
     hasPrimaryFailure = true;
     primaryFailure = error;

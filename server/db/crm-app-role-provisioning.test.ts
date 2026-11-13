@@ -12,6 +12,7 @@ import {
   planCrmAppRoleProvisioning,
   runCrmAppRoleProvisioning,
   summarizeCrmAppRolePasswordReadiness,
+  summarizeCrmAppRolePreviewDiagnostics,
   selectCrmAppRoleFailure,
   sanitizedCrmAppRoleErrorCode,
   validateCrmAppRoleProvisioningState,
@@ -212,136 +213,188 @@ test("only strong alphanumeric password secret values are accepted", () => {
   assert.equal(isStrongAlphanumericAppRolePassword(`${password}!`), false);
 });
 
-test("password readiness reports safe format booleans without returning input", () => {
+test("password readiness reports safe booleans for format edge cases", () => {
+  const emptyReadiness = {
+    passwordSecretPresent: false,
+    passwordIsString: false,
+    lengthAccepted: false,
+    hasWhitespace: false,
+    asciiAlphanumericOnly: false,
+    hasNonAscii: false,
+    hasControlCharacter: false,
+    hasLowercase: false,
+    hasUppercase: false,
+    hasDigit: false,
+    overallFormatValid: false,
+  };
   const cases: Array<{
     name: string;
     input: unknown;
     expected: ReturnType<typeof summarizeCrmAppRolePasswordReadiness>;
   }> = [
-    {
-      name: "missing value",
-      input: undefined,
-      expected: {
-        passwordSecretPresent: false,
-        passwordIsString: false,
-        passwordLengthAccepted: false,
-        passwordLettersAndDigitsOnly: false,
-        passwordHasLowercase: false,
-        passwordHasUppercase: false,
-        passwordHasDigit: false,
-        passwordFormatValid: false,
-      },
-    },
+    { name: "missing value", input: undefined, expected: emptyReadiness },
     {
       name: "non-string value",
       input: 734921,
-      expected: {
-        passwordSecretPresent: true,
-        passwordIsString: false,
-        passwordLengthAccepted: false,
-        passwordLettersAndDigitsOnly: false,
-        passwordHasLowercase: false,
-        passwordHasUppercase: false,
-        passwordHasDigit: false,
-        passwordFormatValid: false,
-      },
+      expected: { ...emptyReadiness, passwordSecretPresent: true },
     },
     {
       name: "too short",
       input: "ShortSecretCanaryA1",
       expected: {
+        ...emptyReadiness,
         passwordSecretPresent: true,
         passwordIsString: true,
-        passwordLengthAccepted: false,
-        passwordLettersAndDigitsOnly: true,
-        passwordHasLowercase: true,
-        passwordHasUppercase: true,
-        passwordHasDigit: true,
-        passwordFormatValid: false,
+        asciiAlphanumericOnly: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
       },
     },
     {
       name: "too long",
       input: `Aa1${"longcanary".repeat(13)}`,
       expected: {
+        ...emptyReadiness,
         passwordSecretPresent: true,
         passwordIsString: true,
-        passwordLengthAccepted: false,
-        passwordLettersAndDigitsOnly: true,
-        passwordHasLowercase: true,
-        passwordHasUppercase: true,
-        passwordHasDigit: true,
-        passwordFormatValid: false,
+        asciiAlphanumericOnly: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
       },
     },
     {
-      name: "invalid characters",
+      name: "punctuation",
       input: `Aa1!${"canary".repeat(5)}`,
       expected: {
+        ...emptyReadiness,
         passwordSecretPresent: true,
         passwordIsString: true,
-        passwordLengthAccepted: true,
-        passwordLettersAndDigitsOnly: false,
-        passwordHasLowercase: true,
-        passwordHasUppercase: true,
-        passwordHasDigit: true,
-        passwordFormatValid: false,
+        lengthAccepted: true,
+        asciiAlphanumericOnly: false,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
       },
     },
     {
-      name: "missing lowercase",
-      input: `A1${"B".repeat(30)}`,
+      name: "leading whitespace",
+      input: ` ${password}`,
       expected: {
+        ...emptyReadiness,
         passwordSecretPresent: true,
         passwordIsString: true,
-        passwordLengthAccepted: true,
-        passwordLettersAndDigitsOnly: true,
-        passwordHasLowercase: false,
-        passwordHasUppercase: true,
-        passwordHasDigit: true,
-        passwordFormatValid: false,
+        lengthAccepted: true,
+        hasWhitespace: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
       },
     },
     {
-      name: "missing uppercase",
-      input: `a1${"b".repeat(30)}`,
+      name: "trailing whitespace",
+      input: `${password} `,
       expected: {
+        ...emptyReadiness,
         passwordSecretPresent: true,
         passwordIsString: true,
-        passwordLengthAccepted: true,
-        passwordLettersAndDigitsOnly: true,
-        passwordHasLowercase: true,
-        passwordHasUppercase: false,
-        passwordHasDigit: true,
-        passwordFormatValid: false,
+        lengthAccepted: true,
+        hasWhitespace: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
       },
     },
     {
-      name: "missing digit",
-      input: `Ab${"c".repeat(30)}`,
+      name: "embedded whitespace",
+      input: `${password.slice(0, 10)} ${password.slice(10)}`,
       expected: {
+        ...emptyReadiness,
         passwordSecretPresent: true,
         passwordIsString: true,
-        passwordLengthAccepted: true,
-        passwordLettersAndDigitsOnly: true,
-        passwordHasLowercase: true,
-        passwordHasUppercase: true,
-        passwordHasDigit: false,
-        passwordFormatValid: false,
+        lengthAccepted: true,
+        hasWhitespace: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
       },
     },
     {
-      name: "valid value",
+      name: "embedded newline",
+      input: `${password.slice(0, 10)}\n${password.slice(10)}`,
+      expected: {
+        ...emptyReadiness,
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        lengthAccepted: true,
+        hasWhitespace: true,
+        asciiAlphanumericOnly: false,
+        hasControlCharacter: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
+      },
+    },
+    {
+      name: "trailing newline is rejected",
+      input: `${password}\n`,
+      expected: {
+        ...emptyReadiness,
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        lengthAccepted: true,
+        hasWhitespace: true,
+        asciiAlphanumericOnly: false,
+        hasControlCharacter: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
+      },
+    },
+    {
+      name: "unicode letter",
+      input: `${password}é`,
+      expected: {
+        ...emptyReadiness,
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        lengthAccepted: true,
+        asciiAlphanumericOnly: false,
+        hasNonAscii: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
+      },
+    },
+    {
+      name: "unicode digit",
+      input: `${password}１`,
+      expected: {
+        ...emptyReadiness,
+        passwordSecretPresent: true,
+        passwordIsString: true,
+        lengthAccepted: true,
+        asciiAlphanumericOnly: false,
+        hasNonAscii: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
+      },
+    },
+    {
+      name: "valid ASCII alphanumeric value",
       input: password,
       expected: {
+        ...emptyReadiness,
         passwordSecretPresent: true,
         passwordIsString: true,
-        passwordLengthAccepted: true,
-        passwordLettersAndDigitsOnly: true,
-        passwordHasLowercase: true,
-        passwordHasUppercase: true,
-        passwordHasDigit: true,
-        passwordFormatValid: true,
+        lengthAccepted: true,
+        asciiAlphanumericOnly: true,
+        hasLowercase: true,
+        hasUppercase: true,
+        hasDigit: true,
+        overallFormatValid: true,
       },
     },
   ];
@@ -353,6 +406,62 @@ test("password readiness reports safe format booleans without returning input", 
       assert.equal(JSON.stringify(readiness).includes(input), false, `${name} output redaction`);
     } else if (input !== undefined) {
       assert.equal(JSON.stringify(readiness).includes(String(input)), false, `${name} output redaction`);
+    }
+  }
+});
+
+test("preview diagnostics compare app credentials with pg URL-decoding semantics and redact inputs", () => {
+  const runtimeUrl = "postgresql://runtime-user:RuntimeFixture9@helium/heliumdb?sslmode=disable";
+  const appUrlFor = (encodedPassword: string, username = "aichm_app_login") =>
+    `postgresql://${encodeURIComponent(username)}:${encodedPassword}@helium/heliumdb?sslmode=disable`;
+  const encodedAppUrl = appUrlFor(`%41${password.slice(1)}`);
+  const diagnostics = summarizeCrmAppRolePreviewDiagnostics({
+    rolePassword: password,
+    appDatabaseUrl: encodedAppUrl,
+    runtimeDatabaseUrl: runtimeUrl,
+  });
+
+  assert.deepEqual(diagnostics, {
+    ...summarizeCrmAppRolePasswordReadiness(password),
+    appUrlSecretPresent: true,
+    appUrlParses: true,
+    appUrlUsernameIsExpected: true,
+    appUrlPasswordMatchesRoleSecret: true,
+    appUrlEndpointMatchesRuntime: true,
+    appUrlDatabaseIsExpected: true,
+  });
+  const serialized = JSON.stringify(diagnostics);
+  for (const privateInput of [password, encodedAppUrl, runtimeUrl]) {
+    assert.equal(serialized.includes(privateInput), false);
+  }
+});
+
+test("preview diagnostics identify password and endpoint mismatches without exposing inputs", () => {
+  const otherPassword = `DifferentRole8${"m".repeat(22)}`;
+  const runtimeUrl = "postgresql://runtime-user:RuntimeFixture9@helium/heliumdb?sslmode=disable";
+  const appUrl = `postgresql://aichm_app_login:${otherPassword}@helium/heliumdb?sslmode=disable`;
+  const mismatchedEndpointUrl =
+    `postgresql://aichm_app_login:${otherPassword}@public.example/heliumdb?sslmode=disable`;
+  const diagnostics = summarizeCrmAppRolePreviewDiagnostics({
+    rolePassword: password,
+    appDatabaseUrl: appUrl,
+    runtimeDatabaseUrl: runtimeUrl,
+  });
+  const endpointMismatch = summarizeCrmAppRolePreviewDiagnostics({
+    rolePassword: password,
+    appDatabaseUrl: mismatchedEndpointUrl,
+    runtimeDatabaseUrl: runtimeUrl,
+  });
+
+  assert.equal(diagnostics.appUrlParses, true);
+  assert.equal(diagnostics.appUrlPasswordMatchesRoleSecret, false);
+  assert.equal(diagnostics.appUrlEndpointMatchesRuntime, true);
+  assert.equal(endpointMismatch.appUrlPasswordMatchesRoleSecret, false);
+  assert.equal(endpointMismatch.appUrlEndpointMatchesRuntime, false);
+  for (const result of [diagnostics, endpointMismatch]) {
+    const serialized = JSON.stringify(result);
+    for (const privateInput of [password, otherPassword, appUrl, mismatchedEndpointUrl, runtimeUrl]) {
+      assert.equal(serialized.includes(privateInput), false);
     }
   }
 });
@@ -430,12 +539,15 @@ test("preview reads the pinned identity and roles but performs no provisioning w
   assert.deepEqual(result, {
     passwordSecretPresent: true,
     passwordIsString: true,
-    passwordLengthAccepted: true,
-    passwordLettersAndDigitsOnly: true,
-    passwordHasLowercase: true,
-    passwordHasUppercase: true,
-    passwordHasDigit: true,
-    passwordFormatValid: true,
+    lengthAccepted: true,
+    hasWhitespace: false,
+    asciiAlphanumericOnly: true,
+    hasNonAscii: false,
+    hasControlCharacter: false,
+    hasLowercase: true,
+    hasUppercase: true,
+    hasDigit: true,
+    overallFormatValid: true,
   });
   assert.equal(JSON.stringify(result).includes(password), false);
   assert.deepEqual(stages, [
