@@ -272,7 +272,7 @@ test("invalid correlation identifiers are replaced rather than emitted", () => {
 test("runner wires every failure stage and closes both client and pool in finally", async () => {
   const source = await readFile(new URL("../../script/crm-forward-migrate.ts", import.meta.url), "utf8");
   for (const stage of Object.keys(CRM_FORWARD_FAILURE_STAGE_CODES)) {
-    assert.match(source, new RegExp(`setStage\\("${stage}"\\)`));
+    assert.match(source, new RegExp(`setStage\\("${stage}"(?:,\\s*migration\\.id)?\\)`));
   }
   assert.match(source, /finally\s*\{[\s\S]*client\.release\(\)[\s\S]*pool\.end\(\)/);
   assert.match(source, /formatCrmForwardStageFailure/);
