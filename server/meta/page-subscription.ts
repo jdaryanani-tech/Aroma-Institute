@@ -21,6 +21,18 @@ const ERROR_CATEGORIES = [
   "verification_failed",
   "unexpected_failure",
 ] as const;
+const GRAPH_ERROR_TYPES = new Set([
+  "APIException",
+  "ApplicationException",
+  "BatchAPIException",
+  "Exception",
+  "FacebookApiException",
+  "GraphAPIException",
+  "GraphMethodException",
+  "IGApiException",
+  "OAuthException",
+  "UserRequestException",
+]);
 
 export type MetaPageSubscriptionErrorCategory = (typeof ERROR_CATEGORIES)[number];
 
@@ -52,6 +64,11 @@ export type MetaPageSubscriptionResult = {
   verificationChecked: boolean;
   verified: boolean;
   errorCategory?: MetaPageSubscriptionErrorCategory;
+  graphHttpStatus?: number | null;
+  graphErrorType?: string | null;
+  graphErrorCode?: number | null;
+  graphErrorSubcode?: number | null;
+  graphErrorIsTransient?: boolean | null;
 };
 
 type Config = {
@@ -69,21 +86,95 @@ type ExistingSubscription = {
 type SafeFailure = {
   safeMetaPageSubscriptionFailure: true;
   category: MetaPageSubscriptionErrorCategory;
+  graphDiagnostics?: Pick<
+    MetaPageSubscriptionResult,
+    | "graphHttpStatus"
+    | "graphErrorType"
+    | "graphErrorCode"
+    | "graphErrorSubcode"
+    | "graphErrorIsTransient"
+  >;
 };
 
-function throwSafe(category: MetaPageSubscriptionErrorCategory): never {
-  const error: SafeFailure = { safeMetaPageSubscriptionFailure: true, category };
+type SafeGraphDiagnostics = NonNullable<SafeFailure["graphDiagnostics"]>;
+
+function throwSafe(
+  category: MetaPageSubscriptionErrorCategory,
+  graphDiagnostics?: SafeGraphDiagnostics,
+): never {
+  const error: SafeFailure = {
+    safeMetaPageSubscriptionFailure: true,
+    category,
+    ...(graphDiagnostics ? { graphDiagnostics } : {}),
+  };
   throw error;
 }
 
-function safeFailureCategory(error: unknown): MetaPageSubscriptionErrorCategory {
-  if (!error || typeof error !== "object") return "unexpected_failure";
+function safeFailure(error: unknown): {
+  category: MetaPageSubscriptionErrorCategory;
+  graphDiagnostics?: SafeGraphDiagnostics;
+} {
+  if (!error || typeof error !== "object") return { category: "unexpected_failure" };
   const candidate = error as Partial<SafeFailure>;
-  return candidate.safeMetaPageSubscriptionFailure === true &&
+  if (!(candidate.safeMetaPageSubscriptionFailure === true &&
     typeof candidate.category === "string" &&
-    ERROR_CATEGORIES.includes(candidate.category as MetaPageSubscriptionErrorCategory)
-    ? candidate.category as MetaPageSubscriptionErrorCategory
-    : "unexpected_failure";
+    ERROR_CATEGORIES.includes(candidate.category as MetaPageSubscriptionErrorCategory))) {
+    return { category: "unexpected_failure" };
+  }
+  const diagnostics = candidate.graphDiagnostics;
+  if (!diagnostics || typeof diagnostics !== "object") {
+    return { category: candidate.category as MetaPageSubscriptionErrorCategory };
+  }
+  return {
+    category: candidate.category as MetaPageSubscriptionErrorCategory,
+    graphDiagnostics: {
+      graphHttpStatus: safeHttpStatus(diagnostics.graphHttpStatus),
+      graphErrorType: safeGraphErrorType(diagnostics.graphErrorType),
+      graphErrorCode: safeGraphInteger(diagnostics.graphErrorCode),
+      graphErrorSubcode: safeGraphInteger(diagnostics.graphErrorSubcode),
+      graphErrorIsTransient:
+        typeof diagnostics.graphErrorIsTransient === "boolean"
+          ? diagnostics.graphErrorIsTransient
+          : null,
+    },
+  };
+}
+
+function safeHttpStatus(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+    ? value
+    : null;
+}
+
+function safeGraphInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) &&
+    value >= 0 && value <= 2_147_483_647
+    ? value
+    : null;
+}
+
+function safeGraphErrorType(value: unknown): string | null {
+  return typeof value === "string" && value.length <= 64 && GRAPH_ERROR_TYPES.has(value)
+    ? value
+    : null;
+}
+
+function graphDiagnostics(status: unknown, body?: unknown): SafeGraphDiagnostics {
+  let graphError: Record<string, unknown> | undefined;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const candidate = (body as { error?: unknown }).error;
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      graphError = candidate as Record<string, unknown>;
+    }
+  }
+  return {
+    graphHttpStatus: safeHttpStatus(status),
+    graphErrorType: safeGraphErrorType(graphError?.type),
+    graphErrorCode: safeGraphInteger(graphError?.code),
+    graphErrorSubcode: safeGraphInteger(graphError?.error_subcode),
+    graphErrorIsTransient:
+      typeof graphError?.is_transient === "boolean" ? graphError.is_transient : null,
+  };
 }
 
 function readConfig(environment: SubscriptionEnvironment): {
@@ -143,7 +234,15 @@ async function graphGet(
   } catch {
     throwSafe("network_error");
   }
-  if (!response.ok) throwSafe(classifyHttpFailure(response.status));
+  if (!response.ok) {
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throwSafe("invalid_response", graphDiagnostics(response.status));
+    }
+    throwSafe(classifyHttpFailure(response.status), graphDiagnostics(response.status, body));
+  }
   try {
     return await response.json();
   } catch {
@@ -231,7 +330,15 @@ async function postSubscription(
   } catch {
     throwSafe("network_error");
   }
-  if (!response.ok) throwSafe(classifyHttpFailure(response.status));
+  if (!response.ok) {
+    let errorBody: unknown;
+    try {
+      errorBody = await response.json();
+    } catch {
+      throwSafe("invalid_response", graphDiagnostics(response.status));
+    }
+    throwSafe(classifyHttpFailure(response.status), graphDiagnostics(response.status, errorBody));
+  }
 
   let result: unknown;
   try {
@@ -305,7 +412,12 @@ export async function runMetaPageSubscription(
     };
     return postVerified ? result : { ...result, errorCategory: "verification_failed" };
   } catch (error) {
-    return { ...result, errorCategory: safeFailureCategory(error) };
+    const failure = safeFailure(error);
+    return {
+      ...result,
+      ...failure.graphDiagnostics,
+      errorCategory: failure.category,
+    };
   }
 }
 
