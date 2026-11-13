@@ -365,7 +365,7 @@ test("blocked app-role gate is awaited before migration-ledger or schema writes"
   const applyBody = source.slice(applyStart, applyEnd);
   const gate = applyBody.indexOf("runAfterCrmPreApplyRoleGate");
   const ledgerWrite = applyBody.indexOf("ensureLedger");
-  const schemaWrite = applyBody.indexOf("unwrapMigration(sql)");
+  const schemaWrite = applyBody.indexOf("unwrapCrmMigration(sql)");
   assert.ok(gate >= 0);
   assert.ok(ledgerWrite > gate);
   assert.ok(schemaWrite > gate);

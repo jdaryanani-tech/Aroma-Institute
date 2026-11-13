@@ -7,6 +7,7 @@ import {
   formatCrmForwardStageFailure,
   type CrmForwardFailureStage,
 } from "../server/db/crm-forward-migration-diagnostics";
+import { unwrapCrmMigration } from "../server/db/crm-migration-wrapper";
 import {
   assertCrmAssignmentSchemaAbsent,
   assertCrmAssignmentSchemaPostconditions,
@@ -305,14 +306,6 @@ function artifact(artifacts: Map<string, MigrationArtifact>, id: string): Migrat
   const found = artifacts.get(id);
   if (!found) fail("CRM_FORWARD_REGISTRY_INVALID");
   return found;
-}
-
-function unwrapMigration(sql: string): string {
-  const trimmed = sql.trim();
-  if (!/^BEGIN;\s*/i.test(trimmed) || !/;\s*COMMIT;$/i.test(trimmed)) {
-    fail("CRM_FORWARD_MIGRATION_TRANSACTION_WRAPPER_INVALID");
-  }
-  return trimmed.replace(/^BEGIN;\s*/i, "").replace(/;\s*COMMIT;$/i, ";");
 }
 
 async function collectPlan(
@@ -644,11 +637,13 @@ async function applyPlan(
               );
             }
             await client.query("SET LOCAL search_path = public, pg_catalog");
-            // The final identity assertion is immediately before the migration SQL.
-            setStage("migrationSqlExecution", migration.id);
+            const executableSql = unwrapCrmMigration(sql);
+            setStage("livePinnedIdentityVerification", migration.id);
             const identityBeforeWrite = await inspectIdentity(client);
             assertCrmForwardDevelopmentIdentity(identityBeforeWrite);
-            await client.query(unwrapMigration(sql));
+            // The final identity assertion is immediately before the migration SQL.
+            setStage("migrationSqlExecution", migration.id);
+            await client.query(executableSql);
             setStage("migrationPostcondition", migration.id);
             const completedStage = migration.id === EXPECTED_MIGRATIONS[0]
               ? "0014"
