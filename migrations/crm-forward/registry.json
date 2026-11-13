@@ -33,6 +33,17 @@
         "table:admissions_lead_assignment_history"
       ],
       "postconditions": "crm_runtime_role_separation_v0016"
+    },
+    {
+      "id": "0017_meta_lead_ads_schema",
+      "file": "../0017_meta_lead_ads_schema.sql",
+      "requires": [
+        "ledger:0016_crm_runtime_role_separation",
+        "public.admissions_leads",
+        "public.inquiries",
+        "meta-schema:absent"
+      ],
+      "postconditions": "crm_meta_lead_ads_v0017"
     }
   ]
 }

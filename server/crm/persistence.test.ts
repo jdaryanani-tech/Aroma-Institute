@@ -10,6 +10,11 @@ import { listCrm, detailCrm } from "./read";
 import { updateCrm } from "./write";
 import { assignCrmLead } from "./assignment";
 import { assertCrmAssignmentSchemaPostconditions } from "../db/crm-forward-migration-postconditions";
+import {
+  assertCrmMetaLeadAdsPostconditions,
+  assertCrmMetaLeadAdsPrerequisites,
+  assertCrmMetaLeadAdsSchemaAbsent,
+} from "../db/crm-meta-migration-postconditions";
 import { assertCrmRuntimeRoleSeparationPostconditions } from "../db/crm-runtime-role-postconditions";
 import {
   verifyApplicationRuntimePool,
@@ -147,6 +152,42 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
         db, namespace, "0015", assignments, assignmentGuards,
       );
       await assertCrmRuntimeRoleSeparationPostconditions(db, namespace, runtimeRoleMigration);
+       const metaMigration = await readFile("migrations/0017_meta_lead_ads_schema.sql", "utf8");
+       await assertCrmMetaLeadAdsPrerequisites(db, namespace);
+       await assertCrmMetaLeadAdsSchemaAbsent(db, namespace);
+       const baseRowsBeforeMetaMigration = {
+         leads: (await db.query(
+           "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM admissions_leads row_data",
+         )).rows[0].rows,
+         inquiries: (await db.query(
+           "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM inquiries row_data",
+         )).rows[0].rows,
+         ownerCanCreate: (await db.query(
+           "SELECT has_schema_privilege('aichm_crm_owner','public','CREATE') AS allowed",
+         )).rows[0].allowed,
+       };
+       await db.query(metaMigration);
+       await assertCrmMetaLeadAdsPostconditions(db, namespace);
+       await db.query(metaMigration);
+       await assertCrmMetaLeadAdsPostconditions(db, namespace);
+       assert.deepEqual(
+         (await db.query(
+           "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM admissions_leads row_data",
+         )).rows[0].rows,
+         baseRowsBeforeMetaMigration.leads,
+       );
+       assert.deepEqual(
+         (await db.query(
+           "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM inquiries row_data",
+         )).rows[0].rows,
+         baseRowsBeforeMetaMigration.inquiries,
+       );
+       assert.equal(
+         (await db.query(
+           "SELECT has_schema_privilege('aichm_crm_owner','public','CREATE') AS allowed",
+         )).rows[0].allowed,
+         baseRowsBeforeMetaMigration.ownerCanCreate,
+       );
       const appUrl = new URL(target.url);
       appUrl.username = "aichm_test_app_login";
       appUrl.password = "";
@@ -167,6 +208,64 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       assert.equal((await appDb.query("SELECT current_user")).rows[0].current_user,"aichm_test_app_login");
       assert.equal((await appDb.query("SELECT count(*)::int AS count FROM admissions_lead_assignments")).rows[0].count,0);
       assert.equal((await appDb.query("SELECT count(*)::int AS count FROM admissions_lead_assignment_history")).rows[0].count,0);
+       const visitorHash = "a".repeat(64);
+       await appDb.query(
+         `INSERT INTO admissions_meta_lead_links(meta_lead_id,page_id,state)
+          VALUES('isolated-meta-link','isolated-page','review')`,
+       );
+       assert.equal(
+         (await appDb.query(
+           "SELECT count(*)::int AS count FROM admissions_meta_lead_links WHERE meta_lead_id='isolated-meta-link'",
+         )).rows[0].count,
+         1,
+       );
+       await assert.rejects(
+         appDb.query("UPDATE admissions_meta_lead_links SET state='failed' WHERE false"),
+         /permission denied/,
+       );
+       await appDb.query(
+         `INSERT INTO admissions_lead_touchpoints(lead_id,source_channel,meta_lead_id)
+          VALUES($1,'meta_lead_ads','isolated-meta-lead')`,
+         [l.id],
+       );
+       await appDb.query(
+         `INSERT INTO admissions_marketing_consent_events
+          (visitor_key_hash,lead_id,consent_status,policy_version,source)
+          VALUES($1,$2,'granted','test-policy','isolated-test')`,
+         [visitorHash, l.id],
+       );
+       await appDb.query(
+         `UPDATE admissions_marketing_consent_events
+          SET consent_status='withdrawn'
+          WHERE visitor_key_hash=$1`,
+         [visitorHash],
+       );
+       await appDb.query(
+         `INSERT INTO admissions_meta_event_outbox
+          (event_id,visitor_key_hash,lead_id,event_name,event_time,event_source_url)
+          VALUES('isolated-meta-event',$1,$2,'Lead',now(),'https://example.invalid/')`,
+         [visitorHash, l.id],
+       );
+       await appDb.query(
+         `UPDATE admissions_meta_event_outbox SET state='failed'
+          WHERE event_id='isolated-meta-event'`,
+       );
+       for (const table of [
+         "admissions_marketing_consent_events",
+         "admissions_lead_touchpoints",
+         "admissions_meta_lead_links",
+         "admissions_meta_event_outbox",
+       ]) {
+         await assert.rejects(
+           appDb.query(`DELETE FROM ${table} WHERE false`),
+           /permission denied/,
+         );
+         await assert.rejects(appDb.query(`TRUNCATE ${table}`), /permission denied/);
+       }
+       await assert.rejects(
+         appDb.query("UPDATE admissions_lead_touchpoints SET source='changed' WHERE false"),
+         /permission denied/,
+       );
       await assert.rejects(appDb.query("SET ROLE aichm_crm_owner"),/permission denied to set role/);
       await assert.rejects(appDb.query("SET ROLE aichm_crm_migrator"),/permission denied to set role/);
       await assert.rejects(

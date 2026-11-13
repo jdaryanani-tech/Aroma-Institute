@@ -13,6 +13,11 @@ import {
   assertCrmAssignmentSchemaPostconditions,
 } from "../server/db/crm-forward-migration-postconditions";
 import {
+  assertCrmMetaLeadAdsPostconditions,
+  assertCrmMetaLeadAdsPrerequisites,
+  assertCrmMetaLeadAdsSchemaAbsent,
+} from "../server/db/crm-meta-migration-postconditions";
+import {
   assertCrmRuntimeAssignmentFunctionAbsent,
   assertCrmRuntimeRoleSeparationPostconditions,
 } from "../server/db/crm-runtime-role-postconditions";
@@ -60,11 +65,13 @@ const EXPECTED_MIGRATIONS = [
   "0014_crm_canonical_assignments",
   "0015_crm_assignment_audit_invariants",
   "0016_crm_runtime_role_separation",
+  "0017_meta_lead_ads_schema",
 ];
 const EXPECTED_FILES = [
   "../0014_crm_canonical_assignments.sql",
   "../0015_crm_assignment_audit_invariants.sql",
   "../0016_crm_runtime_role_separation.sql",
+  "../0017_meta_lead_ads_schema.sql",
 ];
 const ADVISORY_LOCK_KEYS = [1095326536, 1128813875] as const;
 const BASE_COLUMNS: Record<string, string[]> = {
@@ -96,11 +103,18 @@ function validateRegistry(registry: Registry): void {
       "table:admissions_lead_assignments",
       "table:admissions_lead_assignment_history",
     ],
+    [
+      "ledger:0016_crm_runtime_role_separation",
+      "public.admissions_leads",
+      "public.inquiries",
+      "meta-schema:absent",
+    ],
   ];
   const expectedPostconditions = [
     "crm_assignments_v0014",
     "crm_assignment_invariants_v0015",
     "crm_runtime_role_separation_v0016",
+    "crm_meta_lead_ads_v0017",
   ];
   if (
     registry.stream !== "aichm-crm-forward" ||
@@ -318,12 +332,15 @@ async function collectPlan(
   ledgerState: ReturnType<typeof buildCrmForwardLedgerDiagnostics>;
   pending: Migration[];
   basePrerequisites: "present";
-  schemaState: "absent" | "0014_complete" | "0014_0015_complete" | "0014_0015_0016_complete";
+  schemaState: "absent" | "0014_complete" | "0014_0015_complete" | "0014_0015_0016_complete" |
+    "0014_0015_0016_0017_complete";
+  metaSchemaState: "absent" | "0017_complete";
   runtimeAccess: Awaited<ReturnType<typeof inspectReadOnlyRuntimeAccess>>;
 }> {
   setStage("prerequisiteSchemaDriftInspection");
   const missingBase = await presentBaseTables(client);
   if (missingBase.length) fail("CRM_FORWARD_BASE_PREREQUISITES_MISSING");
+  await assertCrmMetaLeadAdsPrerequisites(client, "public");
   const runtimeAccess = await inspectReadOnlyRuntimeAccess(client);
 
   setStage("migrationLedgerRead");
@@ -351,9 +368,11 @@ async function collectPlan(
   const recorded14 = ledger.has(EXPECTED_MIGRATIONS[0]);
   const recorded15 = ledger.has(EXPECTED_MIGRATIONS[1]);
   const recorded16 = ledger.has(EXPECTED_MIGRATIONS[2]);
+  const recorded17 = ledger.has(EXPECTED_MIGRATIONS[3]);
   setStage("prerequisiteSchemaDriftInspection");
   if (recorded15 && !recorded14) fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
   if (recorded16 && !recorded15) fail("CRM_FORWARD_0015_LEDGER_PREREQUISITE_MISSING");
+  if (recorded17 && !recorded16) fail("CRM_FORWARD_0016_LEDGER_PREREQUISITE_MISSING");
   if (!recorded14) {
     if (rows.length) fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
     await assertCrmAssignmentSchemaAbsent(
@@ -381,6 +400,11 @@ async function collectPlan(
       await assertCrmRuntimeAssignmentFunctionAbsent(client);
     }
   }
+  if (recorded17) {
+    await assertCrmMetaLeadAdsPostconditions(client, "public");
+  } else {
+    await assertCrmMetaLeadAdsSchemaAbsent(client, "public");
+  }
 
   setStage("previewPlanAssembly");
   return {
@@ -392,9 +416,12 @@ async function collectPlan(
       ? "absent"
       : recorded15
         ? recorded16
-          ? "0014_0015_0016_complete"
+          ? recorded17
+            ? "0014_0015_0016_0017_complete"
+            : "0014_0015_0016_complete"
           : "0014_0015_complete"
         : "0014_complete",
+    metaSchemaState: recorded17 ? "0017_complete" : "absent",
     runtimeAccess,
   };
 }
@@ -472,6 +499,7 @@ function previewRecord(
     schemaAssessment: {
       basePrerequisites: plan.basePrerequisites,
       crmAssignments: plan.schemaState,
+      metaLeadAds: plan.metaSchemaState,
       conflicts: "none",
       postconditionsVerified: true,
     },
@@ -628,6 +656,25 @@ async function applyPlan(
                 artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
               );
               await assertCrmRuntimeAssignmentFunctionAbsent(client);
+            } else if (migration.id === EXPECTED_MIGRATIONS[3]) {
+              const prerequisiteLedger = latestLedger.find(row => row.migration_id === EXPECTED_MIGRATIONS[2]);
+              if (prerequisiteLedger?.sha256 !== artifact(artifacts, EXPECTED_MIGRATIONS[2]).hash) {
+                fail("CRM_FORWARD_0016_LEDGER_PREREQUISITE_MISSING");
+              }
+              await assertCrmAssignmentSchemaPostconditions(
+                client,
+                "public",
+                "0016",
+                artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
+                artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
+              );
+              await assertCrmRuntimeRoleSeparationPostconditions(
+                client,
+                "public",
+                artifact(artifacts, EXPECTED_MIGRATIONS[2]).sql,
+              );
+              await assertCrmMetaLeadAdsPrerequisites(client, "public");
+              await assertCrmMetaLeadAdsSchemaAbsent(client, "public");
             } else {
               await assertCrmAssignmentSchemaAbsent(
                 client,
@@ -655,12 +702,15 @@ async function applyPlan(
               artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
               artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
             );
-            if (migration.id === EXPECTED_MIGRATIONS[2]) {
+            if (migration.id === EXPECTED_MIGRATIONS[2] || migration.id === EXPECTED_MIGRATIONS[3]) {
               await assertCrmRuntimeRoleSeparationPostconditions(
                 client,
                 "public",
                 artifact(artifacts, EXPECTED_MIGRATIONS[2]).sql,
               );
+            }
+            if (migration.id === EXPECTED_MIGRATIONS[3]) {
+              await assertCrmMetaLeadAdsPostconditions(client, "public");
             }
             assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
             setStage("migrationLedgerInsertCommit", migration.id);

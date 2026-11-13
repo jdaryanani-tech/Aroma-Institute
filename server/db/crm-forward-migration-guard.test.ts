@@ -333,6 +333,7 @@ test("CRM migrations are registered only in their separate forward stream", asyn
     "0014_crm_canonical_assignments",
     "0015_crm_assignment_audit_invariants",
     "0016_crm_runtime_role_separation",
+    "0017_meta_lead_ads_schema",
   ]);
   assert.ok(registry.migrations.every(migration => migration.file.startsWith("../")));
   assert.equal(mainJournalText.includes("0014_crm_canonical_assignments"), false);
@@ -341,6 +342,67 @@ test("CRM migrations are registered only in their separate forward stream", asyn
   assert.equal(aichmJournalText.includes("0015_crm_assignment_audit_invariants"), false);
   assert.equal(mainJournalText.includes("0016_crm_runtime_role_separation"), false);
   assert.equal(aichmJournalText.includes("0016_crm_runtime_role_separation"), false);
+  assert.equal(mainJournalText.includes("0017_meta_lead_ads_schema"), false);
+  assert.equal(aichmJournalText.includes("0017_meta_lead_ads_schema"), false);
+});
+
+test("CRM Meta forward migration preserves the historical schema semantics without rewriting its journal", async () => {
+  const historical = await readFile("migrations/0012_meta_lead_measurement.sql", "utf8");
+  const forward = await readFile("migrations/0017_meta_lead_ads_schema.sql", "utf8");
+  const registry = JSON.parse(await readFile("migrations/crm-forward/registry.json", "utf8")) as {
+    migrations: Array<{ id: string; file: string; requires: string[]; postconditions: string }>;
+  };
+  const expectedObjects = [
+    "admissions_marketing_consent_events",
+    "admissions_lead_touchpoints",
+    "admissions_meta_lead_links",
+    "admissions_meta_event_outbox",
+  ];
+  const expectedIndexes = [
+    "admissions_marketing_consent_visitor_idx",
+    "admissions_marketing_consent_lead_idx",
+    "admissions_touchpoints_lead_time_idx",
+    "admissions_touchpoints_inquiry_time_idx",
+    "admissions_touchpoints_meta_lead_unique",
+    "admissions_meta_lead_link_lead_idx",
+    "admissions_meta_lead_link_inquiry_idx",
+    "admissions_meta_outbox_due_idx",
+    "admissions_meta_outbox_lead_idx",
+  ];
+  for (const object of expectedObjects) {
+    assert.match(historical, new RegExp(`CREATE TABLE IF NOT EXISTS ${object}\\b`, "i"));
+    assert.match(forward, new RegExp(`CREATE TABLE IF NOT EXISTS public\\.${object}\\b`, "i"));
+  }
+  for (const index of expectedIndexes) {
+    assert.match(historical, new RegExp(`CREATE (?:UNIQUE )?INDEX IF NOT EXISTS ${index}\\b`, "i"));
+    assert.match(forward, new RegExp(`CREATE (?:UNIQUE )?INDEX IF NOT EXISTS ${index}\\b`, "i"));
+  }
+  const normalize = (value: string) => value
+    .replace(/\bpublic\./gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  const extract = (source: string, pattern: RegExp) =>
+    Array.from(source.matchAll(pattern), match => normalize(match[0])).sort();
+  const historicalTables = extract(historical, /CREATE TABLE IF NOT EXISTS[\s\S]*?;\s*/gi);
+  const forwardTables = extract(forward, /CREATE TABLE IF NOT EXISTS[\s\S]*?;\s*/gi);
+  const historicalIndexes = extract(historical, /CREATE (?:UNIQUE )?INDEX IF NOT EXISTS[\s\S]*?;\s*/gi);
+  const forwardIndexes = extract(forward, /CREATE (?:UNIQUE )?INDEX IF NOT EXISTS[\s\S]*?;\s*/gi);
+  assert.equal(historicalTables.length, 4);
+  assert.equal(historicalIndexes.length, 9);
+  assert.deepEqual(forwardTables, historicalTables);
+  assert.deepEqual(forwardIndexes, historicalIndexes);
+  assert.doesNotMatch(forward, /\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\s+(?:INTO\s+)?(?:public\.)?(?:admissions_leads|inquiries)\b/i);
+  assert.match(forward, /ALTER TABLE public\.admissions_marketing_consent_events OWNER TO aichm_crm_owner/i);
+  assert.match(forward, /GRANT SELECT, INSERT, UPDATE ON TABLE[\s\S]*TO aichm_app_runtime/i);
+  assert.match(forward, /GRANT SELECT, INSERT ON TABLE[\s\S]*TO aichm_app_runtime/i);
+  assert.equal(registry.migrations.at(-1)?.postconditions, "crm_meta_lead_ads_v0017");
+  assert.deepEqual(registry.migrations.at(-1)?.requires, [
+    "ledger:0016_crm_runtime_role_separation",
+    "public.admissions_leads",
+    "public.inquiries",
+    "meta-schema:absent",
+  ]);
 });
 
 test("CRM forward runner previews by default and applies only under explicit confirmation and lock", async () => {

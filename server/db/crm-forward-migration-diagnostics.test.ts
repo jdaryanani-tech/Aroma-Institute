@@ -128,6 +128,25 @@ test("generic apply wrapper retains a safe SQLSTATE category without printing SQ
   assert.doesNotMatch(JSON.stringify(diagnostic), /42501|hidden database text|hidden driver text/);
 });
 
+test("0017 is an allowlisted migration ID and its prerequisite failure is sanitized", () => {
+  const diagnostic = formatCrmForwardStageFailure(
+    "migrationPrerequisiteCheck",
+    Object.assign(new Error("sensitive catalog details"), {
+      code: "CRM_FORWARD_0016_LEDGER_PREREQUISITE_MISSING",
+    }),
+    CORRELATION_ID,
+    "0017_meta_lead_ads_schema",
+  );
+  assert.deepEqual(diagnostic, {
+    stageCode: "CRM_FORWARD_STAGE_MIGRATION_PREREQUISITE_CHECK",
+    failureCategory: "migration_ledger_prerequisite_missing",
+    failureCode: "CRM_FORWARD_0016_LEDGER_PREREQUISITE_MISSING",
+    migrationId: "0017_meta_lead_ads_schema",
+    correlationId: CORRELATION_ID,
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostic), /sensitive catalog details/);
+});
+
 test("ledger diagnostics report control objects, row presence, migration status and checksum matches only", () => {
   const result = buildCrmForwardLedgerDiagnostics({
     schemaExists: true,
@@ -136,6 +155,7 @@ test("ledger diagnostics report control objects, row presence, migration status 
       { id: "0014_crm_canonical_assignments", sha256: "a".repeat(64) },
       { id: "0015_crm_assignment_audit_invariants", sha256: "b".repeat(64) },
       { id: "0016_crm_runtime_role_separation", sha256: "c".repeat(64) },
+      { id: "0017_meta_lead_ads_schema", sha256: "e".repeat(64) },
     ],
     ledgerRows: [
       { migration_id: "0014_crm_canonical_assignments", sha256: "a".repeat(64) },
@@ -151,10 +171,11 @@ test("ledger diagnostics report control objects, row presence, migration status 
       { id: "0014_crm_canonical_assignments", status: "applied", checksumMatches: true },
       { id: "0015_crm_assignment_audit_invariants", status: "applied", checksumMatches: false },
       { id: "0016_crm_runtime_role_separation", status: "pending", checksumMatches: null },
+      { id: "0017_meta_lead_ads_schema", status: "pending", checksumMatches: null },
     ],
   });
   const serialized = JSON.stringify(result);
-  for (const hash of ["a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64)]) {
+  for (const hash of ["a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64), "e".repeat(64)]) {
     assert.equal(serialized.includes(hash), false);
   }
 });
@@ -165,6 +186,7 @@ test("ledger diagnostics report an absent empty ledger and redact unknown migrat
     tableExists: false,
     registeredMigrations: [
       { id: "0014_crm_canonical_assignments", sha256: "a".repeat(64) },
+      { id: "0017_meta_lead_ads_schema", sha256: "c".repeat(64) },
       { id: "private_identifier", sha256: "b".repeat(64) },
     ],
     ledgerRows: [],
@@ -176,6 +198,7 @@ test("ledger diagnostics report an absent empty ledger and redact unknown migrat
     hasRows: false,
     migrations: [
       { id: "0014_crm_canonical_assignments", status: "pending", checksumMatches: null },
+      { id: "0017_meta_lead_ads_schema", status: "pending", checksumMatches: null },
       { id: "unrecognized", status: "pending", checksumMatches: null },
     ],
   });
