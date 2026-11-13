@@ -274,10 +274,12 @@ function validateSchema(schema: string): void {
   if (!/^[a-z_][a-z0-9_]*$/.test(schema)) fail("CRM_META_SCHEMA_SCHEMA_REJECTED");
 }
 
-function normalizeSql(value: string | null | undefined): string {
+export function normalizeCrmMetaCatalogExpression(value: string | null | undefined): string {
   return (value ?? "")
     .toLowerCase()
     .replaceAll('"', "")
+    .replace(/\bin\s*\(([^()]*)\)/g, " in [$1]")
+    .replace(/=\s*any\s*\(\s*array\s*\[([^\]]*)\]\s*\)/g, " in [$1]")
     .replace(/::(?:text|jsonb|integer|character varying|timestamp with time zone)\b/g, "")
     .replace(/\s+/g, "")
     .replace(/[()]/g, "")
@@ -305,18 +307,21 @@ export async function assertCrmMetaLeadAdsPrerequisites(
     type,
   })));
   const { rows } = await client.query<{
-    table_name: string; column_name: string; data_type: string;
+    table_name: string; column_name: string; data_type: string; relkind: string;
   }>(`
     SELECT c.relname AS table_name,a.attname AS column_name,
-      format_type(a.atttypid,a.atttypmod) AS data_type
+      format_type(a.atttypid,a.atttypmod) AS data_type,c.relkind::text AS relkind
     FROM pg_class c
     JOIN pg_namespace n ON n.oid=c.relnamespace
     JOIN pg_attribute a ON a.attrelid=c.oid
     WHERE n.nspname=$1 AND c.relname=ANY($2::text[])
       AND a.attnum>0 AND NOT a.attisdropped
   `, [schema, tables]);
-  const actual = new Map(rows.map(row => [`${row.table_name}.${row.column_name}`, row.data_type]));
-  if (columns.some(item => actual.get(`${item.table}.${item.column}`) !== item.type)) {
+  const actual = new Map(rows.map(row => [`${row.table_name}.${row.column_name}`, row]));
+  if (columns.some(item => {
+    const row = actual.get(`${item.table}.${item.column}`);
+    return !row || row.data_type !== item.type || !["r", "p"].includes(row.relkind);
+  })) {
     fail("CRM_META_SCHEMA_BASE_PREREQUISITES_MISSING");
   }
 }
@@ -339,6 +344,10 @@ export async function assertCrmMetaLeadAdsSchemaAbsent(
     SELECT p.proname AS name,'function' AS kind
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname=$1 AND p.proname=ANY($2::text[])
+    UNION ALL
+    SELECT t.typname AS name,'type' AS kind
+    FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+    WHERE n.nspname=$1 AND t.typname=ANY($2::text[])
   `, [schema, objectNames]);
   if (rows.length) fail("CRM_META_SCHEMA_UNTRACKED_STATE");
 }
@@ -389,7 +398,8 @@ export async function assertCrmMetaLeadAdsPostconditions(
     const expected = EXPECTED_COLUMNS[row.table_name]?.[row.column_name];
     if (
       !expected || row.data_type !== expected.type || row.not_null !== expected.notNull ||
-      normalizeSql(row.default_expression) !== normalizeSql(expected.defaultExpression) ||
+      normalizeCrmMetaCatalogExpression(row.default_expression) !==
+        normalizeCrmMetaCatalogExpression(expected.defaultExpression) ||
       row.generated !== "" || row.identity !== ""
     ) fail("CRM_META_SCHEMA_COLUMNS_DRIFTED");
   }
@@ -455,7 +465,10 @@ export async function assertCrmMetaLeadAdsPostconditions(
       mismatch = "foreign_key_actions";
     } else if (row.validated !== true) mismatch = "validation_state";
     else if (row.deferrable !== false || row.initially_deferred !== false) mismatch = "deferrability";
-    else if (normalizeSql(row.check_expression) !== normalizeSql(expected.check)) mismatch = "check_expression";
+    else if (
+      normalizeCrmMetaCatalogExpression(row.check_expression) !==
+      normalizeCrmMetaCatalogExpression(expected.check)
+    ) mismatch = "check_expression";
     if (mismatch) {
       fail("CRM_META_SCHEMA_CONSTRAINTS_DRIFTED", `field=${mismatch} constraint=${row.name}`);
     }
@@ -476,7 +489,6 @@ export async function assertCrmMetaLeadAdsPostconditions(
       COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
           'column',a.attname::text,
-          'definition',pg_get_indexdef(x.indexrelid,k.ord::integer,true),
           'descending',((x.indoption[k.ord::integer-1]::integer & 1) <> 0),
           'nullsFirst',((x.indoption[k.ord::integer-1]::integer & 2) <> 0),
           'collationMatchesColumn',(x.indcollation[k.ord::integer-1]=a.attcollation),
@@ -515,7 +527,7 @@ export async function assertCrmMetaLeadAdsPostconditions(
     const expected = expectedIndexes[row.name];
     const keyDetails = Array.isArray(row.key_details)
       ? row.key_details as Array<{
-        column: string; definition: string; descending: boolean; nullsFirst: boolean;
+        column: string; descending: boolean; nullsFirst: boolean;
         collationMatchesColumn: boolean; defaultOpclass: boolean;
       }>
       : null;
@@ -528,20 +540,28 @@ export async function assertCrmMetaLeadAdsPostconditions(
       row.key_count !== expected.keys.length || row.attr_count !== expected.keys.length ||
       row.constraint_name !== expectedConstraint || !keyDetails ||
       keyDetails.length !== expected.keys.length || !includedColumns || includedColumns.length !== 0 ||
-      normalizeSql(row.predicate) !== normalizeSql(expected.predicate) ||
+      normalizeCrmMetaCatalogExpression(row.predicate) !==
+        normalizeCrmMetaCatalogExpression(expected.predicate) ||
       row.expressions !== null ||
-      normalizeSql(row.definition) !== normalizeSql(expectedIndexDefinition(row.name, schema, expected))
+      normalizeCrmMetaCatalogExpression(row.definition) !==
+        normalizeCrmMetaCatalogExpression(expectedIndexDefinition(row.name, schema, expected))
     ) fail("CRM_META_SCHEMA_INDEXES_DRIFTED");
     for (let position = 0; position < expected.keys.length; position += 1) {
       const key = expected.keys[position];
       const actual = keyDetails[position];
       const descending = Boolean(key.descending);
-      if (
-        actual.column !== key.column || actual.descending !== descending ||
-        actual.nullsFirst !== descending || actual.collationMatchesColumn !== true ||
-        actual.defaultOpclass !== true ||
-        normalizeSql(actual.definition) !== normalizeSql(`${key.column}${descending ? " DESC" : ""}`)
-      ) fail("CRM_META_SCHEMA_INDEXES_DRIFTED");
+      let keyMismatch: string | undefined;
+      if (actual.column !== key.column) keyMismatch = "column_order";
+      else if (actual.descending !== descending) keyMismatch = "sort_direction";
+      else if (actual.nullsFirst !== descending) keyMismatch = "null_order";
+      else if (actual.collationMatchesColumn !== true) keyMismatch = "collation";
+      else if (actual.defaultOpclass !== true) keyMismatch = "operator_class";
+      if (keyMismatch) {
+        fail(
+          "CRM_META_SCHEMA_INDEXES_DRIFTED",
+          `field=${keyMismatch} index=${row.name} position=${position + 1}`,
+        );
+      }
     }
     indexNames.add(row.name);
   }

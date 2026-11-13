@@ -444,4 +444,7 @@ test("isolated CRM test launcher bounds child work and cleans up after signals",
   assert.match(source, /allowDuringTermination/);
   assert.match(source, /stopConfirmAndRemoveScratchPostgres/);
   assert.match(source, /scratchPreserved/);
+  assert.match(source, /"0016_crm_runtime_role_separation\.sql"/);
+  assert.match(source, /"0017_meta_lead_ads_schema\.sql"/);
+  assert.match(source, /metaMigrationReappliedForIdempotency: true/);
 });

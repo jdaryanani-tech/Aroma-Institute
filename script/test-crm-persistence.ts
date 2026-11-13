@@ -507,7 +507,13 @@ async function main(): Promise<void> {
       status: "passed",
       isolatedInstance: true,
       scratchDatabase: databaseName,
-      migrationsApplied: ["0014_crm_canonical_assignments.sql", "0015_crm_assignment_audit_invariants.sql"],
+      migrationsApplied: [
+        "0014_crm_canonical_assignments.sql",
+        "0015_crm_assignment_audit_invariants.sql",
+        "0016_crm_runtime_role_separation.sql",
+        "0017_meta_lead_ads_schema.sql",
+      ],
+      metaMigrationReappliedForIdempotency: true,
     }));
   }
 }

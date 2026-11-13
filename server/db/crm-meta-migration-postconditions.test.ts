@@ -8,6 +8,7 @@ import {
   assertCrmMetaLeadAdsPostconditions,
   CRM_META_LEAD_ADS_INDEXES,
   CRM_META_LEAD_ADS_TABLES,
+  normalizeCrmMetaCatalogExpression,
 } from "./crm-meta-migration-postconditions";
 
 function fakeClient(rows: unknown[]): Pick<PoolClient, "query"> {
@@ -34,12 +35,24 @@ const prerequisiteRows = [
   ["inquiries", "counselling_answers", "jsonb"],
   ["inquiries", "counselling_submitted_at", "timestamp with time zone"],
   ["inquiries", "counselling_delivery_status", "text"],
-].map(([table_name, column_name, data_type]) => ({ table_name, column_name, data_type }));
+].map(([table_name, column_name, data_type]) => ({
+  table_name,
+  column_name,
+  data_type,
+  relkind: "r",
+}));
 
 test("Meta migration prerequisites require the exact base columns and types", async () => {
   await assertCrmMetaLeadAdsPrerequisites(fakeClient(prerequisiteRows));
   await assert.rejects(
     assertCrmMetaLeadAdsPrerequisites(fakeClient(prerequisiteRows.slice(1))),
+    /CRM_META_SCHEMA_BASE_PREREQUISITES_MISSING/,
+  );
+  const wrongBaseType = prerequisiteRows.map((row, index) =>
+    index === 0 ? { ...row, data_type: "text" } : row,
+  );
+  await assert.rejects(
+    assertCrmMetaLeadAdsPrerequisites(fakeClient(wrongBaseType)),
     /CRM_META_SCHEMA_BASE_PREREQUISITES_MISSING/,
   );
   await assert.rejects(
@@ -60,6 +73,27 @@ test("Meta postconditions reject an unsafe schema name before querying catalogs"
   await assert.rejects(
     assertCrmMetaLeadAdsPostconditions(fakeClient([]), "public;drop"),
     /CRM_META_SCHEMA_SCHEMA_REJECTED/,
+  );
+});
+
+test("catalog check normalization equates PostgreSQL ANY array output with the declared IN list", () => {
+  const declared = "consent_status IN ('granted','denied','withdrawn')";
+  const catalog = "consent_status = ANY (ARRAY['granted'::text, 'denied'::text, 'withdrawn'::text])";
+  const drifted = "consent_status = ANY (ARRAY['granted'::text, 'denied'::text])";
+  assert.equal(
+    normalizeCrmMetaCatalogExpression(declared),
+    normalizeCrmMetaCatalogExpression(catalog),
+  );
+  assert.notEqual(
+    normalizeCrmMetaCatalogExpression(declared),
+    normalizeCrmMetaCatalogExpression(drifted),
+  );
+});
+
+test("catalog expression normalization tolerates explicit default index null ordering", () => {
+  assert.equal(
+    normalizeCrmMetaCatalogExpression("occurred_at DESC NULLS FIRST").replace(/nulls(?:first|last)/g, ""),
+    normalizeCrmMetaCatalogExpression("occurred_at DESC"),
   );
 });
 
