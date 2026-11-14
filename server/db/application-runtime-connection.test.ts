@@ -28,8 +28,62 @@ test("without the explicit app URL, existing DATABASE_URL behavior is preserved 
   });
 });
 
+test("Production always uses DATABASE_URL even when the explicit app URL is external", async () => {
+  const productionUrl = "postgresql://platform_user:platform_pass@db.neon.tech/neondb?sslmode=require";
+  const mode = resolveApplicationRuntimeMode({
+    NODE_ENV: "production",
+    DATABASE_URL: productionUrl,
+    [APP_DATABASE_URL_ENV]: "postgresql://runtime_user:runtime_pass@public.example.com/neondb?sslmode=require",
+  });
+
+  assert.deepEqual(mode, { kind: "legacy", connectionString: productionUrl });
+  assert.deepEqual(buildApplicationPoolConfig(mode), { connectionString: productionUrl });
+
+  let queried = false;
+  assert.deepEqual(await verifyApplicationRuntimePool({
+    async query() {
+      queried = true;
+      throw new Error("Production legacy mode must not run the least-privilege verifier");
+    },
+  } as never, mode), { status: "least_privilege_not_enabled" });
+  assert.equal(queried, false);
+});
+
+test("Production uses DATABASE_URL when AICHM_APP_DATABASE_URL is absent", () => {
+  const productionUrl = "postgresql://platform_user:platform_pass@db.neon.tech/neondb?sslmode=require";
+  const mode = resolveApplicationRuntimeMode({
+    NODE_ENV: "production",
+    DATABASE_URL: productionUrl,
+  });
+
+  assert.deepEqual(mode, { kind: "legacy", connectionString: productionUrl });
+  assert.deepEqual(buildApplicationPoolConfig(mode), { connectionString: productionUrl });
+});
+
+test("Production requires DATABASE_URL instead of falling through to the restricted URL", () => {
+  assert.throws(
+    () => resolveApplicationRuntimeMode({
+      NODE_ENV: "production",
+      [APP_DATABASE_URL_ENV]: appUrl,
+    }),
+    /DATABASE_URL_REQUIRED/,
+  );
+});
+
+test("test environments retain explicit restricted-mode behavior", () => {
+  const mode = resolveApplicationRuntimeMode({
+    NODE_ENV: "test",
+    DATABASE_URL: platformUrl,
+    [APP_DATABASE_URL_ENV]: appUrl,
+  });
+
+  assert.equal(mode.kind, "least_privilege");
+  assert.equal(mode.connectionString, appUrl);
+});
+
 test("explicit app URL must target the same host, effective port, and database", () => {
   const mode = resolveApplicationRuntimeMode({
+    NODE_ENV: "development",
     DATABASE_URL: platformUrl,
     [APP_DATABASE_URL_ENV]: appUrl,
   });
@@ -52,6 +106,7 @@ test("explicit app URL must target the same host, effective port, and database",
 
 test("the exact Replit Helium hostname is allowed with the restricted app URL", () => {
   const mode = resolveApplicationRuntimeMode({
+    NODE_ENV: "development",
     DATABASE_URL: "postgresql://platform_user:platform_pass@helium/heliumdb?sslmode=disable",
     [APP_DATABASE_URL_ENV]: "postgresql://runtime_user:runtime_pass@helium/heliumdb?sslmode=disable",
   });
@@ -71,6 +126,7 @@ test("the app host allowlist rejects near-miss, arbitrary, public DNS, and publi
     const url = `postgresql://runtime_user:pass@${host}/heliumdb?sslmode=disable`;
     assert.throws(
       () => resolveApplicationRuntimeMode({
+        NODE_ENV: "development",
         DATABASE_URL: url,
         [APP_DATABASE_URL_ENV]: url,
       }),
@@ -78,6 +134,14 @@ test("the app host allowlist rejects near-miss, arbitrary, public DNS, and publi
       `host ${host} must be rejected`,
     );
   }
+  assert.throws(
+    () => resolveApplicationRuntimeMode({
+      NODE_ENV: "development",
+      DATABASE_URL: "postgresql://platform_user:pass@db.replit.internal/heliumdb?sslmode=disable",
+      [APP_DATABASE_URL_ENV]: "postgresql://runtime_user:pass@db.neon.tech/heliumdb?sslmode=disable",
+    }),
+    /APP_DATABASE_ENDPOINT_NOT_INTERNAL/,
+  );
 });
 
 test("preflight endpoint comparison allows a dedicated login but binds transport and database", () => {

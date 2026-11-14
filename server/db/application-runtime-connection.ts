@@ -218,7 +218,17 @@ function endpointFrom(raw: string | undefined, label: "app" | "platform"): Endpo
 
 export function resolveApplicationRuntimeMode(
   environment: Record<string, string | undefined>,
+  runtimeEnvironment = environment.NODE_ENV,
 ): ApplicationRuntimeMode {
+  // Production intentionally remains on the platform-managed DATABASE_URL.
+  // Do not activate the restricted Development connection because a
+  // Production-scoped or inherited AICHM_APP_DATABASE_URL happens to exist.
+  if (runtimeEnvironment === "production") {
+    const legacy = environment[PLATFORM_DATABASE_URL_ENV];
+    if (!legacy?.trim()) reject("DATABASE_URL_REQUIRED");
+    return { kind: "legacy", connectionString: legacy };
+  }
+
   const explicit = environment[APP_DATABASE_URL_ENV];
   if (explicit === undefined) {
     const legacy = environment[PLATFORM_DATABASE_URL_ENV];

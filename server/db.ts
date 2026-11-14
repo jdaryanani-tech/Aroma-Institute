@@ -9,7 +9,10 @@ import {
   resolveApplicationRuntimeMode,
 } from "./db/application-runtime-connection";
 
-export const applicationRuntimeMode = resolveApplicationRuntimeMode(process.env);
+export const applicationRuntimeMode = resolveApplicationRuntimeMode(
+  process.env,
+  process.env.NODE_ENV,
+);
 
 export const pool = new Pool(buildApplicationPoolConfig(applicationRuntimeMode));
 
