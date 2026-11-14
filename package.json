@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "NODE_ENV=development tsx server/index.ts",
     "build": "tsx script/build.ts",
-    "start": "NODE_ENV=production node dist/index.cjs",
+    "start": "NODE_ENV=production node --enable-source-maps dist/index.cjs",
     "check": "tsc",
     "test": "tsx --test server/db/*.test.ts server/lms/*.test.ts server/admissions/*.test.ts server/crm/*.test.ts server/calendar/*.test.ts server/integrations/*.test.ts server/meta/*.test.ts server/n8n-counselling.test.ts client/src/lib/*.test.ts",
     "aichm:import:legacy": "tsx script/aichm-import-supabase-legacy.ts",
