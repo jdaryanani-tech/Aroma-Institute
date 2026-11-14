@@ -115,14 +115,14 @@ export default function Footer() {
           <p className="text-background/40 text-xs" data-testid="text-copyright">
             &copy; {new Date().getFullYear()} Aroma Institute of Cafe & Hospitality Management. All rights reserved.
           </p>
-          <div className="flex items-center gap-4">
-            <button className="text-background/40 text-xs hover:text-background/60 transition-colors">
+          <nav aria-label="Legal information" className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <a href="/privacy-policy" className="text-background/60 text-xs hover:text-background transition-colors">
               Privacy Policy
-            </button>
-            <button className="text-background/40 text-xs hover:text-background/60 transition-colors">
-              Terms of Service
-            </button>
-          </div>
+            </a>
+            <a href="/data-deletion" className="text-background/60 text-xs hover:text-background transition-colors">
+              Data Deletion Instructions
+            </a>
+          </nav>
         </div>
       </div>
     </footer>

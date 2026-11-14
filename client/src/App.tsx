@@ -26,6 +26,8 @@ import { PwaInstallPrompt } from "@/lms-ui/PwaInstallPrompt";
 import CalendarPage from "@/calendar/CalendarPage";
 import MetaMarketing from "@/meta/MetaMarketing";
 import { isPublicAdmissionsPath } from "@/meta/scope";
+import PrivacyPolicy from "@/pages/PrivacyPolicy";
+import DataDeletion from "@/pages/DataDeletion";
 
 function Router() {
   return (
@@ -34,6 +36,8 @@ function Router() {
       <Route path="/vsl" component={VSL} />
       <Route path="/vsl-video" component={VSLVideo} />
       <Route path="/counselling" component={CounsellingForm} />
+      <Route path="/privacy-policy" component={PrivacyPolicy} />
+      <Route path="/data-deletion" component={DataDeletion} />
       <Route path="/admin/first-owner" component={FirstOwner} />
       <Route path="/admin/login" component={AdminLogin} />
       <Route path="/admin/calendar" component={() => <CalendarPage surface="admin" />} />
