@@ -6,6 +6,7 @@ import { sameOriginCapture } from "../admissions/routes";
 import { CRM_STAGES } from "@shared/crm";
 import { CrmError, updateCrmSchema } from "./evidence";
 import { detailCrm, listCrm, readCrmConversationPage } from "./read";
+import { readCrmSourceAnalytics } from "./source-analytics";
 import { updateCrm } from "./write";
 import { VSL_DISPATCH_ENABLED_ENV, VSL_WEBHOOK_URL_ENV, isTrustedVslWebhookUrl, isVslDispatchEnabled } from "../admissions/outbox-dispatcher";
 import { VSL_WEBHOOK_SECRET_ENV } from "../admissions/follow-up-routes";
@@ -96,6 +97,9 @@ export function registerCrmRoutes(app: Express, dependencies = { db: pool, conne
       },
       outbox:outboxReady?counts:null,
     });
+  }));
+  app.get("/api/admin/crm/source-analytics",requireAdmin,handle(async(_req,res)=>{
+    res.json(await readCrmSourceAnalytics(dependencies.db));
   }));
   app.patch("/api/admin/crm/leads/:id",sameOriginCapture,handle(async(req,res)=>{
     res.json(await updateCrm(

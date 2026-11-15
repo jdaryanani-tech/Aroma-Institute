@@ -46,6 +46,28 @@ export type CrmOverview = {
   registeredWithForm: number; registeredWithoutForm: number;
   registeredToFormPercent: number | null; enrolledPercent: number | null;
 };
+export type CrmSourceBucket =
+  | "meta_lead_ads"
+  | "whatsapp"
+  | "website"
+  | "manual"
+  | "other"
+  | "unknown";
+export type CrmSourceAnalytics = {
+  totalEnquiries: number;
+  identifiedPeople: number;
+  unresolvedRecords: number;
+  duplicateSubmissions: number | null;
+  duplicateTracking: "tracked" | "not_tracked";
+  duplicateExplanation: string;
+  attributionMethod: string;
+  sources: {
+    source: CrmSourceBucket;
+    enquiries: number;
+    identifiedPeople: number;
+  }[];
+  lastUpdatedAt: string;
+};
 export type CrmList = {
   items: CrmLead[]; page: number; pageSize: number; total: number; totalPages: number;
   overview: CrmOverview; options: {

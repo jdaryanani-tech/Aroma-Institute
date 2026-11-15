@@ -3,7 +3,7 @@ import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-quer
 import { AlertTriangle, ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, Clock3, Coffee, LogOut, Mail, MessageCircle, MessageCircleOff, Phone, Search, ShieldCheck, SlidersHorizontal, Users, VideoOff, X } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
-import type { CrmAssignmentUpdate, CrmCapabilities, CrmDetail, CrmLead, CrmStage, CrmUpdate } from "@shared/crm";
+import type { CrmAssignmentUpdate, CrmCapabilities, CrmDetail, CrmLead, CrmSourceAnalytics, CrmStage, CrmUpdate } from "@shared/crm";
 import { CRM_STAGES } from "@shared/crm";
 import { ADMISSIONS_MANUAL_CRM_STAGES } from "@shared/crm";
 import { CrmHttpError, fetchCrmConversationPage, useCrmAssignment, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } from "@/crm/api";
@@ -71,6 +71,20 @@ export default function Admin() {
     queryFn:async()=>{
       const response=await fetch("/api/admin/crm/avni-health",{credentials:"same-origin",cache:"no-store"});
       if(!response.ok) throw new Error("Integration readiness could not be loaded.");
+      return response.json();
+    },
+  });
+  const sourceAnalyticsQuery = useQuery<CrmSourceAnalytics>({
+    queryKey: ["admin-crm", "source-analytics"],
+    enabled: isAdmin && !accessCheckBlocked,
+    retry: false,
+    staleTime: 30_000,
+    queryFn: async () => {
+      const response = await fetch("/api/admin/crm/source-analytics", {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error("Source analytics could not be loaded.");
       return response.json();
     },
   });
@@ -220,6 +234,52 @@ export default function Admin() {
           <div className="crm-count"><span className="crm-count-label">Video watched</span><strong className="crm-count-value">{overview.videoWatched.toLocaleString()}</strong><span className="crm-count-note">Observed playback milestones; not a stage label</span></div>
           <div className="crm-count"><span className="crm-count-label">Verified forms</span><strong className="crm-count-value">{overview.verifiedForms.toLocaleString()}</strong><span className="crm-count-note">{overview.registeredWithoutForm.toLocaleString()} registered; form not yet recorded</span></div>
           <div className="crm-count"><span className="crm-count-label">Enrolled stage</span><strong className="crm-count-value">{overview.stageCounts.enrolled.toLocaleString()}</strong><span className="crm-count-note crm-rate">{overview.enrolledPercent === null ? "Rate unavailable" : `${overview.enrolledPercent.toFixed(1)}% descriptive rate`}</span></div>
+        </section>}
+        {isAdmin && <section className="crm-source-analytics" aria-labelledby="crm-source-analytics-title" data-testid="crm-source-analytics">
+          <div className="crm-source-analytics-header">
+            <div>
+              <p className="crm-eyebrow">All-time · administrator view</p>
+              <h2 id="crm-source-analytics-title">Admissions source analytics</h2>
+            </div>
+            {sourceAnalyticsQuery.data && <time className="crm-source-analytics-updated" dateTime={sourceAnalyticsQuery.data.lastUpdatedAt}>
+              Updated {new Date(sourceAnalyticsQuery.data.lastUpdatedAt).toLocaleString()}
+            </time>}
+          </div>
+          {sourceAnalyticsQuery.isLoading
+            ? <p className="crm-results-caption">Loading aggregate source counts…</p>
+            : sourceAnalyticsQuery.isError
+              ? <p className="crm-error" role="status">Source analytics are temporarily unavailable.</p>
+              : sourceAnalyticsQuery.data && <>
+                <div className="crm-source-analytics-summary">
+                  <div><span>Enquiries / submissions</span><strong>{sourceAnalyticsQuery.data.totalEnquiries.toLocaleString()}</strong></div>
+                  <div><span>Identified people</span><strong>{sourceAnalyticsQuery.data.identifiedPeople.toLocaleString()}</strong></div>
+                  <div><span>Unresolved records</span><strong>{sourceAnalyticsQuery.data.unresolvedRecords.toLocaleString()}</strong></div>
+                  <div><span>Duplicate submissions</span><strong>{sourceAnalyticsQuery.data.duplicateTracking === "tracked" && sourceAnalyticsQuery.data.duplicateSubmissions !== null
+                    ? sourceAnalyticsQuery.data.duplicateSubmissions.toLocaleString()
+                    : "Not tracked"}</strong></div>
+                </div>
+                <p className="crm-source-analytics-note">{sourceAnalyticsQuery.data.duplicateExplanation}</p>
+                <div className="crm-source-analytics-table-wrap">
+                  <table className="crm-source-analytics-table">
+                    <caption>Each saved enquiry is assigned to exactly one primary source bucket. Source people counts are distinct within each bucket and may overlap between buckets.</caption>
+                    <thead><tr><th scope="col">Primary source</th><th scope="col">Enquiries</th><th scope="col">Identified people</th></tr></thead>
+                    <tbody>{sourceAnalyticsQuery.data.sources.map(source => <tr key={source.source}>
+                      <th scope="row">{({
+                        meta_lead_ads: "Meta Lead Ads",
+                        whatsapp: "WhatsApp",
+                        website: "Website",
+                        manual: "Manual",
+                        other: "Other",
+                        unknown: "Unknown",
+                      } as const)[source.source]}</th>
+                      <td>{source.enquiries.toLocaleString()}</td>
+                      <td>{source.identifiedPeople.toLocaleString()}</td>
+                    </tr>)}</tbody>
+                    <tfoot><tr><th scope="row">Total enquiries</th><td>{sourceAnalyticsQuery.data.totalEnquiries.toLocaleString()}</td><td aria-label="Distinct people across all sources">{sourceAnalyticsQuery.data.identifiedPeople.toLocaleString()}</td></tr></tfoot>
+                  </table>
+                </div>
+                <p className="crm-source-analytics-note">{sourceAnalyticsQuery.data.attributionMethod}</p>
+              </>}
         </section>}
         {overview && <p className="crm-results-caption" style={{ margin: "-12px 0 18px" }}>{isAdmin ? stageHelp : "Counts cover only leads assigned to your account."}{overview.registeredToFormPercent !== null && <> Registered-to-form: {overview.registeredToFormPercent.toFixed(1)}% descriptive rate.</>}</p>}
         {(leadsQuery.data?.warnings ?? []).map((warning, index) => <div className="crm-warning" role="status" key={`${index}-${warning}`}><AlertTriangle size={16} /><span>{warning}</span></div>)}
