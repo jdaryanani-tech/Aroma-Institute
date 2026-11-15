@@ -6,6 +6,7 @@ import {
   createMetaLeadgenHandler,
   type MetaLeadgenHandlerDependencies,
 } from "./webhook-handler";
+import { createMetaGraphHttpError } from "./graph-error";
 import {
   isMetaLeadgenWebhookRequest,
   logMetaWebhookUnhandledError,
@@ -248,6 +249,62 @@ test("Graph HTTP errors retain their status but log only allowlisted status/cate
     errorCategory: "graph_http_4xx",
   });
   assert.equal(response.text.includes("meta_graph_http_400"), false);
+});
+
+test("Graph error diagnostics include only safe upstream metadata and preserve webhook response", async () => {
+  const state = testState();
+  const graphError = await createMetaGraphHttpError(400, async () => ({
+    error: {
+      type: "OAuthException",
+      code: 190,
+      error_subcode: 463,
+      is_transient: false,
+      message: "SENTINEL_RAW_MESSAGE SENTINEL_TOKEN",
+      fbtrace_id: "SENTINEL_TRACE",
+      url: "SENTINEL_URL",
+      access_token: "SENTINEL_PAGE_TOKEN",
+      lead_id: "SENTINEL_LEAD_ID",
+      form_id: "SENTINEL_FORM_ID",
+      page_id: "SENTINEL_PAGE_ID",
+      field_data: { email: "SENTINEL_PERSON_EMAIL" },
+    },
+  }));
+  const response = await post(
+    createTestApp(state, { fetchLead: async () => { throw graphError; } }),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(response.text, '{"message":"Meta lead notification could not be processed. It is safe for Meta to retry."}');
+  assert.deepEqual(state.events[0], {
+    event: "meta_webhook",
+    requestId: state.events[0].requestId,
+    stage: "graph_fetch",
+    reasonCode: "graph_lead_fetch_http_failure",
+    httpStatus: 400,
+    upstreamHttpStatus: 400,
+    errorCategory: "graph_authentication_rejected",
+    upstreamErrorType: "OAuthException",
+    upstreamErrorCode: 190,
+    upstreamErrorSubcode: 463,
+    upstreamIsTransient: false,
+  });
+  const serialized = JSON.stringify({ events: state.events, response: response.text });
+  for (const value of [
+    "SENTINEL_RAW_MESSAGE",
+    "SENTINEL_TOKEN",
+    "SENTINEL_PAGE_TOKEN",
+    "SENTINEL_URL",
+    "SENTINEL_LEAD_ID",
+    "SENTINEL_FORM_ID",
+    "SENTINEL_PAGE_ID",
+    "SENTINEL_FIELD_DATA",
+    "SENTINEL_PERSON_EMAIL",
+    "SENTINEL_TRACE",
+  ]) {
+    assert.equal(serialized.includes(value), false, `${value} must not be logged or returned`);
+  }
 });
 
 test("persistence failures retain 503 and never log database error text", async () => {

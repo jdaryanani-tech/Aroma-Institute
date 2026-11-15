@@ -1,8 +1,10 @@
 import type { Request, Response } from "express";
 import { safeMetaWebhookFailureStatus } from "./config";
+import { MetaGraphHttpError } from "./graph-error";
 import {
   emitMetaWebhookDiagnostic,
   emitMetaWebhookSuccess,
+  type MetaGraphClassificationFallbackCode,
   type MetaWebhookErrorCategory,
   type MetaWebhookDiagnosticLogger,
   type MetaWebhookReasonCode,
@@ -119,7 +121,18 @@ function graphFetchFailure(error: unknown): {
   reasonCode: "graph_lead_fetch_http_failure" | "graph_lead_fetch_failed";
   upstreamHttpStatus?: number;
   errorCategory: MetaWebhookErrorCategory;
+  upstreamErrorType?: string;
+  upstreamErrorCode?: number;
+  upstreamErrorSubcode?: number;
+  upstreamIsTransient?: boolean;
+  classificationFallbackCode?: MetaGraphClassificationFallbackCode;
 } {
+  if (error instanceof MetaGraphHttpError) {
+    return {
+      reasonCode: "graph_lead_fetch_http_failure",
+      ...error.diagnostic,
+    };
+  }
   const message = error instanceof Error ? error.message : "";
   const httpMatch = /^meta_graph_http_(4\d\d|5\d\d)$/.exec(message);
   if (httpMatch) {
@@ -220,6 +233,11 @@ export function createMetaLeadgenHandler(deps: MetaLeadgenHandlerDependencies) {
           httpStatus: safeMetaWebhookFailureStatus(error),
           ...(failure.upstreamHttpStatus === undefined ? {} : { upstreamHttpStatus: failure.upstreamHttpStatus }),
           errorCategory: failure.errorCategory,
+          ...(failure.upstreamErrorType === undefined ? {} : { upstreamErrorType: failure.upstreamErrorType }),
+          ...(failure.upstreamErrorCode === undefined ? {} : { upstreamErrorCode: failure.upstreamErrorCode }),
+          ...(failure.upstreamErrorSubcode === undefined ? {} : { upstreamErrorSubcode: failure.upstreamErrorSubcode }),
+          ...(failure.upstreamIsTransient === undefined ? {} : { upstreamIsTransient: failure.upstreamIsTransient }),
+          ...(failure.classificationFallbackCode === undefined ? {} : { classificationFallbackCode: failure.classificationFallbackCode }),
         });
         return void res.status(safeMetaWebhookFailureStatus(error)).json({
           message: "Meta lead notification could not be processed. It is safe for Meta to retry.",

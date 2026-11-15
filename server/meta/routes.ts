@@ -16,6 +16,7 @@ import { db } from "../db";
 import { admissionsMarketingConsentEvents } from "@shared/admissions-schema";
 import type { MetaFetchedLead } from "./webhook-handler";
 import { createMetaLeadgenHandler } from "./webhook-handler";
+import { createMetaGraphHttpError } from "./graph-error";
 import { META_LEADGEN_WEBHOOK_PATH } from "./webhook-diagnostics";
 
 declare module "http" {
@@ -57,7 +58,7 @@ async function fetchMetaLead(leadId: string) {
   } catch {
     throw new Error("meta_graph_network_error");
   }
-  if (!response.ok) throw new Error(`meta_graph_http_${response.status}`);
+  if (!response.ok) throw await createMetaGraphHttpError(response.status, () => response.json());
   let body: MetaFetchedLead;
   try {
     body = await response.json() as MetaFetchedLead;

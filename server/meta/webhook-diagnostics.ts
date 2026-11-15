@@ -31,6 +31,8 @@ export type MetaWebhookReasonCode =
   | "webhook_request_pipeline_failure";
 
 export type MetaWebhookErrorCategory =
+  | "graph_authentication_rejected"
+  | "graph_permission_rejected"
   | "graph_http_4xx"
   | "graph_http_5xx"
   | "graph_transport_failure"
@@ -38,6 +40,22 @@ export type MetaWebhookErrorCategory =
   | "graph_response_invalid_shape"
   | "graph_configuration_unavailable"
   | "graph_failure_unclassified";
+
+export type MetaGraphClassificationFallbackCode =
+  | "graph_error_response_invalid_json"
+  | "graph_error_response_invalid_shape"
+  | "graph_error_metadata_missing"
+  | "graph_error_metadata_unexpected_fields";
+
+export type MetaGraphFailureDiagnostic = {
+  upstreamHttpStatus: number;
+  errorCategory: MetaWebhookErrorCategory;
+  upstreamErrorType?: string;
+  upstreamErrorCode?: number;
+  upstreamErrorSubcode?: number;
+  upstreamIsTransient?: boolean;
+  classificationFallbackCode?: MetaGraphClassificationFallbackCode;
+};
 
 declare module "http" {
   interface IncomingMessage {
@@ -70,6 +88,11 @@ export type MetaWebhookDiagnostic =
       httpStatus?: number;
       upstreamHttpStatus?: number;
       errorCategory?: MetaWebhookErrorCategory;
+      upstreamErrorType?: string;
+      upstreamErrorCode?: number;
+      upstreamErrorSubcode?: number;
+      upstreamIsTransient?: boolean;
+      classificationFallbackCode?: MetaGraphClassificationFallbackCode;
     };
 
 export type MetaWebhookDiagnosticLogger = (entry: MetaWebhookDiagnostic) => void;
@@ -113,6 +136,11 @@ export function emitMetaWebhookDiagnostic(
     ...(detail.httpStatus === undefined ? {} : { httpStatus: safeHttpStatus(detail.httpStatus) }),
     ...(detail.upstreamHttpStatus === undefined ? {} : { upstreamHttpStatus: safeHttpStatus(detail.upstreamHttpStatus) }),
     ...(detail.errorCategory === undefined ? {} : { errorCategory: detail.errorCategory }),
+    ...(detail.upstreamErrorType === undefined ? {} : { upstreamErrorType: detail.upstreamErrorType }),
+    ...(detail.upstreamErrorCode === undefined ? {} : { upstreamErrorCode: detail.upstreamErrorCode }),
+    ...(detail.upstreamErrorSubcode === undefined ? {} : { upstreamErrorSubcode: detail.upstreamErrorSubcode }),
+    ...(detail.upstreamIsTransient === undefined ? {} : { upstreamIsTransient: detail.upstreamIsTransient }),
+    ...(detail.classificationFallbackCode === undefined ? {} : { classificationFallbackCode: detail.classificationFallbackCode }),
   };
   req.metaWebhookDiagnosticRecorded = true;
   logger(entry);
