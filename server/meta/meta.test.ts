@@ -8,6 +8,7 @@ import {
   safeMetaWebhookFailureStatus, sanitizeMetaCustomData, verifyMetaWebhookSignature,
 } from "./config";
 import { parseMetaAttribution } from "./attribution";
+import { normalizeIndianMobile } from "../../shared/indian-mobile";
 
 test("only current explicit marketing consent enables measurement", () => {
   assert.equal(hasValidMetaConsent("granted", META_CONSENT_POLICY_VERSION), true);
@@ -67,6 +68,64 @@ test("Instant Form field mapping allowlists contact fields and ignores arbitrary
     name: "Example Student", phone: "+91 98765 43210",
     email: "student@example.invalid", programInterest: "Meta Instant Form Enquiry",
   });
+});
+
+test("Meta Instant Form WhatsApp number alias uses the same Indian mobile normalization", () => {
+  for (const [value, expected] of [
+    ["9000000001", "919000000001"],
+    ["+91 90000 00002", "919000000002"],
+    ["91-90000-00003", "919000000003"],
+  ]) {
+    const mapped = normalizeMetaFieldData([{ name: "whatsapp_number", values: [` ${value} `] }]);
+    assert.equal(mapped.phone, value);
+    assert.equal(normalizeIndianMobile(mapped.phone), expected);
+  }
+  // Human-readable question labels normalize to the same global alias; no
+  // form ID or question ID is needed.
+  assert.equal(
+    normalizeMetaFieldData([{ name: "WhatsApp Number", values: ["9000000004"] }]).phone,
+    "9000000004",
+  );
+});
+
+test("Meta phone aliases use deterministic precedence and blank values fall through", () => {
+  const allPresent = normalizeMetaFieldData([
+    { name: "phone_number", values: ["9000000001"] },
+    { name: "mobile_phone", values: ["9000000002"] },
+    { name: "whatsapp_number", values: ["9000000003"] },
+  ]);
+  assert.equal(allPresent.phone, "9000000001");
+
+  const mobileBeforeWhatsapp = normalizeMetaFieldData([
+    { name: "mobile_phone", values: ["9000000005"] },
+    { name: "whatsapp_number", values: ["9000000006"] },
+  ]);
+  assert.equal(mobileBeforeWhatsapp.phone, "9000000005");
+
+  const blankValuesFallThrough = normalizeMetaFieldData([
+    { name: "phone_number", values: ["", "   "] },
+    { name: "mobile_phone", values: [" "] },
+    { name: "whatsapp_number", values: [" 90000-00007 "] },
+  ]);
+  assert.equal(blankValuesFallThrough.phone, "90000-00007");
+  assert.equal(normalizeIndianMobile(blankValuesFallThrough.phone), "919000000007");
+});
+
+test("a nonblank invalid higher-priority phone does not fall through or yield an identity key", () => {
+  const invalidPrimary = normalizeMetaFieldData([
+    { name: "phone_number", values: ["not-a-valid-mobile"] },
+    { name: "mobile_phone", values: ["9000000008"] },
+    { name: "whatsapp_number", values: ["9000000009"] },
+  ]);
+  assert.equal(invalidPrimary.phone, "not-a-valid-mobile");
+  assert.equal(normalizeIndianMobile(invalidPrimary.phone), null);
+
+  const invalidMobile = normalizeMetaFieldData([
+    { name: "mobile_phone", values: ["0000000000"] },
+    { name: "whatsapp_number", values: ["9000000010"] },
+  ]);
+  assert.equal(invalidMobile.phone, "0000000000");
+  assert.equal(normalizeIndianMobile(invalidMobile.phone), null);
 });
 
 test("CAPI payload omits identifiers and only accepts safe custom fields", () => {

@@ -65,16 +65,21 @@ export function normalizeMetaFieldData(input: unknown) {
     const value = entry.values.find((v) => typeof v === "string" && v.trim());
     if (typeof value !== "string") continue;
     const key = entry.name.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
-    if (["full_name", "name", "first_name", "last_name", "email", "phone_number", "mobile_phone", "program_interest", "course"].includes(key)) {
+    if (["full_name", "name", "first_name", "last_name", "email", "phone_number", "mobile_phone", "whatsapp_number", "program_interest", "course"].includes(key)) {
       result[key] = value.trim().slice(0, 500);
     }
   }
   const name = result.full_name ?? result.name
     ?? [result.first_name, result.last_name].filter(Boolean).join(" ");
+  // Preserve the existing phone_number > mobile_phone order, then accept the
+  // global WhatsApp-number alias. Blank entries are omitted above, so they
+  // fall through; a nonblank value is selected before validation, meaning an
+  // invalid higher-priority value cannot silently fall back to another number.
+  const phone = result.phone_number ?? result.mobile_phone ?? result.whatsapp_number ?? "";
   return {
     name: name?.slice(0, 120) ?? "",
     email: (result.email ?? "").slice(0, 320),
-    phone: (result.phone_number ?? result.mobile_phone ?? "").slice(0, 32),
+    phone: phone.slice(0, 32),
     programInterest: (result.program_interest ?? result.course ?? "Meta Instant Form Enquiry").slice(0, 200),
   };
 }
