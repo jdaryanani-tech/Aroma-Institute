@@ -11,6 +11,7 @@ import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, form
 import { crmUiPermissions } from "@/crm/permissions";
 import MetaSetupStatus from "@/crm/MetaSetupStatus";
 import MetaCaptureStatusPanel from "@/crm/MetaCaptureStatusPanel";
+import MetaHistoricalBackfill from "@/crm/MetaHistoricalBackfill";
 
 type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; assignee: string; sort: string; page: number; pageSize: number };
 type AvniHealth = {
@@ -233,6 +234,7 @@ export default function Admin() {
           </div>
         </section>}
         {isAdmin && <MetaSetupStatus />}
+        {isAdmin && <MetaHistoricalBackfill />}
         {leadsQuery.isError && <div className="crm-error" role="alert"><strong>Admissions records did not load.</strong> {errorText(leadsQuery.error, "Check your connection and administrator access.")}<button className="crm-text-button" type="button" onClick={() => void leadsQuery.refetch()}>Try again</button></div>}
         {overview && <section className="crm-counts" aria-label={isAdmin ? "Global admissions overview" : "Assigned leads overview"}>
           <div className="crm-count"><span className="crm-count-label">Identified people</span><strong className="crm-count-value">{overview.identifiedPeople.toLocaleString()}</strong><span className="crm-count-note">{overview.unresolvedRecords.toLocaleString()} ambiguous or unmatchable records excluded</span></div>
