@@ -123,6 +123,16 @@ export type CrmDetail = {
     }[];
   };
 };
+
+export type CrmMetaCaptureStatus = {
+  metaLinkExists: boolean | null;
+  metaLinkStatus: "processed" | "review" | "failed" | "unknown" | null;
+  reviewCode: "phone_unavailable_for_identity_link" | "other" | null;
+  receivedAt: string | null;
+  primarySourceLabel: "Meta Lead Ads" | "WhatsApp" | "Website" | "Manual" | "Other" | "Unknown";
+  canonicalPersonLinked: boolean;
+};
+
 export type CrmUpdate = {
   expectedVersion: number; stage?: CrmStage; followUpAt?: string | null;
   note?: string; reason?: string;

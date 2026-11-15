@@ -3,13 +3,14 @@ import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-quer
 import { AlertTriangle, ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, Clock3, Coffee, LogOut, Mail, MessageCircle, MessageCircleOff, Phone, Search, ShieldCheck, SlidersHorizontal, Users, VideoOff, X } from "lucide-react";
 import { useLocation } from "wouter";
 import { useLmsLogout, useLmsSession } from "@/hooks/use-lms";
-import type { CrmAssignmentUpdate, CrmCapabilities, CrmDetail, CrmLead, CrmSourceAnalytics, CrmStage, CrmUpdate } from "@shared/crm";
+import type { CrmAssignmentUpdate, CrmCapabilities, CrmDetail, CrmLead, CrmMetaCaptureStatus, CrmSourceAnalytics, CrmStage, CrmUpdate } from "@shared/crm";
 import { CRM_STAGES } from "@shared/crm";
 import { ADMISSIONS_MANUAL_CRM_STAGES } from "@shared/crm";
-import { CrmHttpError, fetchCrmConversationPage, useCrmAssignment, useCrmDetail, useCrmLeads, useCrmRetry, useCrmUpdate } from "@/crm/api";
+import { CrmHttpError, fetchCrmConversationPage, useCrmAssignment, useCrmDetail, useCrmLeads, useCrmMetaCaptureStatus, useCrmRetry, useCrmUpdate } from "@/crm/api";
 import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, formatDate, toLocalInput } from "@/crm/format";
 import { crmUiPermissions } from "@/crm/permissions";
 import MetaSetupStatus from "@/crm/MetaSetupStatus";
+import MetaCaptureStatusPanel from "@/crm/MetaCaptureStatusPanel";
 
 type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; assignee: string; sort: string; page: number; pageSize: number };
 type AvniHealth = {
@@ -63,6 +64,11 @@ export default function Admin() {
   const previousCrmScope = useRef<string | null>(null);
   const leadsQuery = useCrmLeads(filters, hasCrmAccess && !accessCheckBlocked, crmScope);
   const detailQuery = useCrmDetail(selectedId, hasCrmAccess && !accessCheckBlocked, crmScope);
+  const metaCaptureStatusQuery = useCrmMetaCaptureStatus(
+    selectedId,
+    isAdmin && !accessCheckBlocked,
+    crmScope,
+  );
   const avniHealthQuery=useQuery<AvniHealth>({
     queryKey:["admin-crm","avni-health"],
     enabled:isAdmin&&!accessCheckBlocked,
@@ -337,6 +343,7 @@ export default function Admin() {
           >
             {detailQuery.isLoading ? <div className="crm-empty"><button className="crm-button crm-mobile-close" type="button" onClick={() => setMobileDetail(false)}><X size={16} /> Close prospect detail</button><div className="crm-skeleton" /><strong>Opening prospect record</strong></div> : detailQuery.isError ? <div className="crm-empty"><button className="crm-button crm-mobile-close" type="button" onClick={() => setMobileDetail(false)}><X size={16} /> Close prospect detail</button><AlertTriangle size={22} /><strong>Could not open this record</strong><p>{errorText(detailQuery.error, "Try loading it again.")}</p><button className="crm-button" type="button" onClick={() => void detailQuery.refetch()}>Try again</button></div> : lead && detailQuery.data ? <LeadDetail
               lead={lead} detail={detailQuery.data} assignees={leadsQuery.data?.options.assignees ?? []} capabilities={detailQuery.data.capabilities} canWrite={canWrite && detailQuery.data.capabilities.crmPersistence}
+              metaCaptureStatus={metaCaptureStatusQuery.data ?? []} metaCaptureStatusLoading={metaCaptureStatusQuery.isLoading} metaCaptureStatusError={metaCaptureStatusQuery.isError}
               scopeKey={crmScope}
               isAdmin={isAdmin} isAdmissions={isAdmissions}
               pending={update.isPending} updateError={update.isError ? errorText(update.error, "The profile could not be saved.") : ""}
@@ -369,6 +376,7 @@ export default function Admin() {
 
 function LeadDetail(props: {
   lead: CrmLead; detail: CrmDetail; assignees: { id: number; name: string }[]; capabilities: CrmCapabilities;
+  metaCaptureStatus: CrmMetaCaptureStatus[]; metaCaptureStatusLoading: boolean; metaCaptureStatusError: boolean;
   isAdmin: boolean; isAdmissions: boolean; scopeKey: string; canWrite: boolean; pending: boolean; updateError: string;
   assignmentPending: boolean; assignmentError: string; onAssign: (update: CrmAssignmentUpdate) => void;
   onSave: (patch: CrmUpdate) => void; onRetry: (id: number) => void; retryPending: boolean; retryError: string; retryId: number | undefined; onClose: () => void;
@@ -468,6 +476,7 @@ function LeadDetail(props: {
       {detail.warnings.map((warning) => <div className="crm-warning" role="status" key={warning}><AlertTriangle size={15} /><span>{warning}</span></div>)}
       {!props.canWrite && <div className="crm-error" role="alert">Server CRM persistence is unavailable. Editing is disabled to avoid an unrecorded change.</div>}
       <JourneyPanel journey={detail.journey} />
+      {props.isAdmin && <MetaCaptureStatusPanel items={props.metaCaptureStatus} isLoading={props.metaCaptureStatusLoading} isError={props.metaCaptureStatusError} />}
       <MetaAttributionPanel marketing={detail.marketing} />
       {props.isAdmin && <section className="crm-info crm-field-wide" aria-label="Canonical lead assignment">
         <strong>Canonical lead assignment</strong>

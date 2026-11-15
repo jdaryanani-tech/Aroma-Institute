@@ -5,7 +5,7 @@ import { requireLmsUser } from "../lms/auth";
 import { sameOriginCapture } from "../admissions/routes";
 import { CRM_STAGES } from "@shared/crm";
 import { CrmError, updateCrmSchema } from "./evidence";
-import { detailCrm, listCrm, readCrmConversationPage } from "./read";
+import { detailCrm, listCrm, readCrmConversationPage, readCrmMetaCaptureStatus } from "./read";
 import { readCrmSourceAnalytics } from "./source-analytics";
 import { updateCrm } from "./write";
 import { VSL_DISPATCH_ENABLED_ENV, VSL_WEBHOOK_URL_ENV, isTrustedVslWebhookUrl, isVslDispatchEnabled } from "../admissions/outbox-dispatcher";
@@ -55,6 +55,22 @@ export function registerCrmRoutes(app: Express, dependencies = { db: pool, conne
       return res.status(503).json({message:"CRM is temporarily unavailable. No unconfirmed changes should be assumed saved; refresh before retrying."});
     }
   };
+  app.get("/api/admin/crm-meta-status/:id",(req,res,next)=>{
+    res.setHeader("Cache-Control","private, no-store, max-age=0");
+    res.vary("Cookie");
+    next();
+  },dependencies.authenticate,handle(async(req,res)=>{
+    const principal=req.lmsUser as CrmPrincipal|undefined;
+    const access=crmAccessLevel(principal);
+    if(access==="denied") {
+      return void res.status(principal?403:401).json({message:"CRM access denied."});
+    }
+    res.json(await readCrmMetaCaptureStatus(
+      dependencies.db,
+      idSchema.parse(req.params.id),
+      principal!,
+    ));
+  }));
   app.get("/api/admin/crm/leads",handle(async(req,res)=>{
     res.json(await listCrm(dependencies.db,querySchema.parse(req.query),req.lmsUser as CrmPrincipal));
   }));

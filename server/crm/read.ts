@@ -1,7 +1,8 @@
-import { CRM_STAGES, type CrmActivity, type CrmDetail, type CrmFilters, type CrmList, type CrmOverview } from "@shared/crm";
+import { CRM_STAGES, type CrmActivity, type CrmDetail, type CrmFilters, type CrmList, type CrmMetaCaptureStatus, type CrmOverview } from "@shared/crm";
 import { crmModelSql, inspectCrmSchema, iso, leadDto, schemaWarnings, type CrmSchema, type SqlDb } from "./model";
 import { CrmError } from "./evidence";
 import { readSupabaseConversationPage } from "../db/supabase-avni-readonly";
+import { classifyCrmEnquirySource, type CrmSourceBucket } from "./source-analytics";
 import {
   canReadCanonicalLead,
   crmAccessLevel,
@@ -14,6 +15,94 @@ export class CrmLeadScopeDeniedError extends CrmError {
   constructor() {
     super(404, "Lead not found.");
   }
+}
+
+const META_CAPTURE_SOURCE_LABELS: Record<CrmSourceBucket, CrmMetaCaptureStatus["primarySourceLabel"]> = {
+  meta_lead_ads: "Meta Lead Ads",
+  whatsapp: "WhatsApp",
+  website: "Website",
+  manual: "Manual",
+  other: "Other",
+  unknown: "Unknown",
+};
+
+const META_CAPTURE_LINK_STATES = new Set(["processed", "review", "failed"]);
+const META_CAPTURE_REVIEW_CODES = new Set(["phone_unavailable_for_identity_link"]);
+
+function safeMetaCaptureLinkState(value: unknown): CrmMetaCaptureStatus["metaLinkStatus"] {
+  if (typeof value !== "string") return "unknown";
+  return META_CAPTURE_LINK_STATES.has(value)
+    ? value as "processed" | "review" | "failed"
+    : "unknown";
+}
+
+function safeMetaCaptureReviewCode(value: unknown): CrmMetaCaptureStatus["reviewCode"] {
+  if (typeof value !== "string" || !value) return null;
+  return META_CAPTURE_REVIEW_CODES.has(value)
+    ? value as "phone_unavailable_for_identity_link"
+    : "other";
+}
+
+/**
+ * Returns a minimal status projection for the selected CRM inquiry/person.
+ * findPerson performs the same identity and assigned-staff scope checks as the
+ * detail endpoint; denied lookups deliberately do not write an audit row.
+ */
+export async function readCrmMetaCaptureStatus(
+  db: SqlDb,
+  id: string,
+  principal: CrmPrincipal,
+): Promise<CrmMetaCaptureStatus[]> {
+  const schema = await inspectCrmSchema(db);
+  const person = await findPerson(db, schema, id, principal, { auditDeniedAttempt: false });
+  const inquiryIds: number[] = id.startsWith("inquiry:")
+    ? [Number(id.slice("inquiry:".length))]
+    : person.inquiry_ids.filter((value: unknown): value is number =>
+      typeof value === "number" && Number.isInteger(value) && value > 0,
+    );
+  if (!inquiryIds.length) return [];
+
+  const { rows: inquiries } = await db.query(
+    `SELECT id,
+       to_jsonb(i)->>'submission_source' AS submission_source,
+       to_jsonb(i)->>'lead_id' AS inquiry_lead_id
+     FROM inquiries i
+     WHERE i.id = ANY($1::integer[])
+     ORDER BY i.counselling_submitted_at DESC NULLS LAST, i.id DESC`,
+    [inquiryIds],
+  );
+  if (!inquiries.length) return [];
+
+  const { rows: [schemaState] } = await db.query(
+    "SELECT to_regclass('admissions_meta_lead_links') IS NOT NULL AS available",
+  );
+  const links = schemaState?.available
+    ? (await db.query(
+      `SELECT inquiry_id, state, error_code, received_at, lead_id
+       FROM admissions_meta_lead_links
+       WHERE inquiry_id = ANY($1::integer[])
+       ORDER BY received_at DESC`,
+      [inquiryIds],
+    )).rows
+    : [];
+
+  return inquiries.map((inquiry: Record<string, unknown>) => {
+    const link = links.find((candidate: Record<string, unknown>) =>
+      candidate.inquiry_id === inquiry.id,
+    ) as Record<string, unknown> | undefined;
+    const source = classifyCrmEnquirySource({
+      hasMetaLeadLink: Boolean(link),
+      submissionSource: typeof inquiry.submission_source === "string" ? inquiry.submission_source : null,
+    });
+    return {
+      metaLinkExists: schemaState?.available ? Boolean(link) : null,
+      metaLinkStatus: link ? safeMetaCaptureLinkState(link.state) : null,
+      reviewCode: link ? safeMetaCaptureReviewCode(link.error_code) : null,
+      receivedAt: link ? iso(link.received_at) : null,
+      primarySourceLabel: META_CAPTURE_SOURCE_LABELS[source],
+      canonicalPersonLinked: Boolean(inquiry.inquiry_lead_id || link?.lead_id),
+    };
+  });
 }
 
 export async function findPerson(

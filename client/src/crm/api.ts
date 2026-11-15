@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { CrmAssignmentUpdate, CrmDetail, CrmFilters, CrmList, CrmUpdate } from "@shared/crm";
+import type { CrmAssignmentUpdate, CrmDetail, CrmFilters, CrmList, CrmMetaCaptureStatus, CrmUpdate } from "@shared/crm";
 
 export class CrmHttpError extends Error {
   constructor(public status:number,message:string) {super(message);}
@@ -25,6 +25,15 @@ export function useCrmDetail(id: string | null, enabled: boolean, scopeKey: stri
     queryKey: ["admin-crm", scopeKey, "detail", id],
     queryFn: () => request(`/api/admin/crm/leads/${encodeURIComponent(id!)}`),
     enabled: enabled && Boolean(id), retry: false, staleTime: 0,
+  });
+}
+export function useCrmMetaCaptureStatus(id: string | null, enabled: boolean, scopeKey: string) {
+  return useQuery<CrmMetaCaptureStatus[]>({
+    queryKey: ["admin-crm", scopeKey, "meta-capture-status", id],
+    queryFn: () => request(`/api/admin/crm-meta-status/${encodeURIComponent(id!)}`),
+    enabled: enabled && Boolean(id),
+    retry: false,
+    staleTime: 0,
   });
 }
 export type CrmConversationPage = {
