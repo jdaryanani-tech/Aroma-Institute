@@ -4,6 +4,11 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { applicationRuntimeMode, pool } from "./db";
 import { verifyApplicationRuntimePool } from "./db/application-runtime-connection";
+import {
+  logMetaWebhookUnhandledError,
+  metaWebhookBodyParserDiagnostic,
+  metaWebhookRequestIdMiddleware,
+} from "./meta/webhook-diagnostics";
 
 declare module "http" {
   interface IncomingMessage {
@@ -26,6 +31,8 @@ export async function startApplication(): Promise<void> {
   const app = express();
   const httpServer = createServer(app);
 
+  app.use(metaWebhookRequestIdMiddleware);
+
   app.use(
     express.json({
       verify: (req, _res, buf) => {
@@ -33,6 +40,7 @@ export async function startApplication(): Promise<void> {
       },
     }),
   );
+  app.use(metaWebhookBodyParserDiagnostic());
 
   app.use(express.urlencoded({ extended: false }));
 
@@ -61,11 +69,13 @@ export async function startApplication(): Promise<void> {
 
     await registerRoutes(httpServer, app);
 
-    app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+    app.use((err: any, req: Request, res: Response, next: NextFunction) => {
       const status = err.status || err.statusCode || 500;
       const message = err.message || "Internal Server Error";
 
-      console.error("Request failed:", status, message);
+      if (!logMetaWebhookUnhandledError(req, err)) {
+        console.error("Request failed:", status, message);
+      }
 
       if (res.headersSent) {
         return next(err);

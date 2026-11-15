@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Express, Request } from "express";
+import type { Express } from "express";
 import { pool } from "../db";
 import { requireLmsRole, requireLmsUser } from "../lms/auth";
 import { sameOriginCapture } from "../admissions/routes";
@@ -7,13 +7,16 @@ import { saveMetaInstantLead } from "../admissions/identity";
 import {
   META_CONSENT_POLICY_VERSION, buildMetaCapiPayload, capiRetryDelayMs,
   getMetaReadiness, isAcknowledgedCapiResponse,
-  isValidMetaChallenge, safeMetaWebhookFailureStatus, verifyMetaWebhookSignature,
+  isValidMetaChallenge, verifyMetaWebhookSignature,
 } from "./config";
 import { safeMetaEventSourceUrl, visitorKey } from "./http";
 import { enqueueMetaEvent } from "./events";
 import { eq, desc } from "drizzle-orm";
 import { db } from "../db";
 import { admissionsMarketingConsentEvents } from "@shared/admissions-schema";
+import type { MetaFetchedLead } from "./webhook-handler";
+import { createMetaLeadgenHandler } from "./webhook-handler";
+import { META_LEADGEN_WEBHOOK_PATH } from "./webhook-diagnostics";
 
 declare module "http" {
   interface IncomingMessage {
@@ -40,16 +43,6 @@ async function consentStatus(visitorKeyHash: string) {
 function isCurrentGrant(status: { status?: string; policyVersion?: string } | null) {
   return status?.status === "granted" && status.policyVersion === META_CONSENT_POLICY_VERSION;
 }
-
-type MetaFetchedLead = {
-  id?: unknown;
-  created_time?: unknown;
-  field_data?: unknown;
-  ad_id?: unknown;
-  adset_id?: unknown;
-  campaign_id?: unknown;
-  form_id?: unknown;
-};
 
 async function fetchMetaLead(leadId: string) {
   const ready = getMetaReadiness();
@@ -90,34 +83,6 @@ async function fetchMetaLead(leadId: string) {
     }
   }
   return body;
-}
-
-function validMetaEventBody(req: Request) {
-  const signature = req.get("x-hub-signature-256") ?? "";
-  return verifyMetaWebhookSignature(req.rawBody, signature, process.env.META_APP_SECRET);
-}
-
-function notificationLeadIds(body: unknown) {
-  if (!body || typeof body !== "object") return [];
-  const entries = (body as { entry?: unknown }).entry;
-  if (!Array.isArray(entries)) return [];
-  const out: Array<{ leadId: string; pageId: string; formId: string | null }> = [];
-  for (const entry of entries) {
-    if (!entry || typeof entry !== "object") continue;
-    const record = entry as { id?: unknown; changes?: unknown };
-    if (!Array.isArray(record.changes)) continue;
-    for (const change of record.changes) {
-      if (!change || typeof change !== "object") continue;
-      const item = change as { field?: unknown; value?: unknown };
-      if (item.field !== "leadgen" || !item.value || typeof item.value !== "object") continue;
-      const value = item.value as { leadgen_id?: unknown; page_id?: unknown; form_id?: unknown };
-      const leadId = typeof value.leadgen_id === "string" ? value.leadgen_id : "";
-      const pageId = String(value.page_id ?? record.id ?? "");
-      const formId = typeof value.form_id === "string" ? value.form_id : null;
-      if (/^[0-9]{1,40}$/.test(leadId) && /^[0-9]{1,40}$/.test(pageId)) out.push({ leadId, pageId, formId });
-    }
-  }
-  return out;
 }
 
 async function dispatchOneMetaEvent() {
@@ -328,47 +293,18 @@ export function registerMetaRoutes(app: Express) {
     return void res.status(200).type("text/plain").send(challenge);
   });
 
-  app.post("/api/webhooks/meta/leadgen", async (req, res) => {
-    if (!getMetaReadiness().leadAds.configured) return void res.sendStatus(503);
-    if (!validMetaEventBody(req)) return void res.sendStatus(401);
-    try {
+  app.post(META_LEADGEN_WEBHOOK_PATH, createMetaLeadgenHandler({
+    isConfigured: () => getMetaReadiness().leadAds.configured,
+    verifySignature: (rawBody, signature) =>
+      verifyMetaWebhookSignature(rawBody, signature, process.env.META_APP_SECRET),
+    isSchemaReady: async () => {
       const { rows: [schema] } = await pool.query("SELECT to_regclass('admissions_meta_lead_links') IS NOT NULL AS ready");
-      if (!schema?.ready) return void res.sendStatus(503);
-    } catch {
-      return void res.sendStatus(503);
-    }
-    let body: unknown;
-    try {
-      body = Buffer.isBuffer(req.rawBody) ? JSON.parse(req.rawBody.toString("utf8")) : req.body;
-    } catch {
-      return void res.sendStatus(400);
-    }
-    const notifications = notificationLeadIds(body);
-    if (!notifications.length) return void res.sendStatus(400);
-    const expectedPage = process.env.META_PAGE_ID?.trim();
-    if (notifications.some((n) => n.pageId !== expectedPage)) return void res.sendStatus(403);
-    try {
-      for (const notification of notifications) {
-        const lead = await fetchMetaLead(notification.leadId);
-        const created = typeof lead.created_time === "string" ? new Date(lead.created_time) : null;
-        await saveMetaInstantLead({
-          metaLeadId: notification.leadId,
-          pageId: notification.pageId,
-          formId: typeof lead.form_id === "string" ? lead.form_id : notification.formId,
-          adId: typeof lead.ad_id === "string" ? lead.ad_id : null,
-          adsetId: typeof lead.adset_id === "string" ? lead.adset_id : null,
-          campaignId: typeof lead.campaign_id === "string" ? lead.campaign_id : null,
-          leadCreatedAt: created && !Number.isNaN(created.getTime()) ? created : null,
-          fieldData: lead.field_data,
-        });
-      }
-      return void res.sendStatus(200);
-    } catch (error) {
-      return void res.status(safeMetaWebhookFailureStatus(error)).json({
-        message: "Meta lead notification could not be processed. It is safe for Meta to retry.",
-      });
-    }
-  });
+      return !!schema?.ready;
+    },
+    expectedPageId: () => process.env.META_PAGE_ID?.trim(),
+    fetchLead: fetchMetaLead,
+    persistLead: saveMetaInstantLead,
+  }));
 
   app.get("/api/admin/meta/status", requireLmsUser, requireLmsRole("admin"), async (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store");

@@ -1,0 +1,327 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import express, { type Request, type Response } from "express";
+import type { Server } from "node:http";
+import {
+  createMetaLeadgenHandler,
+  type MetaLeadgenHandlerDependencies,
+} from "./webhook-handler";
+import {
+  isMetaLeadgenWebhookRequest,
+  logMetaWebhookUnhandledError,
+  META_LEADGEN_WEBHOOK_PATH,
+  metaWebhookBodyParserDiagnostic,
+  metaWebhookRequestIdMiddleware,
+  type MetaWebhookDiagnostic,
+  type MetaWebhookDiagnosticLogger,
+} from "./webhook-diagnostics";
+
+const TEST_SIGNATURE = `sha256=${"a".repeat(64)}`;
+const GOOD_BODY = {
+  object: "page",
+  entry: [{
+    id: "111",
+    changes: [{
+      field: "leadgen",
+      value: { leadgen_id: "222", page_id: "111", form_id: "333" },
+    }],
+  }],
+};
+
+type TestState = {
+  events: MetaWebhookDiagnostic[];
+  status: number | null;
+  body: unknown;
+  calls: { fetch: number; persist: number; schema: number };
+};
+
+function testDependencies(
+  state: TestState,
+  overrides: Partial<MetaLeadgenHandlerDependencies> = {},
+): MetaLeadgenHandlerDependencies {
+  const logger: MetaWebhookDiagnosticLogger = (entry) => state.events.push(entry);
+  return {
+    isConfigured: () => true,
+    verifySignature: () => true,
+    isSchemaReady: async () => {
+      state.calls.schema++;
+      return true;
+    },
+    expectedPageId: () => "111",
+    fetchLead: async (leadId) => {
+      state.calls.fetch++;
+      return { id: leadId, field_data: [] };
+    },
+    persistLead: async () => {
+      state.calls.persist++;
+    },
+    logger,
+    ...overrides,
+  };
+}
+
+function testState(): TestState {
+  return { events: [], status: null, body: undefined, calls: { fetch: 0, persist: 0, schema: 0 } };
+}
+
+function createTestApp(
+  state: TestState,
+  overrides: Partial<MetaLeadgenHandlerDependencies> = {},
+  rawBodyOverride?: string,
+) {
+  const logger: MetaWebhookDiagnosticLogger = (entry) => state.events.push(entry);
+  const app = express();
+  app.use(metaWebhookRequestIdMiddleware);
+  app.use(express.json({
+    verify: (req, _res, buffer) => {
+      req.rawBody = buffer;
+    },
+  }));
+  app.use(metaWebhookBodyParserDiagnostic(logger));
+  if (rawBodyOverride !== undefined) {
+    app.use((req, _res, next) => {
+      req.rawBody = Buffer.from(rawBodyOverride);
+      next();
+    });
+  }
+  app.post(META_LEADGEN_WEBHOOK_PATH, createMetaLeadgenHandler(
+    testDependencies(state, { logger, ...overrides }),
+  ));
+  app.use((error: any, req: Request, res: Response, _next: (error?: unknown) => void) => {
+    logMetaWebhookUnhandledError(req, error, logger);
+    const status = error.status || error.statusCode || 500;
+    state.status = status;
+    state.body = { message: error.message || "Internal Server Error" };
+    return res.status(status).json(state.body);
+  });
+  return app;
+}
+
+async function post(app: express.Express, body: string, signature?: string, contentType = "application/json") {
+  const server: Server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}${META_LEADGEN_WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: {
+        "content-type": contentType,
+        ...(signature === undefined ? {} : { "x-hub-signature-256": signature }),
+      },
+      body,
+    });
+    return { status: response.status, text: await response.text() };
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
+function code(state: TestState) {
+  const latest = state.events.at(-1);
+  assert.ok(latest && "reasonCode" in latest);
+  return latest.reasonCode;
+}
+
+test("malformed JSON before the request logger gets a correlated safe diagnostic and preserves 400", async () => {
+  const state = testState();
+  const app = createTestApp(state);
+  const response = await post(app, '{"private":"SENTINEL_PERSONAL_PAYLOAD');
+  assert.equal(response.status, 400);
+  assert.equal(code(state), "body_parser_invalid_json");
+  assert.equal(state.calls.schema, 0);
+  assert.match(state.events[0].requestId, /^[0-9a-f-]{36}$/i);
+  assert.equal(JSON.stringify(state.events).includes("SENTINEL_PERSONAL_PAYLOAD"), false);
+});
+
+test("invalid raw-body JSON returns the existing 400 with a safe reason", async () => {
+  const state = testState();
+  const app = createTestApp(state, {}, "{invalid raw body");
+  const response = await post(app, JSON.stringify(GOOD_BODY), TEST_SIGNATURE);
+  assert.equal(response.status, 400);
+  assert.equal(code(state), "raw_body_invalid_json");
+});
+
+test("notification shape and identifier failures retain 400 and use stable reason codes", async (t) => {
+  const cases: Array<[string, unknown, string]> = [
+    ["missing envelope", {}, "notification_envelope_invalid"],
+    ["empty entries", { entry: [] }, "notification_entry_invalid"],
+    ["invalid entry", { entry: [null] }, "notification_entry_invalid"],
+    ["missing changes", { entry: [{ id: "111" }] }, "notification_changes_invalid"],
+    ["empty changes", { entry: [{ id: "111", changes: [] }] }, "notification_changes_invalid"],
+    ["non-leadgen field", { entry: [{ id: "111", changes: [{ field: "other", value: {} }] }] }, "notification_not_leadgen"],
+    ["invalid leadgen value", { entry: [{ id: "111", changes: [{ field: "leadgen", value: null }] }] }, "notification_value_invalid"],
+    ["invalid lead ID", { entry: [{ id: "111", changes: [{ field: "leadgen", value: { leadgen_id: "bad", page_id: "111" } }] }] }, "notification_lead_id_invalid"],
+    ["invalid page ID", { entry: [{ id: "111", changes: [{ field: "leadgen", value: { leadgen_id: "222", page_id: "bad" } }] }] }, "notification_page_id_invalid"],
+  ];
+
+  for (const [label, body, expectedCode] of cases) {
+    await t.test(label, async () => {
+      const state = testState();
+      const response = await post(createTestApp(state), JSON.stringify(body), TEST_SIGNATURE);
+      assert.equal(response.status, 400);
+      assert.equal(code(state), expectedCode);
+      assert.equal(state.calls.fetch, 0);
+    });
+  }
+});
+
+test("signature absence, malformed value, and mismatch remain 401 with safe diagnostics", async (t) => {
+  const cases: Array<[string, string | undefined, boolean, string]> = [
+    ["absent", undefined, false, "signature_header_absent"],
+    ["malformed", "not-a-signature", false, "signature_header_malformed"],
+    ["mismatch", TEST_SIGNATURE, false, "signature_mismatch"],
+  ];
+  for (const [label, signature, verification, expectedCode] of cases) {
+    await t.test(label, async () => {
+      const state = testState();
+      const response = await post(
+        createTestApp(state, { verifySignature: () => verification }),
+        JSON.stringify(GOOD_BODY),
+        signature,
+      );
+      assert.equal(response.status, 401);
+      assert.equal(code(state), expectedCode);
+      assert.equal(state.calls.schema, 0);
+    });
+  }
+});
+
+test("signature validation still requires the captured raw JSON body", async () => {
+  const state = testState();
+  const response = await post(
+    createTestApp(state),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+    "text/plain",
+  );
+  assert.equal(response.status, 401);
+  assert.equal(code(state), "signature_raw_body_unavailable");
+});
+
+test("configuration and schema failures remain 503", async (t) => {
+  const cases: Array<[string, Partial<MetaLeadgenHandlerDependencies>, string]> = [
+    ["configuration missing", { isConfigured: () => false }, "lead_ads_configuration_missing"],
+    ["schema not ready", { isSchemaReady: async () => false }, "meta_schema_not_ready"],
+    ["schema query failed", { isSchemaReady: async () => { throw new Error("SENTINEL_DB_ERROR"); } }, "meta_schema_check_failed"],
+  ];
+  for (const [label, overrides, expectedCode] of cases) {
+    await t.test(label, async () => {
+      const state = testState();
+      const response = await post(createTestApp(state, overrides), JSON.stringify(GOOD_BODY), TEST_SIGNATURE);
+      assert.equal(response.status, 503);
+      assert.equal(code(state), expectedCode);
+      assert.equal(JSON.stringify(state.events).includes("SENTINEL_DB_ERROR"), false);
+    });
+  }
+});
+
+test("configured Page mismatch remains 403 and does not fetch the lead", async () => {
+  const state = testState();
+  const response = await post(
+    createTestApp(state, { expectedPageId: () => "999" }),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+  );
+  assert.equal(response.status, 403);
+  assert.equal(code(state), "configured_page_id_mismatch");
+  assert.equal(state.calls.fetch, 0);
+});
+
+test("Graph HTTP errors retain their status but log only allowlisted status/category", async () => {
+  const state = testState();
+  const response = await post(
+    createTestApp(state, { fetchLead: async () => { throw new Error("meta_graph_http_400"); } }),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+  );
+  assert.equal(response.status, 400);
+  assert.equal(code(state), "graph_lead_fetch_http_failure");
+  assert.deepEqual(state.events[0], {
+    event: "meta_webhook",
+    requestId: state.events[0].requestId,
+    stage: "graph_fetch",
+    reasonCode: "graph_lead_fetch_http_failure",
+    httpStatus: 400,
+    upstreamHttpStatus: 400,
+    errorCategory: "graph_http_4xx",
+  });
+  assert.equal(response.text.includes("meta_graph_http_400"), false);
+});
+
+test("persistence failures retain 503 and never log database error text", async () => {
+  const state = testState();
+  const response = await post(
+    createTestApp(state, { persistLead: async () => { throw new Error("SENTINEL_DATABASE_PII_TOKEN"); } }),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+  );
+  assert.equal(response.status, 503);
+  assert.equal(code(state), "database_persistence_failed");
+  assert.equal(JSON.stringify(state.events).includes("SENTINEL_DATABASE_PII_TOKEN"), false);
+  assert.equal(response.text.includes("SENTINEL_DATABASE_PII_TOKEN"), false);
+});
+
+test("success emits only a success event and a server-generated correlation ID", async () => {
+  const state = testState();
+  const privateBody = {
+    object: "page",
+    entry: [{
+      id: "111",
+      changes: [{
+        field: "leadgen",
+        value: {
+          leadgen_id: "222",
+          page_id: "111",
+          form_id: "333",
+          name: "SENTINEL_PERSON_NAME",
+          email: "SENTINEL_PERSON_EMAIL",
+          phone: "SENTINEL_PERSON_PHONE",
+        },
+      }],
+    }],
+  };
+  const response = await post(createTestApp(state), JSON.stringify(privateBody), TEST_SIGNATURE);
+  assert.equal(response.status, 200);
+  assert.deepEqual(state.events[0], {
+    event: "meta_webhook",
+    requestId: state.events[0].requestId,
+    outcome: "success",
+  });
+  assert.equal(JSON.stringify(state.events).includes("SENTINEL_PERSON"), false);
+  assert.equal(state.calls.persist, 1);
+});
+
+test("diagnostics never include signatures, payload fields, identifiers, or arbitrary exception text", async () => {
+  const state = testState();
+  const response = await post(
+    createTestApp(state, {
+      fetchLead: async () => {
+        throw new Error("https://example.invalid/path?access_token=SENTINEL_TOKEN email=SENTINEL_EMAIL id=SENTINEL_LEAD");
+      },
+    }),
+    JSON.stringify({
+      entry: [{
+        id: "111",
+        changes: [{
+          field: "leadgen",
+          value: { leadgen_id: "222", page_id: "111", email: "SENTINEL_EMAIL", phone: "SENTINEL_PHONE" },
+        }],
+      }],
+    }),
+    `sha256=${"b".repeat(64)}`,
+  );
+  assert.equal(response.status, 503);
+  const serialized = JSON.stringify(state.events);
+  for (const sentinel of ["SENTINEL_TOKEN", "SENTINEL_EMAIL", "SENTINEL_LEAD", "SENTINEL_PHONE", "example.invalid"]) {
+    assert.equal(serialized.includes(sentinel), false);
+  }
+});
+
+test("webhook path detection ignores query strings and does not capture unrelated routes", () => {
+  const webhook = { method: "POST", path: META_LEADGEN_WEBHOOK_PATH } as Request;
+  const other = { method: "POST", path: "/api/other" } as Request;
+  assert.equal(isMetaLeadgenWebhookRequest(webhook), true);
+  assert.equal(isMetaLeadgenWebhookRequest(other), false);
+});
