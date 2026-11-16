@@ -79,6 +79,7 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
            counselling_submitted_at timestamptz,counselling_delivery_status text NOT NULL DEFAULT 'not_applicable',
            counselling_delivery_attempts integer NOT NULL DEFAULT 0,
            counselling_delivery_last_attempt_at timestamptz,counselling_delivery_last_result text,
+            counselling_delivery_last_verified_at timestamptz,counselling_delivery_last_verified_by integer,
            submission_source text NOT NULL DEFAULT 'public_form',submission_idempotency_key text,
            submission_payload_hash text,lead_id uuid
          );
@@ -222,6 +223,18 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
         await assertCrmMetaPhoneIdentityDiagnosticsPostconditions(db, namespace);
         await assertCrmMetaLeadAdsPostconditions(db, namespace);
         assert.deepEqual(
+          (await db.query(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM admissions_leads row_data",
+          )).rows[0].rows,
+          baseRowsBeforeMetaMigration.leads,
+        );
+        assert.deepEqual(
+          (await db.query(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM inquiries row_data",
+          )).rows[0].rows,
+          baseRowsBeforeMetaMigration.inquiries,
+        );
+        assert.deepEqual(
           (await db.query(`
             SELECT COALESCE(jsonb_agg(jsonb_build_object(
               'meta_lead_id',meta_lead_id,'page_id',page_id,'state',state,'error_code',error_code
@@ -282,18 +295,21 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
           `)).rows[0],
           storedPhoneDiagnostics,
         );
-        assert.deepEqual(
-          (await db.query(
-            "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM admissions_leads row_data",
-          )).rows[0].rows,
-          baseRowsBeforeMetaMigration.leads,
+        await db.query(
+          "DELETE FROM admissions_lead_touchpoints WHERE inquiry_id=$1",
+          [savedMetaLead.inquiryId],
         );
-        assert.deepEqual(
-          (await db.query(
-            "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM inquiries row_data",
-          )).rows[0].rows,
-          baseRowsBeforeMetaMigration.inquiries,
+        await db.query(
+          "DELETE FROM admissions_meta_lead_links WHERE meta_lead_id='diagnostic-meta-lead'",
         );
+        await db.query("DELETE FROM inquiries WHERE id=$1", [savedMetaLead.inquiryId]);
+        await db.query(`
+          SELECT setval(
+            'inquiry_ids',
+            COALESCE((SELECT max(id) FROM inquiries),1),
+            EXISTS(SELECT 1 FROM inquiries)
+          )
+        `);
       const appUrl = new URL(target.url);
       appUrl.username = "aichm_test_app_login";
       appUrl.password = "";
