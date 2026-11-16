@@ -1,4 +1,5 @@
 import { createHmac, createHash, timingSafeEqual } from "node:crypto";
+import { inspectIndianMobile } from "@shared/indian-mobile";
 
 export const META_CONFIG_NAMES = {
   pixel: ["META_PIXEL_ID"],
@@ -55,18 +56,59 @@ export function isPublicAdmissionsPath(pathname: string) {
   return pathname === "/" || pathname === "/vsl" || pathname === "/vsl-video" || pathname === "/counselling";
 }
 
-export function normalizeMetaFieldData(input: unknown) {
-  if (!Array.isArray(input)) return { name: "", email: "", phone: "", programInterest: "Meta Instant Form Enquiry" };
+const PHONE_FIELD_PRECEDENCE = ["phone_number", "mobile_phone", "whatsapp_number"] as const;
+type MetaPhoneField = typeof PHONE_FIELD_PRECEDENCE[number];
+type MetaPhoneFieldState = "missing" | "blank" | "populated";
+type MappedMetaFields = {
+  name: string;
+  email: string;
+  phone: string;
+  programInterest: string;
+};
+
+export type MetaPhoneIdentityDiagnostics = {
+  fieldStates: Record<MetaPhoneField, MetaPhoneFieldState>;
+  normalizationOutcome:
+    | "valid"
+    | "no_phone_field"
+    | "phone_fields_blank"
+    | "invalid_characters"
+    | "invalid_length"
+    | "invalid_mobile_prefix";
+  selectedField: MetaPhoneField | null;
+  fallbackAttempted: boolean;
+  invalidHigherPriorityBlockedFallback: boolean;
+};
+
+const DEFAULT_META_FIELDS: MappedMetaFields = {
+  name: "",
+  email: "",
+  phone: "",
+  programInterest: "Meta Instant Form Enquiry",
+};
+
+function parseMetaFieldData(input: unknown): {
+  mapped: MappedMetaFields;
+  phoneIdentityDiagnostics: MetaPhoneIdentityDiagnostics;
+} {
   const result: Record<string, string> = {};
-  for (const item of input) {
+  const phoneFieldSeen = new Set<MetaPhoneField>();
+  const phoneFieldPopulated = new Set<MetaPhoneField>();
+  for (const item of Array.isArray(input) ? input : []) {
     if (!item || typeof item !== "object") continue;
     const entry = item as { name?: unknown; values?: unknown };
     if (typeof entry.name !== "string" || !Array.isArray(entry.values)) continue;
+    const key = entry.name.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
+    if ((PHONE_FIELD_PRECEDENCE as readonly string[]).includes(key)) {
+      phoneFieldSeen.add(key as MetaPhoneField);
+    }
     const value = entry.values.find((v) => typeof v === "string" && v.trim());
     if (typeof value !== "string") continue;
-    const key = entry.name.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
     if (["full_name", "name", "first_name", "last_name", "email", "phone_number", "mobile_phone", "whatsapp_number", "program_interest", "course"].includes(key)) {
       result[key] = value.trim().slice(0, 500);
+      if ((PHONE_FIELD_PRECEDENCE as readonly string[]).includes(key)) {
+        phoneFieldPopulated.add(key as MetaPhoneField);
+      }
     }
   }
   const name = result.full_name ?? result.name
@@ -76,12 +118,45 @@ export function normalizeMetaFieldData(input: unknown) {
   // fall through; a nonblank value is selected before validation, meaning an
   // invalid higher-priority value cannot silently fall back to another number.
   const phone = result.phone_number ?? result.mobile_phone ?? result.whatsapp_number ?? "";
+  const selectedField = PHONE_FIELD_PRECEDENCE.find((field) => result[field] !== undefined) ?? null;
+  const fieldStates = Object.fromEntries(PHONE_FIELD_PRECEDENCE.map((field) => [
+    field,
+    phoneFieldPopulated.has(field) ? "populated" : phoneFieldSeen.has(field) ? "blank" : "missing",
+  ])) as Record<MetaPhoneField, MetaPhoneFieldState>;
+  const normalized = selectedField ? inspectIndianMobile(phone.slice(0, 32)) : null;
+  const selectedIndex = selectedField ? PHONE_FIELD_PRECEDENCE.indexOf(selectedField) : -1;
+  const invalidHigherPriorityBlockedFallback = Boolean(
+    selectedField &&
+      normalized?.canonical === null &&
+      PHONE_FIELD_PRECEDENCE.slice(selectedIndex + 1).some((field) => fieldStates[field] === "populated"),
+  );
   return {
-    name: name?.slice(0, 120) ?? "",
-    email: (result.email ?? "").slice(0, 320),
-    phone: phone.slice(0, 32),
-    programInterest: (result.program_interest ?? result.course ?? "Meta Instant Form Enquiry").slice(0, 200),
+    mapped: {
+      name: name?.slice(0, 120) ?? "",
+      email: (result.email ?? "").slice(0, 320),
+      phone: phone.slice(0, 32),
+      programInterest: (result.program_interest ?? result.course ?? "Meta Instant Form Enquiry").slice(0, 200),
+    },
+    phoneIdentityDiagnostics: {
+      fieldStates,
+      normalizationOutcome: normalized?.outcome ?? (
+        PHONE_FIELD_PRECEDENCE.every((field) => fieldStates[field] === "missing")
+          ? "no_phone_field"
+          : "phone_fields_blank"
+      ),
+      selectedField,
+      fallbackAttempted: selectedIndex > 0,
+      invalidHigherPriorityBlockedFallback,
+    },
   };
+}
+
+export function normalizeMetaFieldData(input: unknown): MappedMetaFields {
+  return parseMetaFieldData(input).mapped;
+}
+
+export function normalizeMetaFieldDataWithDiagnostics(input: unknown) {
+  return parseMetaFieldData(input);
 }
 
 export function isValidMetaChallenge(mode: unknown, challenge: unknown, suppliedToken: string, expectedToken: string | undefined) {

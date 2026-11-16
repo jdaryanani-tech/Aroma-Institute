@@ -9,6 +9,7 @@ const SAFE_STATUS_KEYS = [
   "canonicalPersonLinked",
   "metaLinkExists",
   "metaLinkStatus",
+  "phoneIdentityDiagnostics",
   "primarySourceLabel",
   "receivedAt",
   "reviewCode",
@@ -63,6 +64,13 @@ function createHarness(options: { metaTable?: boolean; errorCode?: string; linkS
           error_code: options.errorCode ?? "phone_unavailable_for_identity_link",
           received_at: "2026-11-15T14:18:13.177Z",
           lead_id: null,
+          phone_number_field_state: "populated",
+          mobile_phone_field_state: "missing",
+          whatsapp_number_field_state: "missing",
+          phone_normalization_outcome: "valid",
+          phone_selected_field: "phone_number",
+          phone_fallback_attempted: false,
+          phone_invalid_higher_priority_blocked_fallback: false,
           meta_lead_id: "PRIVATE_META_ID_MARKER",
           page_id: "PRIVATE_PAGE_ID_MARKER",
           form_id: "PRIVATE_FORM_ID_MARKER",
@@ -121,8 +129,9 @@ test("assigned admissions staff can read only assigned status; out-of-scope stat
     headers: { "x-test-role": "admissions", "x-test-user": "5" },
   });
   assert.equal(assigned.status, 200);
-  const assignedBody = await assigned.json() as unknown[];
+  const assignedBody = await assigned.json() as Array<Record<string, unknown>>;
   assert.equal(assignedBody.length, 1);
+  assert.equal("phoneIdentityDiagnostics" in assignedBody[0], false);
 
   const notAssigned = await fetch(`${base}inquiry%3A101`, {
     headers: { "x-test-role": "admissions", "x-test-user": "6" },
@@ -153,6 +162,17 @@ test("admin receives only allowlisted status fields and no contact, Meta ID, or 
     receivedAt: "2026-11-15T14:18:13.177Z",
     primarySourceLabel: "Meta Lead Ads",
     canonicalPersonLinked: false,
+    phoneIdentityDiagnostics: {
+      fieldStates: {
+        phone_number: "populated",
+        mobile_phone: "missing",
+        whatsapp_number: "missing",
+      },
+      normalizationOutcome: "valid",
+      selectedField: "phone_number",
+      fallbackAttempted: false,
+      invalidHigherPriorityBlockedFallback: false,
+    },
   });
   assert.doesNotMatch(JSON.stringify(body), /PRIVATE_|"(?:metaLeadId|pageId|formId|fieldData|payload|name|email|phone)"/i);
   assert.equal(harness.writes, 0);
@@ -171,6 +191,7 @@ test("status remains available when the broader marketing tables are unavailable
   assert.equal(body[0].metaLinkStatus, "review");
   assert.equal(body[0].reviewCode, "phone_unavailable_for_identity_link");
   assert.equal(body[0].primarySourceLabel, "Meta Lead Ads");
+  assert.equal(body[0].phoneIdentityDiagnostics != null, true);
 });
 
 test("missing Meta link table returns only a safe not-found status", async (t) => {
@@ -189,6 +210,7 @@ test("missing Meta link table returns only a safe not-found status", async (t) =
     receivedAt: null,
     primarySourceLabel: "Meta Lead Ads",
     canonicalPersonLinked: false,
+    phoneIdentityDiagnostics: null,
   }]);
 });
 

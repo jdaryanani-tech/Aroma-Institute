@@ -18,6 +18,10 @@ import {
   assertCrmMetaLeadAdsSchemaAbsent,
 } from "../server/db/crm-meta-migration-postconditions";
 import {
+  assertCrmMetaPhoneIdentityDiagnosticsPostconditions,
+  assertCrmMetaPhoneIdentityDiagnosticsSchemaAbsent,
+} from "../server/db/crm-meta-phone-identity-diagnostics-postconditions";
+import {
   assertCrmRuntimeAssignmentFunctionAbsent,
   assertCrmRuntimeRoleSeparationPostconditions,
 } from "../server/db/crm-runtime-role-postconditions";
@@ -66,12 +70,14 @@ const EXPECTED_MIGRATIONS = [
   "0015_crm_assignment_audit_invariants",
   "0016_crm_runtime_role_separation",
   "0017_meta_lead_ads_schema",
+  "0018_meta_phone_identity_diagnostics",
 ];
 const EXPECTED_FILES = [
   "../0014_crm_canonical_assignments.sql",
   "../0015_crm_assignment_audit_invariants.sql",
   "../0016_crm_runtime_role_separation.sql",
   "../0017_meta_lead_ads_schema.sql",
+  "../0018_meta_phone_identity_diagnostics.sql",
 ];
 const ADVISORY_LOCK_KEYS = [1095326536, 1128813875] as const;
 const BASE_COLUMNS: Record<string, string[]> = {
@@ -109,12 +115,18 @@ function validateRegistry(registry: Registry): void {
       "public.inquiries",
       "meta-schema:absent",
     ],
+    [
+      "ledger:0017_meta_lead_ads_schema",
+      "table:admissions_meta_lead_links",
+      "meta-phone-diagnostics:absent",
+    ],
   ];
   const expectedPostconditions = [
     "crm_assignments_v0014",
     "crm_assignment_invariants_v0015",
     "crm_runtime_role_separation_v0016",
     "crm_meta_lead_ads_v0017",
+    "crm_meta_phone_identity_diagnostics_v0018",
   ];
   if (
     registry.stream !== "aichm-crm-forward" ||
@@ -333,8 +345,8 @@ async function collectPlan(
   pending: Migration[];
   basePrerequisites: "present";
   schemaState: "absent" | "0014_complete" | "0014_0015_complete" | "0014_0015_0016_complete" |
-    "0014_0015_0016_0017_complete";
-  metaSchemaState: "absent" | "0017_complete";
+    "0014_0015_0016_0017_complete" | "0014_0015_0016_0017_0018_complete";
+  metaSchemaState: "absent" | "0017_complete" | "0018_complete";
   runtimeAccess: Awaited<ReturnType<typeof inspectReadOnlyRuntimeAccess>>;
 }> {
   setStage("prerequisiteSchemaDriftInspection");
@@ -369,10 +381,12 @@ async function collectPlan(
   const recorded15 = ledger.has(EXPECTED_MIGRATIONS[1]);
   const recorded16 = ledger.has(EXPECTED_MIGRATIONS[2]);
   const recorded17 = ledger.has(EXPECTED_MIGRATIONS[3]);
+  const recorded18 = ledger.has(EXPECTED_MIGRATIONS[4]);
   setStage("prerequisiteSchemaDriftInspection");
   if (recorded15 && !recorded14) fail("CRM_FORWARD_0014_LEDGER_PREREQUISITE_MISSING");
   if (recorded16 && !recorded15) fail("CRM_FORWARD_0015_LEDGER_PREREQUISITE_MISSING");
   if (recorded17 && !recorded16) fail("CRM_FORWARD_0016_LEDGER_PREREQUISITE_MISSING");
+  if (recorded18 && !recorded17) fail("CRM_FORWARD_0017_LEDGER_PREREQUISITE_MISSING");
   if (!recorded14) {
     if (rows.length) fail("CRM_FORWARD_UNKNOWN_LEDGER_ENTRY");
     await assertCrmAssignmentSchemaAbsent(
@@ -402,6 +416,11 @@ async function collectPlan(
   }
   if (recorded17) {
     await assertCrmMetaLeadAdsPostconditions(client, "public");
+    if (recorded18) {
+      await assertCrmMetaPhoneIdentityDiagnosticsPostconditions(client, "public");
+    } else {
+      await assertCrmMetaPhoneIdentityDiagnosticsSchemaAbsent(client, "public");
+    }
   } else {
     await assertCrmMetaLeadAdsSchemaAbsent(client, "public");
   }
@@ -417,11 +436,13 @@ async function collectPlan(
       : recorded15
         ? recorded16
           ? recorded17
-            ? "0014_0015_0016_0017_complete"
+              ? recorded18
+                ? "0014_0015_0016_0017_0018_complete"
+                : "0014_0015_0016_0017_complete"
             : "0014_0015_0016_complete"
           : "0014_0015_complete"
         : "0014_complete",
-    metaSchemaState: recorded17 ? "0017_complete" : "absent",
+    metaSchemaState: recorded18 ? "0018_complete" : recorded17 ? "0017_complete" : "absent",
     runtimeAccess,
   };
 }
@@ -675,6 +696,13 @@ async function applyPlan(
               );
               await assertCrmMetaLeadAdsPrerequisites(client, "public");
               await assertCrmMetaLeadAdsSchemaAbsent(client, "public");
+            } else if (migration.id === EXPECTED_MIGRATIONS[4]) {
+              const prerequisiteLedger = latestLedger.find(row => row.migration_id === EXPECTED_MIGRATIONS[3]);
+              if (prerequisiteLedger?.sha256 !== artifact(artifacts, EXPECTED_MIGRATIONS[3]).hash) {
+                fail("CRM_FORWARD_0017_LEDGER_PREREQUISITE_MISSING");
+              }
+              await assertCrmMetaLeadAdsPostconditions(client, "public");
+              await assertCrmMetaPhoneIdentityDiagnosticsSchemaAbsent(client, "public");
             } else {
               await assertCrmAssignmentSchemaAbsent(
                 client,
@@ -702,15 +730,25 @@ async function applyPlan(
               artifact(artifacts, EXPECTED_MIGRATIONS[0]).sql,
               artifact(artifacts, EXPECTED_MIGRATIONS[1]).sql,
             );
-            if (migration.id === EXPECTED_MIGRATIONS[2] || migration.id === EXPECTED_MIGRATIONS[3]) {
+            if (
+              migration.id === EXPECTED_MIGRATIONS[2] ||
+              migration.id === EXPECTED_MIGRATIONS[3] ||
+              migration.id === EXPECTED_MIGRATIONS[4]
+            ) {
               await assertCrmRuntimeRoleSeparationPostconditions(
                 client,
                 "public",
                 artifact(artifacts, EXPECTED_MIGRATIONS[2]).sql,
               );
             }
-            if (migration.id === EXPECTED_MIGRATIONS[3]) {
+            if (
+              migration.id === EXPECTED_MIGRATIONS[3] ||
+              migration.id === EXPECTED_MIGRATIONS[4]
+            ) {
               await assertCrmMetaLeadAdsPostconditions(client, "public");
+            }
+            if (migration.id === EXPECTED_MIGRATIONS[4]) {
+              await assertCrmMetaPhoneIdentityDiagnosticsPostconditions(client, "public");
             }
             assertCrmForwardDevelopmentIdentity(await inspectIdentity(client));
             setStage("migrationLedgerInsertCommit", migration.id);

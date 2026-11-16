@@ -334,6 +334,7 @@ test("CRM migrations are registered only in their separate forward stream", asyn
     "0015_crm_assignment_audit_invariants",
     "0016_crm_runtime_role_separation",
     "0017_meta_lead_ads_schema",
+    "0018_meta_phone_identity_diagnostics",
   ]);
   assert.ok(registry.migrations.every(migration => migration.file.startsWith("../")));
   assert.equal(mainJournalText.includes("0014_crm_canonical_assignments"), false);
@@ -344,6 +345,8 @@ test("CRM migrations are registered only in their separate forward stream", asyn
   assert.equal(aichmJournalText.includes("0016_crm_runtime_role_separation"), false);
   assert.equal(mainJournalText.includes("0017_meta_lead_ads_schema"), false);
   assert.equal(aichmJournalText.includes("0017_meta_lead_ads_schema"), false);
+  assert.equal(mainJournalText.includes("0018_meta_phone_identity_diagnostics"), false);
+  assert.equal(aichmJournalText.includes("0018_meta_phone_identity_diagnostics"), false);
 });
 
 test("CRM Meta forward migration preserves the historical schema semantics without rewriting its journal", async () => {
@@ -396,13 +399,30 @@ test("CRM Meta forward migration preserves the historical schema semantics witho
   assert.match(forward, /ALTER TABLE public\.admissions_marketing_consent_events OWNER TO aichm_crm_owner/i);
   assert.match(forward, /GRANT SELECT, INSERT, UPDATE ON TABLE[\s\S]*TO aichm_app_runtime/i);
   assert.match(forward, /GRANT SELECT, INSERT ON TABLE[\s\S]*TO aichm_app_runtime/i);
-  assert.equal(registry.migrations.at(-1)?.postconditions, "crm_meta_lead_ads_v0017");
-  assert.deepEqual(registry.migrations.at(-1)?.requires, [
+  const metaSchemaMigration = registry.migrations.find(migration => migration.id === "0017_meta_lead_ads_schema");
+  assert.equal(metaSchemaMigration?.postconditions, "crm_meta_lead_ads_v0017");
+  assert.deepEqual(metaSchemaMigration?.requires, [
     "ledger:0016_crm_runtime_role_separation",
     "public.admissions_leads",
     "public.inquiries",
     "meta-schema:absent",
   ]);
+  const phoneDiagnostics = await readFile("migrations/0018_meta_phone_identity_diagnostics.sql", "utf8");
+  const phoneDiagnosticsMigration = registry.migrations.find(
+    migration => migration.id === "0018_meta_phone_identity_diagnostics",
+  );
+  assert.equal(phoneDiagnosticsMigration?.postconditions, "crm_meta_phone_identity_diagnostics_v0018");
+  assert.deepEqual(phoneDiagnosticsMigration?.requires, [
+    "ledger:0017_meta_lead_ads_schema",
+    "table:admissions_meta_lead_links",
+    "meta-phone-diagnostics:absent",
+  ]);
+  assert.match(phoneDiagnostics, /ADD COLUMN phone_number_field_state text/i);
+  assert.match(phoneDiagnostics, /ADD COLUMN whatsapp_number_field_state text/i);
+  assert.match(phoneDiagnostics, /ADD CONSTRAINT admissions_meta_lead_links_phone_diag_ck CHECK/i);
+  assert.match(phoneDiagnostics, /existing rows remain NULL/i);
+  assert.doesNotMatch(phoneDiagnostics, /\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\s+(?:INTO\s+)?(?:public\.)?(?:admissions_leads|inquiries|admissions_meta_lead_links)\b/i);
+  assert.doesNotMatch(phoneDiagnostics, /\b(?:GRANT|REVOKE)\b/i);
 });
 
 test("CRM forward runner previews by default and applies only under explicit confirmation and lock", async () => {
@@ -446,5 +466,6 @@ test("isolated CRM test launcher bounds child work and cleans up after signals",
   assert.match(source, /scratchPreserved/);
   assert.match(source, /"0016_crm_runtime_role_separation\.sql"/);
   assert.match(source, /"0017_meta_lead_ads_schema\.sql"/);
+  assert.match(source, /"0018_meta_phone_identity_diagnostics\.sql"/);
   assert.match(source, /metaMigrationReappliedForIdempotency: true/);
 });

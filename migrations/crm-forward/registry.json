@@ -44,6 +44,16 @@
         "meta-schema:absent"
       ],
       "postconditions": "crm_meta_lead_ads_v0017"
+    },
+    {
+      "id": "0018_meta_phone_identity_diagnostics",
+      "file": "../0018_meta_phone_identity_diagnostics.sql",
+      "requires": [
+        "ledger:0017_meta_lead_ads_schema",
+        "table:admissions_meta_lead_links",
+        "meta-phone-diagnostics:absent"
+      ],
+      "postconditions": "crm_meta_phone_identity_diagnostics_v0018"
     }
   ]
 }

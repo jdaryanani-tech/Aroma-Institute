@@ -5,6 +5,7 @@ import {
   META_CONSENT_POLICY_VERSION, buildMetaCapiPayload, capiRetryDelayMs, getMetaReadiness,
   hasValidMetaConsent, isAcknowledgedCapiResponse, isPublicAdmissionsPath,
   isValidMetaChallenge, metaLeadIdempotencyKey, normalizeMetaFieldData,
+  normalizeMetaFieldDataWithDiagnostics,
   safeMetaWebhookFailureStatus, sanitizeMetaCustomData, verifyMetaWebhookSignature,
 } from "./config";
 import { parseMetaAttribution } from "./attribution";
@@ -126,6 +127,85 @@ test("a nonblank invalid higher-priority phone does not fall through or yield an
   ]);
   assert.equal(invalidMobile.phone, "0000000000");
   assert.equal(normalizeIndianMobile(invalidMobile.phone), null);
+});
+
+test("phone diagnostics expose only field presence and safe normalization decisions", () => {
+  const missing = normalizeMetaFieldDataWithDiagnostics(undefined).phoneIdentityDiagnostics;
+  assert.deepEqual(missing, {
+    fieldStates: {
+      phone_number: "missing",
+      mobile_phone: "missing",
+      whatsapp_number: "missing",
+    },
+    normalizationOutcome: "no_phone_field",
+    selectedField: null,
+    fallbackAttempted: false,
+    invalidHigherPriorityBlockedFallback: false,
+  });
+
+  const blank = normalizeMetaFieldDataWithDiagnostics([
+    { name: "phone_number", values: ["", "   "] },
+    { name: "mobile_phone", values: [" "] },
+    { name: "whatsapp_number", values: [] },
+  ]).phoneIdentityDiagnostics;
+  assert.deepEqual(blank.fieldStates, {
+    phone_number: "blank",
+    mobile_phone: "blank",
+    whatsapp_number: "blank",
+  });
+  assert.equal(blank.normalizationOutcome, "phone_fields_blank");
+
+  const aliases = [
+    ["phone_number", "+91 90000 00011"],
+    ["mobile_phone", "91-90000-00012"],
+    ["whatsapp_number", "9000000013"],
+  ] as const;
+  for (const [field, value] of aliases) {
+    const diagnostics = normalizeMetaFieldDataWithDiagnostics([
+      { name: field, values: [value] },
+    ]).phoneIdentityDiagnostics;
+    assert.equal(diagnostics.fieldStates[field], "populated");
+    assert.equal(diagnostics.normalizationOutcome, "valid");
+    assert.equal(diagnostics.selectedField, field);
+    assert.equal(diagnostics.fallbackAttempted, field !== "phone_number");
+    assert.equal(diagnostics.invalidHigherPriorityBlockedFallback, false);
+  }
+
+  const blankPrimaryFallsBack = normalizeMetaFieldDataWithDiagnostics([
+    { name: "phone_number", values: ["  "] },
+    { name: "mobile_phone", values: [""] },
+    { name: "whatsapp_number", values: ["9000000014"] },
+  ]).phoneIdentityDiagnostics;
+  assert.equal(blankPrimaryFallsBack.selectedField, "whatsapp_number");
+  assert.equal(blankPrimaryFallsBack.fallbackAttempted, true);
+  assert.equal(blankPrimaryFallsBack.invalidHigherPriorityBlockedFallback, false);
+
+  const invalidPrimaryBlocksFallback = normalizeMetaFieldDataWithDiagnostics([
+    { name: "phone_number", values: ["private-invalid-phone-value"] },
+    { name: "mobile_phone", values: ["9000000015"] },
+    { name: "whatsapp_number", values: ["9000000016"] },
+  ]).phoneIdentityDiagnostics;
+  assert.equal(invalidPrimaryBlocksFallback.selectedField, "phone_number");
+  assert.equal(invalidPrimaryBlocksFallback.normalizationOutcome, "invalid_characters");
+  assert.equal(invalidPrimaryBlocksFallback.fallbackAttempted, false);
+  assert.equal(invalidPrimaryBlocksFallback.invalidHigherPriorityBlockedFallback, true);
+
+  const invalidLengths = normalizeMetaFieldDataWithDiagnostics([
+    { name: "mobile_phone", values: ["123"] },
+  ]).phoneIdentityDiagnostics;
+  assert.equal(invalidLengths.normalizationOutcome, "invalid_length");
+
+  const invalidPrefix = normalizeMetaFieldDataWithDiagnostics([
+    { name: "whatsapp_number", values: ["0000000000"] },
+  ]).phoneIdentityDiagnostics;
+  assert.equal(invalidPrefix.normalizationOutcome, "invalid_mobile_prefix");
+
+  const serialized = JSON.stringify([
+    missing, blank, ...aliases.map(([field, value]) =>
+      normalizeMetaFieldDataWithDiagnostics([{ name: field, values: [value] }]).phoneIdentityDiagnostics),
+    blankPrimaryFallsBack, invalidPrimaryBlocksFallback, invalidLengths, invalidPrefix,
+  ]);
+  assert.doesNotMatch(serialized, /private-invalid-phone-value|90000|90000000|\+91|91-/);
 });
 
 test("CAPI payload omits identifiers and only accepts safe custom fields", () => {

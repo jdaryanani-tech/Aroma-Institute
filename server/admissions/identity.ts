@@ -5,7 +5,7 @@ import { admissionsLeads, inquiries, type InsertCounsellingInquiry, type NewInqu
 import { normalizeIndianMobile } from "@shared/indian-mobile";
 import { recordRegistrationFollowUp } from "./follow-up";
 import { enqueueMetaEvent, hasMarketingConsent, linkVisitorConsentToLead, metaSchemaReady, recordLeadTouchpoint, type MetaAttribution } from "../meta/events";
-import { metaLeadIdempotencyKey, normalizeMetaFieldData } from "../meta/config";
+import { metaLeadIdempotencyKey, normalizeMetaFieldDataWithDiagnostics } from "../meta/config";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type AdmissionsDatabase = Pick<typeof db, "transaction" | "select" | "insert" | "update" | "execute">;
@@ -215,7 +215,7 @@ export async function saveMetaInstantLead(input: {
   metaLeadId: string; pageId: string; formId: string | null; campaignId: string | null;
   adId: string | null; adsetId: string | null; leadCreatedAt: Date | null; fieldData: unknown;
 }, now = new Date(), database: AdmissionsDatabase = db) {
-  const mapped = normalizeMetaFieldData(input.fieldData);
+  const { mapped, phoneIdentityDiagnostics } = normalizeMetaFieldDataWithDiagnostics(input.fieldData);
   const safeName = mapped.name.trim().length >= 2 ? mapped.name.trim() : "Meta form lead";
   const canonicalPhone = normalizeIndianMobile(mapped.phone);
   const safePhone = canonicalPhone ? `+${canonicalPhone}` : "";
@@ -237,14 +237,38 @@ export async function saveMetaInstantLead(input: {
       submissionSource: "meta_instant_form",
       counsellingDeliveryStatus: "not_applicable",
     }).returning();
-    await tx.insert(admissionsMetaLeadLinks).values({
+    const diagnosticSchemaState = await tx.execute(sql`
+      SELECT count(*) = 7 AS ready
+      FROM pg_attribute
+      WHERE attrelid=to_regclass('admissions_meta_lead_links')
+        AND attnum>0 AND NOT attisdropped
+        AND attname=ANY(ARRAY[
+          'phone_number_field_state','mobile_phone_field_state','whatsapp_number_field_state',
+          'phone_normalization_outcome','phone_selected_field','phone_fallback_attempted',
+          'phone_invalid_higher_priority_blocked_fallback'
+        ]::text[])
+    `) as unknown as { rows?: Array<{ ready?: boolean }> };
+    const metaLinkValues: typeof admissionsMetaLeadLinks.$inferInsert = {
       metaLeadId: input.metaLeadId, pageId: input.pageId, formId: input.formId,
       campaignId: input.campaignId, adId: input.adId, adsetId: input.adsetId,
       leadCreatedAt: input.leadCreatedAt, receivedAt: now,
       leadId: lead?.id ?? null, inquiryId: inquiry.id,
       state: canonicalPhone ? "processed" : "review",
       errorCode: canonicalPhone ? null : "phone_unavailable_for_identity_link",
-    });
+    };
+    if (diagnosticSchemaState.rows?.[0]?.ready === true) {
+      Object.assign(metaLinkValues, {
+        phoneNumberFieldState: phoneIdentityDiagnostics.fieldStates.phone_number,
+        mobilePhoneFieldState: phoneIdentityDiagnostics.fieldStates.mobile_phone,
+        whatsappNumberFieldState: phoneIdentityDiagnostics.fieldStates.whatsapp_number,
+        phoneNormalizationOutcome: phoneIdentityDiagnostics.normalizationOutcome,
+        phoneSelectedField: phoneIdentityDiagnostics.selectedField,
+        phoneFallbackAttempted: phoneIdentityDiagnostics.fallbackAttempted,
+        phoneInvalidHigherPriorityBlockedFallback:
+          phoneIdentityDiagnostics.invalidHigherPriorityBlockedFallback,
+      });
+    }
+    await tx.insert(admissionsMetaLeadLinks).values(metaLinkValues);
     await tx.insert(admissionsLeadTouchpoints).values({
       leadId: lead?.id ?? null, inquiryId: inquiry.id,
       sourceChannel: "meta_instant_form", source: "meta",

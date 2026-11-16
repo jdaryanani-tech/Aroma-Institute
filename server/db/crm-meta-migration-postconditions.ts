@@ -21,6 +21,18 @@ export const CRM_META_LEAD_ADS_INDEXES = [
   "admissions_meta_outbox_lead_idx",
 ] as const;
 
+export const CRM_META_PHONE_IDENTITY_DIAGNOSTIC_COLUMNS = [
+  "phone_number_field_state",
+  "mobile_phone_field_state",
+  "whatsapp_number_field_state",
+  "phone_normalization_outcome",
+  "phone_selected_field",
+  "phone_fallback_attempted",
+  "phone_invalid_higher_priority_blocked_fallback",
+] as const;
+export const CRM_META_PHONE_IDENTITY_DIAGNOSTIC_CONSTRAINT =
+  "admissions_meta_lead_links_phone_diag_ck";
+
 type ColumnSpec = { type: string; notNull: boolean; defaultExpression: string | null };
 type IndexSpec = {
   table: string;
@@ -387,8 +399,12 @@ export async function assertCrmMetaLeadAdsPostconditions(
     LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
     WHERE n.nspname=$1 AND c.relname=ANY($2::text[])
       AND a.attnum>0 AND NOT a.attisdropped
+      AND NOT (
+        c.relname='admissions_meta_lead_links'
+        AND a.attname=ANY($3::text[])
+      )
     ORDER BY c.relname,a.attnum
-  `, [schema, CRM_META_LEAD_ADS_TABLES]);
+  `, [schema, CRM_META_LEAD_ADS_TABLES, CRM_META_PHONE_IDENTITY_DIAGNOSTIC_COLUMNS]);
   const expectedColumnCount = Object.values(EXPECTED_COLUMNS).reduce(
     (sum, tableColumns) => sum + Object.keys(tableColumns).length,
     0,
@@ -434,8 +450,9 @@ export async function assertCrmMetaLeadAdsPostconditions(
     LEFT JOIN pg_class rt ON rt.oid=k.confrelid
     LEFT JOIN pg_namespace rn ON rn.oid=rt.relnamespace
     WHERE n.nspname=$1 AND t.relname=ANY($2::text[])
+      AND k.conname<>$3
     ORDER BY t.relname,k.conname
-  `, [schema, CRM_META_LEAD_ADS_TABLES]);
+  `, [schema, CRM_META_LEAD_ADS_TABLES, CRM_META_PHONE_IDENTITY_DIAGNOSTIC_CONSTRAINT]);
   if (constraints.length !== Object.keys(EXPECTED_CONSTRAINTS).length) {
     fail("CRM_META_SCHEMA_CONSTRAINTS_DRIFTED", "field=constraint_count");
   }

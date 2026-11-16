@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, doublePrecision, jsonb, uniqueIndex, index, check } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, integer, doublePrecision, jsonb, boolean, uniqueIndex, index, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 export const admissionsLeads = pgTable("admissions_leads", {
@@ -152,11 +152,43 @@ export const admissionsMetaLeadLinks = pgTable("admissions_meta_lead_links", {
   inquiryId: integer("inquiry_id"),
   state: text("state").notNull().default("processed"),
   errorCode: text("error_code"),
+  phoneNumberFieldState: text("phone_number_field_state"),
+  mobilePhoneFieldState: text("mobile_phone_field_state"),
+  whatsappNumberFieldState: text("whatsapp_number_field_state"),
+  phoneNormalizationOutcome: text("phone_normalization_outcome"),
+  phoneSelectedField: text("phone_selected_field"),
+  phoneFallbackAttempted: boolean("phone_fallback_attempted"),
+  phoneInvalidHigherPriorityBlockedFallback: boolean("phone_invalid_higher_priority_blocked_fallback"),
 }, (t) => [
   index("admissions_meta_lead_link_lead_idx").on(t.leadId),
   index("admissions_meta_lead_link_inquiry_idx").on(t.inquiryId),
   check("admissions_meta_lead_link_state", sql`${t.state} IN ('processed','review','failed')`),
   check("admissions_meta_lead_link_inquiry_required", sql`${t.inquiryId} IS NOT NULL OR ${t.state} IN ('review','failed')`),
+  check("admissions_meta_lead_links_phone_diag_ck", sql`
+    (
+      ${t.phoneNumberFieldState} IS NULL AND
+      ${t.mobilePhoneFieldState} IS NULL AND
+      ${t.whatsappNumberFieldState} IS NULL AND
+      ${t.phoneNormalizationOutcome} IS NULL AND
+      ${t.phoneSelectedField} IS NULL AND
+      ${t.phoneFallbackAttempted} IS NULL AND
+      ${t.phoneInvalidHigherPriorityBlockedFallback} IS NULL
+    ) OR (
+      ${t.phoneNumberFieldState} IS NOT NULL AND
+      ${t.mobilePhoneFieldState} IS NOT NULL AND
+      ${t.whatsappNumberFieldState} IS NOT NULL AND
+      ${t.phoneNormalizationOutcome} IS NOT NULL AND
+      ${t.phoneNumberFieldState} IN ('missing','blank','populated') AND
+      ${t.mobilePhoneFieldState} IN ('missing','blank','populated') AND
+      ${t.whatsappNumberFieldState} IN ('missing','blank','populated') AND
+      ${t.phoneNormalizationOutcome} IN (
+        'valid','no_phone_field','phone_fields_blank','invalid_characters','invalid_length','invalid_mobile_prefix'
+      ) AND
+      (${t.phoneSelectedField} IS NULL OR ${t.phoneSelectedField} IN ('phone_number','mobile_phone','whatsapp_number')) AND
+      ${t.phoneFallbackAttempted} IS NOT NULL AND
+      ${t.phoneInvalidHigherPriorityBlockedFallback} IS NOT NULL
+    )
+  `),
 ]);
 
 // CAPI payloads are intentionally limited to event metadata/custom data.

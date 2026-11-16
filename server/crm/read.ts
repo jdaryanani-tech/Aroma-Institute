@@ -1,4 +1,4 @@
-import { CRM_STAGES, type CrmActivity, type CrmDetail, type CrmFilters, type CrmList, type CrmMetaCaptureStatus, type CrmOverview } from "@shared/crm";
+import { CRM_STAGES, type CrmActivity, type CrmDetail, type CrmFilters, type CrmList, type CrmMetaCaptureStatus, type CrmMetaPhoneIdentityDiagnostics, type CrmOverview } from "@shared/crm";
 import { crmModelSql, inspectCrmSchema, iso, leadDto, schemaWarnings, type CrmSchema, type SqlDb } from "./model";
 import { CrmError } from "./evidence";
 import { readSupabaseConversationPage } from "../db/supabase-avni-readonly";
@@ -28,6 +28,16 @@ const META_CAPTURE_SOURCE_LABELS: Record<CrmSourceBucket, CrmMetaCaptureStatus["
 
 const META_CAPTURE_LINK_STATES = new Set(["processed", "review", "failed"]);
 const META_CAPTURE_REVIEW_CODES = new Set(["phone_unavailable_for_identity_link"]);
+const META_PHONE_FIELD_STATES = new Set(["missing", "blank", "populated"]);
+const META_PHONE_NORMALIZATION_OUTCOMES = new Set([
+  "valid",
+  "no_phone_field",
+  "phone_fields_blank",
+  "invalid_characters",
+  "invalid_length",
+  "invalid_mobile_prefix",
+]);
+const META_PHONE_FIELDS = new Set(["phone_number", "mobile_phone", "whatsapp_number"]);
 
 function safeMetaCaptureLinkState(value: unknown): CrmMetaCaptureStatus["metaLinkStatus"] {
   if (typeof value !== "string") return "unknown";
@@ -41,6 +51,39 @@ function safeMetaCaptureReviewCode(value: unknown): CrmMetaCaptureStatus["review
   return META_CAPTURE_REVIEW_CODES.has(value)
     ? value as "phone_unavailable_for_identity_link"
     : "other";
+}
+
+function safeMetaPhoneIdentityDiagnostics(
+  row: Record<string, unknown>,
+): CrmMetaPhoneIdentityDiagnostics | null {
+  const fieldStates = {
+    phone_number: row.phone_number_field_state,
+    mobile_phone: row.mobile_phone_field_state,
+    whatsapp_number: row.whatsapp_number_field_state,
+  };
+  const normalizationOutcome = row.phone_normalization_outcome;
+  const selectedField = row.phone_selected_field;
+  const fallbackAttempted = row.phone_fallback_attempted;
+  const invalidHigherPriorityBlockedFallback = row.phone_invalid_higher_priority_blocked_fallback;
+  if (
+    Object.values(fieldStates).every(value => value == null) &&
+    normalizationOutcome == null && selectedField == null &&
+    fallbackAttempted == null && invalidHigherPriorityBlockedFallback == null
+  ) return null;
+  if (
+    !Object.values(fieldStates).every(value => typeof value === "string" && META_PHONE_FIELD_STATES.has(value)) ||
+    typeof normalizationOutcome !== "string" || !META_PHONE_NORMALIZATION_OUTCOMES.has(normalizationOutcome) ||
+    !(selectedField === null || typeof selectedField === "string" && META_PHONE_FIELDS.has(selectedField)) ||
+    typeof fallbackAttempted !== "boolean" ||
+    typeof invalidHigherPriorityBlockedFallback !== "boolean"
+  ) return null;
+  return {
+    fieldStates: fieldStates as CrmMetaPhoneIdentityDiagnostics["fieldStates"],
+    normalizationOutcome: normalizationOutcome as CrmMetaPhoneIdentityDiagnostics["normalizationOutcome"],
+    selectedField: selectedField as CrmMetaPhoneIdentityDiagnostics["selectedField"],
+    fallbackAttempted,
+    invalidHigherPriorityBlockedFallback,
+  };
 }
 
 /**
@@ -73,15 +116,24 @@ export async function readCrmMetaCaptureStatus(
   );
   if (!inquiries.length) return [];
 
+  const adminDiagnostics = crmAccessLevel(principal) === "admin";
   const { rows: [schemaState] } = await db.query(
     "SELECT to_regclass('admissions_meta_lead_links') IS NOT NULL AS available",
   );
   const links = schemaState?.available
     ? (await db.query(
-      `SELECT inquiry_id, state, error_code, received_at, lead_id
-       FROM admissions_meta_lead_links
-       WHERE inquiry_id = ANY($1::integer[])
-       ORDER BY received_at DESC`,
+      `SELECT ml.inquiry_id, ml.state, ml.error_code, ml.received_at, ml.lead_id
+       ${adminDiagnostics ? `, to_jsonb(ml)->'phone_number_field_state' AS phone_number_field_state,
+          to_jsonb(ml)->'mobile_phone_field_state' AS mobile_phone_field_state,
+          to_jsonb(ml)->'whatsapp_number_field_state' AS whatsapp_number_field_state,
+          to_jsonb(ml)->'phone_normalization_outcome' AS phone_normalization_outcome,
+          to_jsonb(ml)->'phone_selected_field' AS phone_selected_field,
+          to_jsonb(ml)->'phone_fallback_attempted' AS phone_fallback_attempted,
+          to_jsonb(ml)->'phone_invalid_higher_priority_blocked_fallback'
+            AS phone_invalid_higher_priority_blocked_fallback` : ""}
+       FROM admissions_meta_lead_links ml
+       WHERE ml.inquiry_id = ANY($1::integer[])
+       ORDER BY ml.received_at DESC`,
       [inquiryIds],
     )).rows
     : [];
@@ -101,6 +153,9 @@ export async function readCrmMetaCaptureStatus(
       receivedAt: link ? iso(link.received_at) : null,
       primarySourceLabel: META_CAPTURE_SOURCE_LABELS[source],
       canonicalPersonLinked: Boolean(inquiry.inquiry_lead_id || link?.lead_id),
+      ...(adminDiagnostics
+        ? { phoneIdentityDiagnostics: link ? safeMetaPhoneIdentityDiagnostics(link) : null }
+        : {}),
     };
   });
 }

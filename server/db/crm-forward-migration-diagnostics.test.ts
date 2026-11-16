@@ -147,6 +147,21 @@ test("0017 is an allowlisted migration ID and its prerequisite failure is saniti
   assert.doesNotMatch(JSON.stringify(diagnostic), /sensitive catalog details/);
 });
 
+test("0018 diagnostics retain only the allowlisted migration ID and safe failure classification", () => {
+  const diagnostic = formatCrmForwardStageFailure(
+    "migrationPostcondition",
+    Object.assign(new Error("private catalog value"), {
+      code: "CRM_META_PHONE_DIAGNOSTICS_COLUMNS_DRIFTED",
+    }),
+    CORRELATION_ID,
+    "0018_meta_phone_identity_diagnostics",
+  );
+  assert.equal(diagnostic.migrationId, "0018_meta_phone_identity_diagnostics");
+  assert.equal(diagnostic.failureCategory, "schema_postcondition_drift");
+  assert.equal(diagnostic.failureCode, "CRM_META_PHONE_DIAGNOSTICS_COLUMNS_DRIFTED");
+  assert.doesNotMatch(JSON.stringify(diagnostic), /private catalog value/);
+});
+
 test("ledger diagnostics report control objects, row presence, migration status and checksum matches only", () => {
   const result = buildCrmForwardLedgerDiagnostics({
     schemaExists: true,
@@ -156,6 +171,7 @@ test("ledger diagnostics report control objects, row presence, migration status 
       { id: "0015_crm_assignment_audit_invariants", sha256: "b".repeat(64) },
       { id: "0016_crm_runtime_role_separation", sha256: "c".repeat(64) },
       { id: "0017_meta_lead_ads_schema", sha256: "e".repeat(64) },
+      { id: "0018_meta_phone_identity_diagnostics", sha256: "f".repeat(64) },
     ],
     ledgerRows: [
       { migration_id: "0014_crm_canonical_assignments", sha256: "a".repeat(64) },
@@ -172,6 +188,7 @@ test("ledger diagnostics report control objects, row presence, migration status 
       { id: "0015_crm_assignment_audit_invariants", status: "applied", checksumMatches: false },
       { id: "0016_crm_runtime_role_separation", status: "pending", checksumMatches: null },
       { id: "0017_meta_lead_ads_schema", status: "pending", checksumMatches: null },
+      { id: "0018_meta_phone_identity_diagnostics", status: "pending", checksumMatches: null },
     ],
   });
   const serialized = JSON.stringify(result);
@@ -187,6 +204,7 @@ test("ledger diagnostics report an absent empty ledger and redact unknown migrat
     registeredMigrations: [
       { id: "0014_crm_canonical_assignments", sha256: "a".repeat(64) },
       { id: "0017_meta_lead_ads_schema", sha256: "c".repeat(64) },
+      { id: "0018_meta_phone_identity_diagnostics", sha256: "d".repeat(64) },
       { id: "private_identifier", sha256: "b".repeat(64) },
     ],
     ledgerRows: [],
@@ -199,6 +217,7 @@ test("ledger diagnostics report an absent empty ledger and redact unknown migrat
     migrations: [
       { id: "0014_crm_canonical_assignments", status: "pending", checksumMatches: null },
       { id: "0017_meta_lead_ads_schema", status: "pending", checksumMatches: null },
+      { id: "0018_meta_phone_identity_diagnostics", status: "pending", checksumMatches: null },
       { id: "unrecognized", status: "pending", checksumMatches: null },
     ],
   });

@@ -124,6 +124,25 @@ export type CrmDetail = {
   };
 };
 
+export type CrmMetaPhoneFieldState = "missing" | "blank" | "populated";
+export type CrmMetaPhoneIdentityDiagnostics = {
+  fieldStates: {
+    phone_number: CrmMetaPhoneFieldState;
+    mobile_phone: CrmMetaPhoneFieldState;
+    whatsapp_number: CrmMetaPhoneFieldState;
+  };
+  normalizationOutcome:
+    | "valid"
+    | "no_phone_field"
+    | "phone_fields_blank"
+    | "invalid_characters"
+    | "invalid_length"
+    | "invalid_mobile_prefix";
+  selectedField: "phone_number" | "mobile_phone" | "whatsapp_number" | null;
+  fallbackAttempted: boolean;
+  invalidHigherPriorityBlockedFallback: boolean;
+};
+
 export type CrmMetaCaptureStatus = {
   metaLinkExists: boolean | null;
   metaLinkStatus: "processed" | "review" | "failed" | "unknown" | null;
@@ -131,6 +150,7 @@ export type CrmMetaCaptureStatus = {
   receivedAt: string | null;
   primarySourceLabel: "Meta Lead Ads" | "WhatsApp" | "Website" | "Manual" | "Other" | "Unknown";
   canonicalPersonLinked: boolean;
+  phoneIdentityDiagnostics?: CrmMetaPhoneIdentityDiagnostics | null;
 };
 
 export type CrmUpdate = {

@@ -512,6 +512,7 @@ async function main(): Promise<void> {
         "0015_crm_assignment_audit_invariants.sql",
         "0016_crm_runtime_role_separation.sql",
         "0017_meta_lead_ads_schema.sql",
+        "0018_meta_phone_identity_diagnostics.sql",
       ],
       metaMigrationReappliedForIdempotency: true,
     }));

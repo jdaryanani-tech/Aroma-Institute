@@ -78,7 +78,7 @@ The URL and database errors are never printed. Only allowlisted stable error
 codes/categories may appear in the sanitized runner diagnostic. Failures also
 identify the phase (including lock, app-role gate, ledger setup, individual
 migration execution/postcondition/ledger commit, unlock, and final readiness);
-when a migration phase fails, its ID is limited to the four registered CRM
+when a migration phase fails, its ID is limited to the five registered CRM
 migrations. Raw error text, stack traces, SQL, URLs, and credentials are never
 reported.
 
@@ -86,7 +86,8 @@ reported.
 
 The dedicated order is `0014_crm_canonical_assignments`, then
 `0015_crm_assignment_audit_invariants`, then
-`0016_crm_runtime_role_separation`, then `0017_meta_lead_ads_schema`. Before 0014, the runner requires the
+`0016_crm_runtime_role_separation`, `0017_meta_lead_ads_schema`, then
+`0018_meta_phone_identity_diagnostics`. Before 0014, the runner requires the
 existing `admissions_leads`, `lms_users`, and `lms_user_roles` tables and the
 columns used by the new constraints. Before 0015, it requires a recorded 0014
 entry plus the 0014 assignment/history tables, functions, and validation and
@@ -97,6 +98,14 @@ it requires a matching 0016 ledger checksum, the reviewed application-role
 pre-migration gate, the required `admissions_leads` and `inquiries` columns,
 and no pre-existing Meta table, index, or conflicting relation. Any partial
 Meta installation is a conflict and stops the runner.
+
+Before 0018, the runner requires a matching 0017 ledger checksum, the exact
+0017 Meta schema postconditions, and none of the new phone-diagnostic columns
+or constraint. Migration 0018 adds only nullable, allowlisted field-state and
+normalization-result columns plus a check constraint. Existing lead links stay
+NULL and are not backfilled; it changes no ownership, grants, admissions rows,
+or inquiries. Do not add it to the historical Drizzle journal or use ordinary
+`db:migrate`/`db:push`.
 
 Migration 0017 is the approved semantic installation of the four additive
 tables and nine indexes defined by historical

@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import express from "express";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { drizzle } from "drizzle-orm/node-postgres";
 import { listCrm, detailCrm } from "./read";
 import { updateCrm } from "./write";
 import { assignCrmLead } from "./assignment";
@@ -15,6 +16,10 @@ import {
   assertCrmMetaLeadAdsPrerequisites,
   assertCrmMetaLeadAdsSchemaAbsent,
 } from "../db/crm-meta-migration-postconditions";
+import {
+  assertCrmMetaPhoneIdentityDiagnosticsPostconditions,
+  assertCrmMetaPhoneIdentityDiagnosticsSchemaAbsent,
+} from "../db/crm-meta-phone-identity-diagnostics-postconditions";
 import { assertCrmRuntimeRoleSeparationPostconditions } from "../db/crm-runtime-role-postconditions";
 import {
   verifyApplicationRuntimePool,
@@ -39,6 +44,8 @@ function rewriteMigrationsForScratchSchema(sql: string, namespace: string): stri
   }
   const schemaPrefix = `"${namespace}".`;
   return sql
+    .replaceAll("table_schema='public'", `table_schema='${namespace}'`)
+    .replaceAll("'public.admissions_meta_lead_links'", `'${namespace}.admissions_meta_lead_links'`)
     .replaceAll("public.admissions_lead_assignment_history", `${schemaPrefix}admissions_lead_assignment_history`)
     .replaceAll("public.admissions_lead_assignments", `${schemaPrefix}admissions_lead_assignments`)
     .replaceAll("public.lms_users", `${schemaPrefix}lms_users`)
@@ -170,6 +177,15 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
        await assertCrmMetaLeadAdsPostconditions(db, namespace);
        await db.query(metaMigration);
        await assertCrmMetaLeadAdsPostconditions(db, namespace);
+        await db.query(
+          `INSERT INTO admissions_meta_lead_links(meta_lead_id,page_id,state)
+           VALUES('pre-diagnostics-meta-link','scratch-page','review')`,
+        );
+        const metaLinksBeforeDiagnostics = (await db.query(`
+          SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'meta_lead_id',meta_lead_id,'page_id',page_id,'state',state,'error_code',error_code
+          ) ORDER BY meta_lead_id),'[]'::jsonb) AS rows FROM admissions_meta_lead_links
+        `)).rows[0].rows;
        assert.deepEqual(
          (await db.query(
            "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM admissions_leads row_data",
@@ -188,6 +204,96 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
          )).rows[0].allowed,
          baseRowsBeforeMetaMigration.ownerCanCreate,
        );
+        await db.query(`
+          CREATE SCHEMA aichm_crm_forward_meta;
+          CREATE TABLE aichm_crm_forward_meta.schema_migrations(
+            migration_id text PRIMARY KEY,
+            sha256 text NOT NULL
+          );
+          INSERT INTO aichm_crm_forward_meta.schema_migrations(migration_id,sha256)
+          VALUES('0017_meta_lead_ads_schema','scratch-checksum');
+        `);
+        const phoneDiagnosticsMigration = rewriteMigrationsForScratchSchema(
+          await readFile("migrations/0018_meta_phone_identity_diagnostics.sql", "utf8"),
+          namespace,
+        );
+        await assertCrmMetaPhoneIdentityDiagnosticsSchemaAbsent(db, namespace);
+        await db.query(phoneDiagnosticsMigration);
+        await assertCrmMetaPhoneIdentityDiagnosticsPostconditions(db, namespace);
+        await assertCrmMetaLeadAdsPostconditions(db, namespace);
+        assert.deepEqual(
+          (await db.query(`
+            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+              'meta_lead_id',meta_lead_id,'page_id',page_id,'state',state,'error_code',error_code
+            ) ORDER BY meta_lead_id),'[]'::jsonb) AS rows FROM admissions_meta_lead_links
+          `)).rows[0].rows,
+          metaLinksBeforeDiagnostics,
+        );
+        const scratchDrizzle = drizzle(db);
+        const saveMetaInstantLead = await (async () => {
+          process.env.DATABASE_URL = target.url;
+          try {
+            return (await import("../admissions/identity")).saveMetaInstantLead;
+          } finally {
+            delete process.env.DATABASE_URL;
+          }
+        })();
+        const metaInput = {
+          metaLeadId: "diagnostic-meta-lead",
+          pageId: "scratch-page",
+          formId: null,
+          campaignId: null,
+          adId: null,
+          adsetId: null,
+          leadCreatedAt: null,
+          fieldData: [
+            { name: "phone_number", values: ["invalid-private-phone-value"] },
+            { name: "whatsapp_number", values: ["9000000017"] },
+          ],
+        };
+        const savedMetaLead = await saveMetaInstantLead(metaInput, new Date("2026-11-17T12:00:00Z"), scratchDrizzle);
+        assert.equal(savedMetaLead.duplicate, false);
+        const storedPhoneDiagnostics = (await db.query(`
+          SELECT phone_number_field_state,mobile_phone_field_state,whatsapp_number_field_state,
+            phone_normalization_outcome,phone_selected_field,phone_fallback_attempted,
+            phone_invalid_higher_priority_blocked_fallback
+          FROM admissions_meta_lead_links WHERE meta_lead_id='diagnostic-meta-lead'
+        `)).rows[0];
+        assert.deepEqual(storedPhoneDiagnostics, {
+          phone_number_field_state: "populated",
+          mobile_phone_field_state: "missing",
+          whatsapp_number_field_state: "populated",
+          phone_normalization_outcome: "invalid_characters",
+          phone_selected_field: "phone_number",
+          phone_fallback_attempted: false,
+          phone_invalid_higher_priority_blocked_fallback: true,
+        });
+        const duplicateMetaLead = await saveMetaInstantLead({
+          ...metaInput,
+          fieldData: [{ name: "whatsapp_number", values: ["9000000018"] }],
+        }, new Date("2026-11-17T12:01:00Z"), scratchDrizzle);
+        assert.equal(duplicateMetaLead.duplicate, true);
+        assert.deepEqual(
+          (await db.query(`
+            SELECT phone_number_field_state,mobile_phone_field_state,whatsapp_number_field_state,
+              phone_normalization_outcome,phone_selected_field,phone_fallback_attempted,
+              phone_invalid_higher_priority_blocked_fallback
+            FROM admissions_meta_lead_links WHERE meta_lead_id='diagnostic-meta-lead'
+          `)).rows[0],
+          storedPhoneDiagnostics,
+        );
+        assert.deepEqual(
+          (await db.query(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM admissions_leads row_data",
+          )).rows[0].rows,
+          baseRowsBeforeMetaMigration.leads,
+        );
+        assert.deepEqual(
+          (await db.query(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id),'[]'::jsonb) AS rows FROM inquiries row_data",
+          )).rows[0].rows,
+          baseRowsBeforeMetaMigration.inquiries,
+        );
       const appUrl = new URL(target.url);
       appUrl.username = "aichm_test_app_login";
       appUrl.password = "";
