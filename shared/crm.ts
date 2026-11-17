@@ -13,6 +13,7 @@ export const ADMISSIONS_MANUAL_CRM_STAGES = [
   "qualified",
   "vsl_shared",
   "counselling_pending",
+  "counselling_attended",
   "nurture",
   "lost",
 ] as const satisfies readonly CrmStage[];

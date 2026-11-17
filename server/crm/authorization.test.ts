@@ -53,9 +53,10 @@ test("admissions SQL scopes keyed inquiries before grouped search and aggregate 
 
 test("admissions stage allowlist excludes system/evidence-controlled milestones", () => {
   assert.deepEqual([...ADMISSIONS_MANUAL_CRM_STAGES], [
-    "contacted", "qualified", "vsl_shared", "counselling_pending", "nurture", "lost",
+    "contacted", "qualified", "vsl_shared", "counselling_pending", "counselling_attended", "nurture", "lost",
   ]);
   assert.equal(validateAdmissionsUpdate({ expectedVersion: 0, stage: "qualified" }), null);
+  assert.equal(validateAdmissionsUpdate({ expectedVersion: 0, stage: "counselling_attended" }), null);
   assert.equal(validateAdmissionsUpdate({ expectedVersion: 0, stage: "enrolled" }), "stage_not_permitted");
   assert.equal(validateAdmissionsUpdate({ expectedVersion: 0, stage: "counselling_booked" }), "stage_not_permitted");
 });
