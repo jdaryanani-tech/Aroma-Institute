@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import type { Pool } from "pg";
 import { z } from "zod";
-import { normalizeIndianMobile } from "@shared/indian-mobile";
 import { crmAccessLevel, type CrmPrincipal } from "./authorization";
+import { lookupAvniAutomationActor } from "./avni-automation-actor";
 import { CrmError } from "./evidence";
 import { crmModelSql, inspectCrmSchema } from "./model";
 import { updateCrmAutomated } from "./write";
@@ -50,26 +50,8 @@ async function resolveAutomationActor(
   pool: Pick<Pool, "query">,
   suppliedPhone: string,
 ): Promise<CrmPrincipal> {
-  const normalized = normalizeIndianMobile(suppliedPhone);
-  if (!normalized) throw new CrmError(403, "The CRM automation actor is unavailable or unauthorized.");
-
-  const { rows } = await pool.query(
-    `SELECT u.id,u.is_active,
-       coalesce(array_agg(r.role::text) FILTER(WHERE r.role IS NOT NULL),ARRAY[]::text[]) AS roles
-     FROM lms_users u
-     LEFT JOIN lms_user_roles r ON r.user_id=u.id
-     WHERE u.phone_e164=$1
-     GROUP BY u.id,u.is_active`,
-    [`+${normalized}`],
-  );
-  if (rows.length !== 1 || rows[0].is_active !== true) {
-    throw new CrmError(403, "The CRM automation actor is unavailable or unauthorized.");
-  }
-  const principal = {
-    id: Number(rows[0].id),
-    roles: rows[0].roles as string[],
-  };
-  if (!Number.isSafeInteger(principal.id) || crmAccessLevel(principal) === "denied") {
+  const { principal } = await lookupAvniAutomationActor(pool, suppliedPhone);
+  if (!principal) {
     throw new CrmError(403, "The CRM automation actor is unavailable or unauthorized.");
   }
   return principal;

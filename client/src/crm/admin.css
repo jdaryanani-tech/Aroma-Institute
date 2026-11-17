@@ -62,6 +62,19 @@
 .crm-source-analytics-table thead th { color: var(--crm-quiet); font: 600 10px 'DM Mono',monospace; text-transform: uppercase; letter-spacing: .06em; }
 .crm-source-analytics-table tbody th, .crm-source-analytics-table tfoot th { font-weight: 700; }
 .crm-source-analytics-table tfoot th, .crm-source-analytics-table tfoot td { border-bottom: 0; font-weight: 800; }
+.avni-production-diagnostics h2 { margin: 3px 0 0; font: 800 20px/1.2 'Manrope',sans-serif; letter-spacing: -.03em; }
+.avni-diagnostics-form { display: grid; gap: 8px; max-width: 680px; }
+.avni-diagnostics-form > label { color: var(--crm-quiet); font: 600 10px 'DM Mono',monospace; text-transform: uppercase; letter-spacing: .06em; }
+.avni-diagnostics-controls { display: flex; align-items: center; gap: 10px; }
+.avni-diagnostics-controls .crm-input { min-width: 0; max-width: 320px; }
+.avni-diagnostics-result { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin-top: 18px; }
+.avni-diagnostics-result > section { min-width: 0; padding: 14px; border: 1px solid var(--crm-line); border-radius: 12px; }
+.avni-diagnostics-result h3 { margin: 0 0 10px; font: 750 14px 'Manrope',sans-serif; }
+.avni-diagnostics-result dl { display: grid; gap: 8px; margin: 0; }
+.avni-diagnostics-result dl > div { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; font-size: 12px; }
+.avni-diagnostics-result dt { color: var(--crm-quiet); }
+.avni-diagnostics-result dd { margin: 0; text-align: right; font-weight: 700; overflow-wrap: anywhere; }
+.avni-diagnostics-fingerprint { font: 10px 'DM Mono',monospace; }
 .crm-rate { color: var(--crm-green); }
 .crm-warning { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; margin-bottom: 12px; border: 1px solid #d8b98a; background: #f8ecd7; border-radius: 12px; color: #675031; font-size: 12px; line-height: 1.5; }
 .crm-workspace { display: grid; grid-template-columns: minmax(320px, .88fr) minmax(0,1.45fr); gap: 18px; align-items: start; }
@@ -171,6 +184,9 @@
   .crm-count { padding:13px 14px; }
   .crm-count-value { font-size:22px; }
   .crm-source-analytics { padding:15px; }
+  .avni-diagnostics-controls { align-items: stretch; flex-direction: column; }
+  .avni-diagnostics-controls .crm-input { max-width: none; }
+  .avni-diagnostics-result { grid-template-columns: 1fr; }
   .crm-source-analytics-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .crm-source-analytics-summary > div:nth-child(2n) { border-right:0; }
   .crm-source-analytics-summary > div:nth-child(-n+2) { border-bottom:1px solid var(--crm-line); }

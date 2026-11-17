@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { admissionsCaptureLimits } from "@shared/admissions-schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
-import { db, pool } from "../db";
+import { applicationRuntimeMode, db, pool } from "../db";
 import { upsertIntegrationLead } from "../admissions/identity";
 import {
   admissionsIntegrationSchemaReady,
@@ -16,6 +16,7 @@ import { crmModelSql, inspectCrmSchema, iso } from "../crm/model";
 import { requireLmsRole, requireLmsUser } from "../lms/auth";
 import { isSupabaseAvniReadConfigured } from "../db/supabase-avni-readonly";
 import { createAvniDiagnosticsHandler } from "./avni-diagnostics";
+import { registerAvniProductionDiagnosticsRoute } from "./avni-production-diagnostics";
 import { registerAvniCrmFollowUpRoutes } from "../crm/avni-follow-up-routes";
 import {
   N8N_INTEGRATION_SECRET_ENV, N8N_INTEGRATION_SECRET_HEADER, verifyN8nIntegrationSecret,
@@ -67,6 +68,14 @@ export function registerAvniIntegrationRoutes(app: Express) {
 
   const schemaReady = () => admissionsIntegrationSchemaReady(db);
   registerAvniCrmFollowUpRoutes(app, avniIntegrationAuth, pool);
+  registerAvniProductionDiagnosticsRoute(app, {
+    pool,
+    sessionSecret: process.env.SESSION_SECRET,
+    runtimeEnvironment: process.env.NODE_ENV,
+    connectionMode: applicationRuntimeMode.kind,
+    authenticate: requireLmsUser,
+    authorizeAdmin: requireLmsRole("admin"),
+  });
   const readCrmFollowUpState = async (leadId: string) => {
     const capabilities = await inspectCrmSchema(pool);
     const { rows: [row] } = await pool.query(

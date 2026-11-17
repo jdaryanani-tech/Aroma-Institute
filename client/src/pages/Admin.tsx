@@ -11,6 +11,7 @@ import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, form
 import { crmUiPermissions } from "@/crm/permissions";
 import MetaSetupStatus from "@/crm/MetaSetupStatus";
 import MetaCaptureStatusPanel from "@/crm/MetaCaptureStatusPanel";
+import AvniProductionDiagnostics from "@/crm/AvniProductionDiagnostics";
 
 type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; assignee: string; sort: string; page: number; pageSize: number };
 type AvniHealth = {
@@ -232,6 +233,7 @@ export default function Admin() {
             {avniHealthQuery.isError&&<span className="crm-count-note">Refresh the dashboard or check the production integration settings. No secret values are displayed here.</span>}
           </div>
         </section>}
+        {isAdmin && <AvniProductionDiagnostics />}
         {isAdmin && <MetaSetupStatus />}
         {leadsQuery.isError && <div className="crm-error" role="alert"><strong>Admissions records did not load.</strong> {errorText(leadsQuery.error, "Check your connection and administrator access.")}<button className="crm-text-button" type="button" onClick={() => void leadsQuery.refetch()}>Try again</button></div>}
         {overview && <section className="crm-counts" aria-label={isAdmin ? "Global admissions overview" : "Assigned leads overview"}>
