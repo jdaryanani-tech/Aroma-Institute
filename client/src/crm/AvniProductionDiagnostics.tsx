@@ -8,25 +8,23 @@ type AvniDiagnosticsResult = {
     fingerprintAlgorithm: "HMAC-SHA-256";
     fingerprint: string;
   };
-  actor: {
-    matchCount: number;
-    active: boolean | null;
-    roleNames: string[];
-    authorized: boolean;
+  serviceIdentity: {
+    name: "avni-followup-reader";
+    capability: "crm.followups.candidates.read";
+    secretConfigured: boolean;
+    credentialDistinct: boolean;
+    scopeReady: boolean;
   };
 };
 
 export default function AvniProductionDiagnostics() {
-  const [actorPhone, setActorPhone] = useState("");
   const [result, setResult] = useState<AvniDiagnosticsResult | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
 
-  async function checkActor(event: FormEvent<HTMLFormElement>) {
+  async function checkReadiness(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (pending || !actorPhone.trim()) return;
-    const phoneForRequest = actorPhone;
-    setActorPhone("");
+    if (pending) return;
     setResult(null);
     setError("");
     setPending(true);
@@ -36,12 +34,12 @@ export default function AvniProductionDiagnostics() {
         credentials: "same-origin",
         cache: "no-store",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ automationAccountPhone: phoneForRequest }),
+        body: JSON.stringify({}),
       });
       if (!response.ok) throw new Error("diagnostics_unavailable");
       setResult(await response.json() as AvniDiagnosticsResult);
     } catch {
-      setError("Diagnostics are unavailable. No phone number or database details were saved.");
+      setError("Diagnostics are unavailable. No secret or lead data was returned.");
     } finally {
       setPending(false);
     }
@@ -59,36 +57,19 @@ export default function AvniProductionDiagnostics() {
         </time>}
       </div>
       <p className="crm-source-analytics-note">
-        This fingerprints the database connected to this app runtime. Confirm the result says production before treating it as a Production check. The actor phone is masked, sent only for this request, and not saved or included in the result.
+        This checks the database connected to this app runtime and whether the dedicated read-only AVNI candidate scope is ready. Confirm the runtime says production before treating it as a Production check.
       </p>
       <p className="crm-source-analytics-note">
         The database fingerprint is keyed for this environment and may change if the session secret rotates.
       </p>
-      <form className="avni-diagnostics-form" onSubmit={event => void checkActor(event)}>
-        <label htmlFor="avni-diagnostics-phone">Automation account phone</label>
+      <form className="avni-diagnostics-form" onSubmit={event => void checkReadiness(event)}>
         <div className="avni-diagnostics-controls">
-          <input
-            id="avni-diagnostics-phone"
-            className="crm-input"
-            type="password"
-            inputMode="tel"
-            autoComplete="off"
-            maxLength={32}
-            value={actorPhone}
-            onChange={event => {
-              setActorPhone(event.target.value);
-              setResult(null);
-              setError("");
-            }}
-            aria-describedby="avni-diagnostics-privacy"
-            required
-          />
-          <button className="crm-button crm-button-primary" type="submit" disabled={pending || !actorPhone.trim()}>
-            {pending ? "Checking…" : "Run read-only check"}
+          <button className="crm-button crm-button-primary" type="submit" disabled={pending}>
+            {pending ? "Checking…" : "Check read-only readiness"}
           </button>
         </div>
-        <span id="avni-diagnostics-privacy" className="crm-source-analytics-note">
-          The field clears when you run the check. Results contain no phone number or CRM records.
+        <span className="crm-source-analytics-note">
+          This does not inspect LMS user accounts or return candidate or contact records.
         </span>
       </form>
       {error && <p className="crm-error" role="alert">{error}</p>}
@@ -103,12 +84,13 @@ export default function AvniProductionDiagnostics() {
             </dl>
           </section>
           <section>
-            <h3>Automation actor</h3>
+            <h3>AVNI read-only service</h3>
             <dl>
-              <div><dt>Exact matches</dt><dd>{result.actor.matchCount}</dd></div>
-              <div><dt>Active</dt><dd>{result.actor.active === null ? "Not uniquely matched" : result.actor.active ? "Yes" : "No"}</dd></div>
-              <div><dt>Roles</dt><dd>{result.actor.roleNames.length ? result.actor.roleNames.join(", ") : "None reported"}</dd></div>
-              <div><dt>CRM authorization</dt><dd>{result.actor.authorized ? "Pass" : "Fail"}</dd></div>
+              <div><dt>Service principal</dt><dd>{result.serviceIdentity.name}</dd></div>
+              <div><dt>Capability</dt><dd>{result.serviceIdentity.capability}</dd></div>
+              <div><dt>Dedicated secret configured</dt><dd>{result.serviceIdentity.secretConfigured ? "Yes" : "No"}</dd></div>
+              <div><dt>Separate from shared secret</dt><dd>{result.serviceIdentity.credentialDistinct ? "Yes" : "No"}</dd></div>
+              <div><dt>Read scope ready</dt><dd>{result.serviceIdentity.scopeReady ? "Yes" : "No"}</dd></div>
             </dl>
           </section>
         </div>

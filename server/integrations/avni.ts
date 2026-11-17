@@ -19,6 +19,11 @@ import { createAvniDiagnosticsHandler } from "./avni-diagnostics";
 import { registerAvniProductionDiagnosticsRoute } from "./avni-production-diagnostics";
 import { registerAvniCrmFollowUpRoutes } from "../crm/avni-follow-up-routes";
 import {
+  AVNI_FOLLOWUP_READ_SECRET_ENV,
+  avniReadCredentialIsDedicated,
+  createAvniFollowUpReadAuth,
+} from "../crm/avni-follow-up-read-auth";
+import {
   N8N_INTEGRATION_SECRET_ENV, N8N_INTEGRATION_SECRET_HEADER, verifyN8nIntegrationSecret,
 } from "./n8n-auth";
 
@@ -38,6 +43,13 @@ export const avniIntegrationAuth: RequestHandler = async (req, res, next) => {
   res.setHeader("Vary", N8N_VSL_SECRET_HEADER);
   const expected = process.env[N8N_VSL_SECRET_ENV];
   if (!expected?.trim()) return void res.status(503).json({ message: "AVNI integration is not configured." });
+  if (process.env[AVNI_FOLLOWUP_READ_SECRET_ENV]?.trim()
+    && !avniReadCredentialIsDedicated(
+      process.env[AVNI_FOLLOWUP_READ_SECRET_ENV],
+      expected,
+    )) {
+    return void res.status(503).json({ message: "AVNI integration credentials are not separated." });
+  }
   if (!verifyAvniIntegrationSecret(req.get(N8N_VSL_SECRET_HEADER) ?? "", expected)) {
     return void res.status(401).json({ message: "Integration authentication required." });
   }
@@ -67,12 +79,26 @@ export const avniIntegrationAuth: RequestHandler = async (req, res, next) => {
 export function registerAvniIntegrationRoutes(app: Express) {
 
   const schemaReady = () => admissionsIntegrationSchemaReady(db);
-  registerAvniCrmFollowUpRoutes(app, avniIntegrationAuth, pool);
+  registerAvniCrmFollowUpRoutes(
+    app,
+    avniIntegrationAuth,
+    createAvniFollowUpReadAuth(),
+    pool,
+  );
   registerAvniProductionDiagnosticsRoute(app, {
     pool,
     sessionSecret: process.env.SESSION_SECRET,
     runtimeEnvironment: process.env.NODE_ENV,
     connectionMode: applicationRuntimeMode.kind,
+    followUpReadSecretConfigured: Boolean(process.env.N8N_AVNI_FOLLOWUP_READ_SECRET?.trim()),
+    followUpReadSecretDistinct: Boolean(
+      process.env.N8N_AVNI_FOLLOWUP_READ_SECRET?.trim()
+      && (
+        !process.env[N8N_INTEGRATION_SECRET_ENV]?.trim()
+        || process.env.N8N_AVNI_FOLLOWUP_READ_SECRET.trim()
+          !== process.env[N8N_INTEGRATION_SECRET_ENV].trim()
+      ),
+    ),
     authenticate: requireLmsUser,
     authorizeAdmin: requireLmsRole("admin"),
   });

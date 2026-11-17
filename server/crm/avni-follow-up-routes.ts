@@ -2,30 +2,29 @@ import { createHash } from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import type { Pool } from "pg";
 import { z } from "zod";
-import { crmAccessLevel, type CrmPrincipal } from "./authorization";
+import {
+  auditAvniFollowUpCandidateRead,
+  AVNI_FOLLOWUP_READ_PRINCIPAL,
+  AVNI_FOLLOWUP_READ_SCOPE,
+} from "./avni-follow-up-read-auth";
 import { lookupAvniAutomationActor } from "./avni-automation-actor";
 import { CrmError } from "./evidence";
-import { crmModelSql, inspectCrmSchema } from "./model";
+import { inspectCrmSchema } from "./model";
 import { updateCrmAutomated } from "./write";
 
-const automationAccountPhoneSchema = z.string().trim().min(1).max(32);
 const eventIdSchema = z.string().trim().min(8).max(200);
 const leadIdSchema = z.string().uuid();
-const actorBody = {
-  automationAccountPhone: automationAccountPhoneSchema,
-};
 
 const dueRequestSchema = z.object({
-  ...actorBody,
   limit: z.number().int().min(1).max(100).default(50),
   cursor: z.object({
     followUpAt: z.string().datetime({ offset: true }),
-    leadId: leadIdSchema,
+    candidateRef: leadIdSchema,
   }).strict().optional(),
 }).strict();
 
 const pauseRequestSchema = z.object({
-  ...actorBody,
+  automationAccountPhone: z.string().trim().min(1).max(32),
   leadId: leadIdSchema,
   expectedVersion: z.number().int().nonnegative(),
   eventId: eventIdSchema,
@@ -33,7 +32,7 @@ const pauseRequestSchema = z.object({
 }).strict();
 
 const deliveryRequestSchema = z.object({
-  ...actorBody,
+  automationAccountPhone: z.string().trim().min(1).max(32),
   leadId: leadIdSchema,
   expectedVersion: z.number().int().nonnegative(),
   expectedFollowUpAt: z.string().datetime({ offset: true }),
@@ -46,10 +45,16 @@ function eventHash(action: string, eventId: string): string {
   return createHash("sha256").update(`avni-crm-follow-up:${action}:${eventId}`).digest("hex");
 }
 
+class CandidateReadFailure extends Error {
+  constructor(readonly outcome: "schema_unavailable" | "query_failed") {
+    super("CRM follow-up candidate read is unavailable.");
+  }
+}
+
 async function resolveAutomationActor(
   pool: Pick<Pool, "query">,
   suppliedPhone: string,
-): Promise<CrmPrincipal> {
+): Promise<{ id: number; roles: readonly string[] }> {
   const { principal } = await lookupAvniAutomationActor(pool, suppliedPhone);
   if (!principal) {
     throw new CrmError(403, "The CRM automation actor is unavailable or unauthorized.");
@@ -71,75 +76,105 @@ function nextIstSlot(after: Date): Date {
 
 async function listDueFollowUps(
   pool: Pick<Pool, "query">,
-  principal: CrmPrincipal,
   input: z.infer<typeof dueRequestSchema>,
 ) {
-  const capabilities = await inspectCrmSchema(pool);
-  if (!capabilities.crmPersistence || !capabilities.identityTracking ||
-      (crmAccessLevel(principal) === "admissions" && !capabilities.canonicalAssignments)) {
-    throw new CrmError(503, "CRM follow-up data is not ready.");
+  let capabilities;
+  try {
+    capabilities = await inspectCrmSchema(pool);
+  } catch {
+    throw new CandidateReadFailure("schema_unavailable");
   }
-  const { rows: [consentSchema] } = await pool.query(
-    "SELECT to_regclass('admissions_lead_contact_preferences') IS NOT NULL AS ready",
-  );
-  if (consentSchema?.ready !== true) throw new CrmError(503, "CRM consent data is not ready.");
+  if (!capabilities.crmPersistence || !capabilities.identityTracking || !capabilities.canonicalAssignments) {
+    throw new CandidateReadFailure("schema_unavailable");
+  }
 
-  const admissionsScoped = crmAccessLevel(principal) === "admissions";
-  const model = crmModelSql(capabilities, admissionsScoped ? 1 : undefined);
+  let consentSchema;
+  try {
+    const result = await pool.query(
+      "SELECT to_regclass('admissions_lead_contact_preferences') IS NOT NULL AS ready",
+    );
+    consentSchema = result.rows[0];
+  } catch {
+    throw new CandidateReadFailure("schema_unavailable");
+  }
+  if (consentSchema?.ready !== true) throw new CandidateReadFailure("schema_unavailable");
+
   const values: unknown[] = [];
-  if (admissionsScoped) values.push(principal.id);
   const cursorCondition = input.cursor
     ? (() => {
       const timestampParam = values.push(input.cursor!.followUpAt);
-      const leadParam = values.push(input.cursor!.leadId);
-      return `AND (m.follow_up_at,m.lead_id) > ($${timestampParam}::timestamptz,$${leadParam}::uuid)`;
+      const leadParam = values.push(input.cursor!.candidateRef);
+      return `AND (latest.follow_up_at,l.id) > ($${timestampParam}::timestamptz,$${leadParam}::uuid)`;
     })()
     : "";
   const limitParam = values.push(input.limit + 1);
-  const { rows } = await pool.query(
-    `${model}
-     SELECT m.lead_id,m.display_name,concat('+',l.canonical_phone) AS phone,
-       m.follow_up_at,m.version,m.stage,
-       CASE WHEN m.stage='nurture' AND pause.event_hash IS NOT NULL
-         AND NOT EXISTS(SELECT 1 FROM admissions_crm_activities delivered
-           WHERE delivered.inquiry_id=ANY(m.inquiry_ids)
-             AND delivered.data->>'automationAction'='delivery'
-             AND delivered.data->>'automationFollowUpKind'='pause_checkin'
-             AND delivered.data->>'pauseEventHash'=pause.event_hash)
-         AND NOT EXISTS(SELECT 1 FROM admissions_crm_activities reengaged
-           WHERE reengaged.inquiry_id=ANY(m.inquiry_ids)
-             AND reengaged.occurred_at>pause.occurred_at
-             AND reengaged.data->>'automationAction' IS NULL
-             AND (reengaged.type='followup'
-               OR (reengaged.type='stage' AND reengaged.data->>'to'<>'nurture')))
+  let rows: Record<string, unknown>[];
+  try {
+    ({ rows } = await pool.query(
+      `SELECT l.id AS candidate_ref,
+        latest.follow_up_at,
+        (SELECT coalesce(sum(profile.version),0)::integer
+         FROM inquiries versioned_inquiry
+         JOIN admissions_crm_profiles profile ON profile.inquiry_id=versioned_inquiry.id
+         WHERE versioned_inquiry.lead_id=l.id) AS version,
+        CASE WHEN latest.stage='nurture' AND pause.event_hash IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM admissions_crm_activities delivered
+            WHERE delivered.inquiry_id IN (
+              SELECT related.id FROM inquiries related WHERE related.lead_id=l.id
+            )
+              AND delivered.data->>'automationAction'='delivery'
+              AND delivered.data->>'automationFollowUpKind'='pause_checkin'
+              AND delivered.data->>'pauseEventHash'=pause.event_hash)
+          AND NOT EXISTS(SELECT 1 FROM admissions_crm_activities reengaged
+            WHERE reengaged.inquiry_id IN (
+              SELECT related.id FROM inquiries related WHERE related.lead_id=l.id
+            )
+              AND reengaged.occurred_at>pause.occurred_at
+              AND reengaged.data->>'automationAction' IS NULL
+              AND (reengaged.type='followup'
+                OR (reengaged.type='stage' AND reengaged.data->>'to'<>'nurture')))
          THEN 'pause_checkin' ELSE 'routine' END AS follow_up_kind
-     FROM model m
-     JOIN admissions_leads l ON l.id=m.lead_id
-     JOIN admissions_lead_contact_preferences consent ON consent.lead_id=m.lead_id
+      FROM admissions_leads l
+      JOIN LATERAL(
+        SELECT profile.stage,profile.follow_up_at
+        FROM inquiries inquiry
+        JOIN admissions_crm_profiles profile ON profile.inquiry_id=inquiry.id
+        WHERE inquiry.lead_id=l.id
+        ORDER BY profile.updated_at DESC,profile.inquiry_id
+        LIMIT 1
+      ) latest ON true
+      JOIN admissions_lead_assignments assignment ON assignment.lead_id=l.id
+      JOIN lms_users assignee ON assignee.id=assignment.assignee_user_id AND assignee.is_active=true
+      JOIN admissions_lead_contact_preferences consent ON consent.lead_id=l.id
      LEFT JOIN LATERAL(
        SELECT activity.data->>'automationEventHash' AS event_hash,activity.occurred_at
        FROM admissions_crm_activities activity
-       WHERE activity.inquiry_id=ANY(m.inquiry_ids)
+        WHERE activity.inquiry_id IN (
+          SELECT related.id FROM inquiries related WHERE related.lead_id=l.id
+        )
          AND activity.data->>'automationAction'='pause'
        ORDER BY activity.occurred_at DESC,activity.id DESC LIMIT 1
      ) pause ON true
-     WHERE m.lead_id IS NOT NULL
-       AND m.identity_status IN ('linked','unique_phone')
-       AND m.follow_up_at IS NOT NULL AND m.follow_up_at<=now()
-       AND m.stage NOT IN ('lost','enrolled')
-       AND l.canonical_phone IS NOT NULL
+      WHERE latest.follow_up_at IS NOT NULL AND latest.follow_up_at<=now()
+        AND latest.stage NOT IN ('lost','enrolled')
+        AND l.canonical_phone IS NOT NULL
+        AND EXISTS(
+          SELECT 1 FROM lms_user_roles assigned_role
+          WHERE assigned_role.user_id=assignee.id AND assigned_role.role::text='admissions'
+        )
        AND consent.consent_status='granted' AND consent.opted_out_at IS NULL
        ${cursorCondition}
-     ORDER BY m.follow_up_at,m.lead_id
+      ORDER BY latest.follow_up_at,l.id
      LIMIT $${limitParam}`,
-    values,
-  );
+      values,
+    ));
+  } catch {
+    throw new CandidateReadFailure("query_failed");
+  }
   const hasMore = rows.length > input.limit;
   const page = hasMore ? rows.slice(0, input.limit) : rows;
-  const items = page.map((row: Record<string, unknown>) => ({
-    leadId: row.lead_id,
-    name: row.display_name,
-    phone: row.phone,
+  const items = page.map(row => ({
+    candidateRef: row.candidate_ref,
     followUpAt: new Date(row.follow_up_at as string).toISOString(),
     expectedVersion: Number(row.version),
     followUpKind: row.follow_up_kind as "pause_checkin" | "routine",
@@ -149,7 +184,7 @@ async function listDueFollowUps(
     items,
     nextCursor: hasMore && last ? {
       followUpAt: new Date(last.follow_up_at as string).toISOString(),
-      leadId: last.lead_id,
+      candidateRef: last.candidate_ref,
     } : null,
   };
 }
@@ -166,21 +201,37 @@ function errorResponse(error: unknown, res: Parameters<RequestHandler>[1]) {
 
 export function registerAvniCrmFollowUpRoutes(
   app: Express,
-  authenticate: RequestHandler,
+  authenticateWrite: RequestHandler,
+  authenticateCandidateRead: RequestHandler,
   pool: Pick<Pool, "query" | "connect">,
 ) {
-  app.post("/api/integrations/n8n/crm/follow-ups/due", authenticate, async (req, res) => {
+  app.post("/api/integrations/n8n/crm/follow-ups/due", authenticateCandidateRead, async (req, res) => {
     const parsed = dueRequestSchema.safeParse(req.body);
-    if (!parsed.success) return void res.status(400).json({ code: "invalid_follow_up_request" });
+    if (!parsed.success) {
+      auditAvniFollowUpCandidateRead(res, "invalid_request");
+      return void res.status(400).json({ code: "invalid_follow_up_request" });
+    }
+    const serviceIdentity = res.locals.avniFollowUpReadIdentity as {
+      servicePrincipal?: string;
+      scope?: string;
+    } | undefined;
+    if (serviceIdentity?.servicePrincipal !== AVNI_FOLLOWUP_READ_PRINCIPAL
+      || serviceIdentity.scope !== AVNI_FOLLOWUP_READ_SCOPE) {
+      auditAvniFollowUpCandidateRead(res, "authentication_denied");
+      return void res.status(403).json({ code: "follow_up_read_scope_denied" });
+    }
     try {
-      const actor = await resolveAutomationActor(pool, parsed.data.automationAccountPhone);
-      return void res.json(await listDueFollowUps(pool, actor, parsed.data));
+      const result = await listDueFollowUps(pool, parsed.data);
+      auditAvniFollowUpCandidateRead(res, "success", result.items.length);
+      return void res.json(result);
     } catch (error) {
-      return void errorResponse(error, res);
+      const outcome = error instanceof CandidateReadFailure ? error.outcome : "query_failed";
+      auditAvniFollowUpCandidateRead(res, outcome);
+      return void res.status(503).json({ code: "follow_up_read_unavailable" });
     }
   });
 
-  app.post("/api/integrations/n8n/crm/follow-ups/pause", authenticate, async (req, res) => {
+  app.post("/api/integrations/n8n/crm/follow-ups/pause", authenticateWrite, async (req, res) => {
     const parsed = pauseRequestSchema.safeParse(req.body);
     if (!parsed.success) return void res.status(400).json({ code: "invalid_follow_up_request" });
     try {
@@ -207,7 +258,7 @@ export function registerAvniCrmFollowUpRoutes(
     }
   });
 
-  app.post("/api/integrations/n8n/crm/follow-ups/delivered", authenticate, async (req, res) => {
+  app.post("/api/integrations/n8n/crm/follow-ups/delivered", authenticateWrite, async (req, res) => {
     const parsed = deliveryRequestSchema.safeParse(req.body);
     if (!parsed.success) return void res.status(400).json({ code: "invalid_follow_up_request" });
     try {

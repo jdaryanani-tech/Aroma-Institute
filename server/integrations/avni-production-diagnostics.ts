@@ -3,16 +3,12 @@ import type { Express, RequestHandler } from "express";
 import type { Pool } from "pg";
 import { z } from "zod";
 import { sameOriginCapture } from "../admissions/routes";
-import { inspectAvniAutomationActor } from "../crm/avni-automation-actor";
-import { normalizeIndianMobile } from "@shared/indian-mobile";
+import { inspectCrmSchema } from "../crm/model";
 
 export const AVNI_PRODUCTION_DIAGNOSTICS_PATH =
   "/api/admin/integrations/avni/production-diagnostics";
 
-const requestSchema = z.object({
-  automationAccountPhone: z.string().trim().min(1).max(32)
-    .refine(value => normalizeIndianMobile(value) !== null),
-}).strict();
+const requestSchema = z.object({}).strict();
 
 type DiagnosticPool = Pick<Pool, "query">;
 type ConnectionMode = "legacy" | "least_privilege" | "unknown";
@@ -73,6 +69,26 @@ async function databaseFingerprint(
   return createHmac("sha256", sessionSecret).update(identityTuple).digest("hex");
 }
 
+async function followUpReadScopeReady(
+  pool: DiagnosticPool,
+  secretConfigured: boolean,
+  credentialDistinct: boolean,
+): Promise<boolean> {
+  if (!secretConfigured || !credentialDistinct) return false;
+  try {
+    const capabilities = await inspectCrmSchema(pool);
+    const { rows: [consent] } = await pool.query<{ ready: boolean }>(
+      "SELECT to_regclass('admissions_lead_contact_preferences') IS NOT NULL AS ready",
+    );
+    return capabilities.crmPersistence
+      && capabilities.identityTracking
+      && capabilities.canonicalAssignments
+      && consent?.ready === true;
+  } catch {
+    return false;
+  }
+}
+
 export function registerAvniProductionDiagnosticsRoute(
   app: Express,
   dependencies: {
@@ -80,6 +96,8 @@ export function registerAvniProductionDiagnosticsRoute(
     sessionSecret: string | undefined;
     runtimeEnvironment: string | undefined;
     connectionMode: string | undefined;
+    followUpReadSecretConfigured: boolean;
+    followUpReadSecretDistinct: boolean;
     authenticate: RequestHandler;
     authorizeAdmin: RequestHandler;
   },
@@ -114,9 +132,10 @@ export function registerAvniProductionDiagnosticsRoute(
           runtimeEnvironment,
           connectionMode,
         );
-        const actor = await inspectAvniAutomationActor(
+        const scopeReady = await followUpReadScopeReady(
           dependencies.pool,
-          parsed.data.automationAccountPhone,
+          dependencies.followUpReadSecretConfigured,
+          dependencies.followUpReadSecretDistinct,
         );
         return void res.json({
           checkedAt: new Date().toISOString(),
@@ -126,7 +145,13 @@ export function registerAvniProductionDiagnosticsRoute(
             fingerprintAlgorithm: "HMAC-SHA-256",
             fingerprint,
           },
-          actor,
+          serviceIdentity: {
+            name: "avni-followup-reader",
+            capability: "crm.followups.candidates.read",
+            secretConfigured: dependencies.followUpReadSecretConfigured,
+            credentialDistinct: dependencies.followUpReadSecretDistinct,
+            scopeReady,
+          },
         });
       } catch {
         // Do not log request bodies, connection details, or database errors.
