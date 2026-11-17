@@ -10,6 +10,7 @@ import { admissionsIntegrationSchemaReady, readLeadFollowUpByPhone, readLeadFoll
 import { requireLmsRole, requireLmsUser } from "../lms/auth";
 import { isSupabaseAvniReadConfigured } from "../db/supabase-avni-readonly";
 import { createAvniDiagnosticsHandler } from "./avni-diagnostics";
+import { registerAvniCrmFollowUpRoutes } from "../crm/avni-follow-up-routes";
 import {
   N8N_INTEGRATION_SECRET_ENV, N8N_INTEGRATION_SECRET_HEADER, verifyN8nIntegrationSecret,
 } from "./n8n-auth";
@@ -59,6 +60,7 @@ export const avniIntegrationAuth: RequestHandler = async (req, res, next) => {
 export function registerAvniIntegrationRoutes(app: Express) {
 
   const schemaReady = () => admissionsIntegrationSchemaReady(db);
+  registerAvniCrmFollowUpRoutes(app, avniIntegrationAuth, pool);
 
   app.get("/api/admin/integrations/avni/status", requireLmsUser, requireLmsRole("admin"), async (_req, res) => {
     const names = [
