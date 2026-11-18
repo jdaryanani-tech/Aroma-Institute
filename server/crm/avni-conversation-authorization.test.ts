@@ -265,3 +265,61 @@ test("successful preflight returns no identifiers and never authorizes a send", 
   assert.equal(fixture.statements.some(statement => /\b(INSERT|UPDATE|DELETE|CALL)\b/i.test(statement)), false);
   assert.equal(fixture.released, true);
 });
+
+test("a fresh final-dispatch preflight denies after consent is revoked", async () => {
+  const options: FixtureOptions = {
+    currentRoles: ["admissions"],
+    assigneeUserId: 7,
+    consentStatus: "granted",
+  };
+  const fixture = createFixture(options);
+  const request = makeRequest();
+  const beforeQueue = await preflightAvniConversationOperation(
+    request,
+    LEAD_ID,
+    4,
+    { pool: fixture.pool, supabase: fixture.supabase },
+  );
+  assert.equal(beforeQueue.status, "ready");
+  assert.equal(beforeQueue.sendAuthorized, false);
+
+  // Simulate a Replit opt-out between the first check and a would-be final
+  // dispatch check. The adapter performs fresh SQL on every invocation.
+  options.consentStatus = "opted_out";
+  options.optedOutAt = "2026-11-18T12:00:00.000Z";
+  const beforeDispatch = await preflightAvniConversationOperation(
+    request,
+    LEAD_ID,
+    4,
+    { pool: fixture.pool, supabase: fixture.supabase },
+  );
+  assert.equal(beforeDispatch.code, "whatsapp_opted_out");
+  assert.equal(beforeDispatch.sendAuthorized, false);
+});
+
+test("a fresh final-dispatch preflight denies after assignment changes", async () => {
+  const options: FixtureOptions = {
+    currentRoles: ["admissions"],
+    assigneeUserId: 7,
+    consentStatus: "granted",
+  };
+  const fixture = createFixture(options);
+  const request = makeRequest();
+  const beforeQueue = await preflightAvniConversationOperation(
+    request,
+    LEAD_ID,
+    4,
+    { pool: fixture.pool, supabase: fixture.supabase },
+  );
+  assert.equal(beforeQueue.status, "ready");
+
+  options.assigneeUserId = 9;
+  const beforeDispatch = await preflightAvniConversationOperation(
+    request,
+    LEAD_ID,
+    4,
+    { pool: fixture.pool, supabase: fixture.supabase },
+  );
+  assert.equal(beforeDispatch.code, "lead_assignment_denied");
+  assert.equal(beforeDispatch.sendAuthorized, false);
+});
