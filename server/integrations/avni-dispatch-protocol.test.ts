@@ -23,6 +23,10 @@ const now = new Date("2026-11-19T10:00:00.000Z");
 function binding(overrides: Partial<AvniDispatchGrantBinding> = {}): AvniDispatchGrantBinding {
   return {
     canonicalLeadId: leadId,
+    actorUserId: 42,
+    actorAccessLevel: "admin",
+    assignmentAssigneeUserId: null,
+    assignmentVersion: 0,
     supabaseThreadId: threadId,
     supabaseOutboxId: outboxId,
     supabaseMessageId: messageId,
@@ -99,7 +103,7 @@ test("missing, revoked, opted-out, or stale-epoch consent cannot issue or begin 
   assert.equal(revoked.grant?.state, "revoked");
 });
 
-test("expiry, stale assignment/control binding, and replay fail closed", () => {
+test("expiry, stale actor/assignment/control binding, and replay fail closed", () => {
   const grant = issue();
   const expired = beginAvniDispatchAttempt({
     grant, binding: grant.binding, consent: consent(),
@@ -108,12 +112,17 @@ test("expiry, stale assignment/control binding, and replay fail closed", () => {
   assert.equal(expired.code, "grant_expired");
   assert.equal(expired.grant?.state, "expired");
 
-  const changedBinding = beginAvniDispatchAttempt({
-    grant, binding: binding({ controlVersion: 10 }), consent: consent(), now,
-    supabaseOutcome: "begun",
-  });
-  assert.equal(changedBinding.code, "grant_binding_mismatch");
-  assert.equal(changedBinding.grant?.state, "aborted");
+  for (const changed of [
+    binding({ controlVersion: 10 }),
+    binding({ actorAccessLevel: "admissions", assignmentAssigneeUserId: 43, assignmentVersion: 8 }),
+    binding({ actorUserId: 43 }),
+  ]) {
+    const changedBinding = beginAvniDispatchAttempt({
+      grant, binding: changed, consent: consent(), now, supabaseOutcome: "begun",
+    });
+    assert.equal(changedBinding.code, "grant_binding_mismatch");
+    assert.equal(changedBinding.grant?.state, "aborted");
+  }
 
   const begun = beginAvniDispatchAttempt({
     grant, binding: grant.binding, consent: consent(), now, supabaseOutcome: "begun",

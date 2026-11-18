@@ -10,18 +10,26 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'aichm_conversation_owner') THEN
     CREATE ROLE aichm_conversation_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
       NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+  ELSIF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles
+    WHERE rolname='aichm_conversation_owner'
+      AND (rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls OR rolreplication)
+  ) THEN
+    RAISE EXCEPTION 'AVNI_CONVERSATION_ROLE_ATTRIBUTES_UNSAFE';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'aichm_conversation_runtime') THEN
     CREATE ROLE aichm_conversation_runtime NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
       NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+  ELSIF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles
+    WHERE rolname='aichm_conversation_runtime'
+      AND (rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls OR rolreplication)
+  ) THEN
+    RAISE EXCEPTION 'AVNI_CONVERSATION_ROLE_ATTRIBUTES_UNSAFE';
   END IF;
 END
 $role$;
 
-ALTER ROLE aichm_conversation_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
-  NOCREATEROLE NOBYPASSRLS NOREPLICATION;
-ALTER ROLE aichm_conversation_runtime NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
-  NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 DO $role_membership$
 BEGIN
   IF EXISTS (
@@ -32,6 +40,15 @@ BEGIN
        OR u.rolname IN ('aichm_conversation_owner','aichm_conversation_runtime')
   ) THEN
     RAISE EXCEPTION 'AVNI_CONVERSATION_ROLE_MEMBERSHIP_PREEXISTS';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_shdepend d
+    JOIN pg_catalog.pg_roles r ON r.oid=d.refobjid
+    WHERE d.refclassid='pg_catalog.pg_authid'::regclass
+      AND r.rolname IN ('aichm_conversation_owner','aichm_conversation_runtime')
+      AND d.deptype IN ('o','a')
+  ) THEN
+    RAISE EXCEPTION 'AVNI_CONVERSATION_ROLE_ACL_PREEXISTS';
   END IF;
 END
 $role_membership$;
@@ -48,7 +65,7 @@ BEGIN
 END
 $role_attributes$;
 
-GRANT CREATE,USAGE ON SCHEMA aichm_private TO aichm_conversation_owner;
+GRANT USAGE ON SCHEMA aichm_private TO aichm_conversation_owner;
 GRANT USAGE ON SCHEMA aichm_private TO aichm_conversation_runtime;
 
 CREATE TABLE aichm_private.conversation_threads (
@@ -128,7 +145,7 @@ CREATE TABLE aichm_private.conversation_messages (
       OR (message_type<>'text' AND (body IS NULL OR length(body)<=12000))
     ),
   CONSTRAINT avni_conversation_messages_delivery_ck
-    CHECK (delivery_state IS NULL OR delivery_state IN ('queued','sent','delivered','read','failed','unknown')),
+    CHECK (delivery_state IS NULL OR delivery_state IN ('queued','sent','delivered','read','failed','unknown','cancelled')),
   CONSTRAINT avni_conversation_messages_inbound_delivery_ck
     CHECK (direction<>'inbound' OR delivery_state IS NULL),
   CONSTRAINT avni_conversation_messages_legacy_fk_uq UNIQUE (legacy_conversation_id)
@@ -242,7 +259,7 @@ CREATE TABLE aichm_private.conversation_outbox_attempts (
   CONSTRAINT avni_conversation_attempts_state_ck
     CHECK (state IN ('claimed','sending','sent','delivered','read','failed','unknown','cancelled')),
   CONSTRAINT avni_conversation_attempts_delivery_ck
-    CHECK (delivery_state IN ('queued','sent','delivered','read','failed','unknown')),
+    CHECK (delivery_state IN ('queued','sent','delivered','read','failed','unknown','cancelled')),
   CONSTRAINT avni_conversation_attempts_outbox_number_uq UNIQUE (outbox_id,attempt_number)
 );
 
@@ -286,8 +303,6 @@ CREATE TABLE aichm_private.conversation_control_events (
   reason text,
   prior_version bigint NOT NULL,
   resulting_version bigint NOT NULL,
-  whatsapp_consent_granted boolean,
-  whatsapp_opted_out boolean,
   occurred_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT avni_conversation_control_action_ck CHECK (action IN ('lead_linked','takeover','resume')),
   CONSTRAINT avni_conversation_control_actor_ck
@@ -296,10 +311,6 @@ CREATE TABLE aichm_private.conversation_control_events (
     CHECK (reason IS NULL OR length(btrim(reason)) BETWEEN 3 AND 500),
   CONSTRAINT avni_conversation_control_versions_ck
     CHECK (prior_version>=0 AND resulting_version=prior_version+1),
-  CONSTRAINT avni_conversation_control_resume_evidence_ck CHECK (
-    (action='resume' AND whatsapp_consent_granted IS NOT NULL AND whatsapp_opted_out IS NOT NULL)
-    OR (action<>'resume' AND whatsapp_consent_granted IS NULL AND whatsapp_opted_out IS NULL)
-  ),
   CONSTRAINT avni_conversation_control_thread_version_uq UNIQUE (thread_id,resulting_version)
 );
 
@@ -354,10 +365,6 @@ REVOKE ALL ON TABLE
   aichm_private.conversation_delivery_receipts,
   aichm_private.conversation_control_events
 FROM PUBLIC, anon, authenticated, service_role, aichm_crm_reader, aichm_conversation_runtime;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA aichm_private
-FROM PUBLIC, anon, authenticated, service_role, aichm_crm_reader,
-  aichm_conversation_runtime, aichm_conversation_owner;
-
 CREATE OR REPLACE FUNCTION aichm_private.delivery_transition_allowed(
   p_current text,
   p_incoming text
@@ -369,7 +376,7 @@ AS $function$
     WHEN 'queued' THEN p_incoming IN ('sent','delivered','read','failed')
     WHEN 'sent' THEN p_incoming IN ('delivered','read','failed')
     WHEN 'delivered' THEN p_incoming='read'
-    WHEN 'unknown' THEN p_incoming IN ('queued','sent','delivered','read','failed')
+    WHEN 'unknown' THEN p_incoming IN ('sent','delivered','read','failed')
     ELSE false
   END
   OR p_current=p_incoming;
@@ -660,10 +667,9 @@ BEGIN
       control_version=v_next_version,updated_at=now()
   WHERE id=p_thread_id;
   INSERT INTO aichm_private.conversation_control_events(
-    thread_id,request_id,action,actor_ref,reason,prior_version,resulting_version,
-    whatsapp_consent_granted,whatsapp_opted_out
+    thread_id,request_id,action,actor_ref,reason,prior_version,resulting_version
   ) VALUES (p_thread_id,p_request_id,'lead_linked',p_actor_ref,p_reason,
-    v_thread.control_version,v_next_version,NULL,NULL);
+    v_thread.control_version,v_next_version);
   RETURN QUERY SELECT 'linked'::text,v_next_version;
 END
 $function$;
@@ -774,6 +780,7 @@ DECLARE
   v_expired record;
   v_expired_outbox aichm_private.conversation_outbox%ROWTYPE;
   v_expired_attempt_id uuid;
+  v_now timestamptz;
 BEGIN
   IF p_lease_seconds NOT BETWEEN 5 AND 300 THEN
     RAISE EXCEPTION 'invalid_conversation_lease' USING ERRCODE='22023';
@@ -792,8 +799,9 @@ BEGIN
     SELECT * INTO v_expired_outbox FROM aichm_private.conversation_outbox
     WHERE id=v_expired.id FOR UPDATE SKIP LOCKED;
     IF NOT FOUND OR v_expired_outbox.state NOT IN ('claimed','sending')
-      OR v_expired_outbox.lease_expires_at>now()
     THEN CONTINUE; END IF;
+    v_now:=clock_timestamp();
+    IF v_expired_outbox.lease_expires_at>v_now THEN CONTINUE; END IF;
     SELECT a.id INTO v_expired_attempt_id
     FROM aichm_private.conversation_outbox_attempts a
     WHERE a.outbox_id=v_expired_outbox.id
@@ -802,20 +810,39 @@ BEGIN
     IF v_expired_attempt_id IS NULL THEN
       RAISE EXCEPTION 'conversation_outbox_attempt_missing' USING ERRCODE='P0001';
     END IF;
+    v_now:=clock_timestamp();
+    IF v_expired_outbox.lease_expires_at>v_now THEN CONTINUE; END IF;
     IF v_expired_outbox.state='claimed' THEN
-      UPDATE aichm_private.conversation_outbox_attempts
-      SET state='cancelled',finished_at=now()
-      WHERE id=v_expired_attempt_id AND state='claimed';
-      UPDATE aichm_private.conversation_outbox
-      SET state=CASE WHEN attempt_count>=max_attempts THEN 'failed' ELSE 'pending' END,
-          lease_token=NULL,lease_expires_at=NULL,available_at=now(),updated_at=now()
-      WHERE id=v_expired_outbox.id;
+      IF v_expired_outbox.attempt_count>=v_expired_outbox.max_attempts THEN
+        UPDATE aichm_private.conversation_outbox_attempts
+        SET state='failed',delivery_state='failed',finished_at=v_now
+        WHERE id=v_expired_attempt_id AND state='claimed';
+        UPDATE aichm_private.conversation_messages m
+        SET delivery_state='failed'
+        FROM aichm_private.conversation_outbox o
+        WHERE o.id=v_expired_outbox.id AND m.id=o.message_id;
+        UPDATE aichm_private.conversation_outbox
+        SET state='failed',lease_token=NULL,lease_expires_at=NULL,updated_at=v_now
+        WHERE id=v_expired_outbox.id;
+      ELSE
+        UPDATE aichm_private.conversation_outbox_attempts
+        SET state='cancelled',delivery_state='cancelled',finished_at=v_now
+        WHERE id=v_expired_attempt_id AND state='claimed';
+        UPDATE aichm_private.conversation_messages m
+        SET delivery_state='queued'
+        FROM aichm_private.conversation_outbox o
+        WHERE o.id=v_expired_outbox.id AND m.id=o.message_id;
+        UPDATE aichm_private.conversation_outbox
+        SET state='pending',lease_token=NULL,lease_expires_at=NULL,
+            available_at=v_now,updated_at=v_now
+        WHERE id=v_expired_outbox.id;
+      END IF;
     ELSE
       UPDATE aichm_private.conversation_outbox_attempts
-      SET state='unknown',delivery_state='unknown',finished_at=now()
+      SET state='unknown',delivery_state='unknown',finished_at=v_now
       WHERE id=v_expired_attempt_id AND state='sending';
       UPDATE aichm_private.conversation_outbox
-      SET state='unknown',lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+      SET state='unknown',lease_token=NULL,lease_expires_at=NULL,updated_at=v_now
       WHERE id=v_expired_outbox.id;
       UPDATE aichm_private.conversation_messages m
       SET delivery_state='unknown'
@@ -823,13 +850,24 @@ BEGIN
       WHERE o.id=v_expired_outbox.id AND m.id=o.message_id;
     END IF;
   END LOOP;
-  UPDATE aichm_private.conversation_outbox
-  SET state='failed',lease_token=NULL,lease_expires_at=NULL,updated_at=now()
-  WHERE state='pending' AND attempt_count>=max_attempts;
+  v_now:=clock_timestamp();
+  UPDATE aichm_private.conversation_outbox o
+  SET state='failed',lease_token=NULL,lease_expires_at=NULL,updated_at=v_now
+  WHERE o.state='pending' AND o.attempt_count>=o.max_attempts;
+  UPDATE aichm_private.conversation_outbox_attempts a
+  SET state='failed',delivery_state='failed',finished_at=v_now
+  FROM aichm_private.conversation_outbox o
+  WHERE o.id=a.outbox_id AND o.state='failed'
+    AND a.attempt_number=o.attempt_count AND a.state IN ('claimed','cancelled');
+  UPDATE aichm_private.conversation_messages m
+  SET delivery_state='failed'
+  FROM aichm_private.conversation_outbox o
+  WHERE o.message_id=m.id AND o.state='failed' AND o.attempt_count>=o.max_attempts;
 
   SELECT o.id,o.thread_id INTO v_candidate_outbox_id,v_candidate_thread_id
   FROM aichm_private.conversation_outbox o
-  WHERE o.state='pending' AND o.available_at<=now() AND o.attempt_count<o.max_attempts
+  WHERE o.state='pending' AND o.author='assistant'
+    AND o.available_at<=v_now AND o.attempt_count<o.max_attempts
   ORDER BY o.available_at,o.id
   LIMIT 1;
   IF v_candidate_outbox_id IS NULL THEN RETURN; END IF;
@@ -839,19 +877,28 @@ BEGIN
   IF NOT FOUND THEN RETURN; END IF;
   SELECT * INTO v_outbox FROM aichm_private.conversation_outbox
   WHERE id=v_candidate_outbox_id FOR UPDATE SKIP LOCKED;
-  IF NOT FOUND OR v_outbox.state<>'pending' OR v_outbox.available_at>now()
-    OR v_outbox.attempt_count>=v_outbox.max_attempts
-    OR v_thread.mapping_status<>'mapped' OR v_thread.lifecycle<>'open'
+  IF NOT FOUND THEN RETURN; END IF;
+  v_now:=clock_timestamp();
+  IF v_outbox.state<>'pending' THEN RETURN; END IF;
+  IF v_thread.mapping_status<>'mapped' OR v_thread.lifecycle<>'open'
     OR v_thread.control_version<>v_outbox.expected_control_version
-    OR NOT ((v_outbox.author='assistant' AND v_thread.mode='ai')
-      OR (v_outbox.author='human_staff' AND v_thread.mode='human'))
-  THEN RETURN; END IF;
+    OR v_outbox.author<>'assistant' OR v_thread.mode<>'ai'
+  THEN
+    UPDATE aichm_private.conversation_outbox
+    SET state='cancelled',lease_token=NULL,lease_expires_at=NULL,updated_at=v_now
+    WHERE id=v_outbox.id AND state='pending';
+    UPDATE aichm_private.conversation_messages
+    SET delivery_state='cancelled'
+    WHERE id=v_outbox.message_id AND delivery_state='queued';
+    RETURN;
+  END IF;
+  IF v_outbox.available_at>v_now OR v_outbox.attempt_count>=v_outbox.max_attempts THEN RETURN; END IF;
 
   v_lease:=gen_random_uuid();
-  v_expires:=now()+make_interval(secs=>p_lease_seconds);
+  v_expires:=v_now+make_interval(secs=>p_lease_seconds);
   UPDATE aichm_private.conversation_outbox o
   SET state='claimed',attempt_count=attempt_count+1,lease_token=v_lease,
-      lease_expires_at=v_expires,updated_at=now()
+      lease_expires_at=v_expires,updated_at=v_now
   WHERE o.id=v_outbox.id
   RETURNING o.* INTO v_outbox;
   INSERT INTO aichm_private.conversation_outbox_attempts(
@@ -883,6 +930,7 @@ DECLARE
   v_attempt aichm_private.conversation_outbox_attempts%ROWTYPE;
   v_thread aichm_private.conversation_threads%ROWTYPE;
   v_message aichm_private.conversation_messages%ROWTYPE;
+  v_now timestamptz;
 BEGIN
   IF p_thread_id IS NULL OR p_outbox_id IS NULL OR p_attempt_id IS NULL
     OR p_lease_token IS NULL OR p_expected_control_version IS NULL
@@ -916,11 +964,12 @@ BEGIN
   WHERE id=p_message_id AND thread_id=p_thread_id FOR UPDATE;
   IF NOT FOUND THEN RETURN 'message_not_found'; END IF;
 
+  v_now:=clock_timestamp();
   IF v_outbox.state<>'claimed' OR v_attempt.state<>'claimed'
     OR v_outbox.lease_token IS DISTINCT FROM p_lease_token
     OR v_attempt.lease_token IS DISTINCT FROM p_lease_token
-    OR v_outbox.lease_expires_at IS NULL OR v_outbox.lease_expires_at<=now()
-    OR v_attempt.lease_expires_at<=now()
+    OR v_outbox.lease_expires_at IS NULL OR v_outbox.lease_expires_at<=v_now
+    OR v_attempt.lease_expires_at<=v_now
     OR v_outbox.attempt_count<>v_attempt.attempt_number
     OR v_outbox.expected_control_version IS DISTINCT FROM p_expected_control_version
     OR v_thread.control_version IS DISTINCT FROM p_expected_control_version
@@ -938,20 +987,26 @@ BEGIN
   THEN
     IF v_outbox.state='claimed' AND v_outbox.lease_token=p_lease_token THEN
       UPDATE aichm_private.conversation_outbox
-      SET state='cancelled',lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+      SET state=CASE WHEN v_outbox.attempt_count>=v_outbox.max_attempts THEN 'failed' ELSE 'cancelled' END,
+          lease_token=NULL,lease_expires_at=NULL,updated_at=v_now
       WHERE id=p_outbox_id;
       UPDATE aichm_private.conversation_outbox_attempts
-      SET state='cancelled',finished_at=now()
+      SET state=CASE WHEN v_outbox.attempt_count>=v_outbox.max_attempts THEN 'failed' ELSE 'cancelled' END,
+          delivery_state=CASE WHEN v_outbox.attempt_count>=v_outbox.max_attempts THEN 'failed' ELSE 'cancelled' END,
+          finished_at=v_now
       WHERE id=p_attempt_id AND state='claimed';
+      UPDATE aichm_private.conversation_messages
+      SET delivery_state=CASE WHEN v_outbox.attempt_count>=v_outbox.max_attempts THEN 'failed' ELSE 'cancelled' END
+      WHERE id=p_message_id AND delivery_state='queued';
     END IF;
     RETURN 'denied';
   END IF;
 
   UPDATE aichm_private.conversation_outbox
-  SET state='sending',updated_at=now()
+  SET state='sending',updated_at=v_now
   WHERE id=p_outbox_id;
   UPDATE aichm_private.conversation_outbox_attempts
-  SET state='sending',started_at=now()
+  SET state='sending',started_at=v_now
   WHERE id=p_attempt_id;
   RETURN 'begun';
 END
@@ -980,6 +1035,7 @@ DECLARE
   v_thread_id uuid;
   v_thread aichm_private.conversation_threads%ROWTYPE;
   v_state text;
+  v_now timestamptz;
 BEGIN
   IF p_outbox_id IS NULL OR p_attempt_id IS NULL OR p_lease_token IS NULL
     OR p_result IS NULL OR p_result NOT IN ('sent','failed','unknown')
@@ -1000,10 +1056,11 @@ BEGIN
   IF NOT FOUND OR v_attempt.state<>'sending' OR v_attempt.lease_token<>p_lease_token THEN
     RETURN 'lease_lost';
   END IF;
+  v_now:=clock_timestamp();
   v_state:=CASE p_result WHEN 'sent' THEN 'sent' WHEN 'failed' THEN 'failed' ELSE 'unknown' END;
   UPDATE aichm_private.conversation_outbox_attempts
   SET provider_message_key=p_provider_message_key,state=v_state,delivery_state=v_state,
-      finished_at=now()
+      finished_at=v_now
   WHERE id=p_attempt_id;
   UPDATE aichm_private.conversation_messages m
   SET provider_message_key=p_provider_message_key,delivery_state=v_state
@@ -1011,7 +1068,7 @@ BEGIN
   WHERE o.id=p_outbox_id AND m.id=o.message_id;
   UPDATE aichm_private.conversation_outbox
   SET state=CASE p_result WHEN 'sent' THEN 'accepted' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
-      lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+      lease_token=NULL,lease_expires_at=NULL,updated_at=v_now
   WHERE id=p_outbox_id;
   RETURN p_result;
 END
@@ -1023,9 +1080,7 @@ CREATE OR REPLACE FUNCTION aichm_private.transition_conversation_control(
   p_action text,
   p_actor_ref text,
   p_request_id uuid,
-  p_reason text,
-  p_whatsapp_consent_granted boolean DEFAULT false,
-  p_whatsapp_opted_out boolean DEFAULT true
+  p_reason text
 ) RETURNS TABLE(outcome text,control_version bigint)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, aichm_private, pg_temp
@@ -1035,13 +1090,13 @@ DECLARE
   v_control aichm_private.conversation_control_events%ROWTYPE;
   v_new_mode text;
   v_version bigint;
+  v_now timestamptz;
 BEGIN
   IF p_thread_id IS NULL OR p_expected_control_version IS NULL
     OR p_action IS NULL OR p_action NOT IN ('takeover','resume')
     OR p_actor_ref IS NULL OR p_actor_ref !~ '^replit_lms_user:[1-9][0-9]{0,9}$'
     OR p_request_id IS NULL
     OR (p_reason IS NOT NULL AND length(btrim(p_reason)) NOT BETWEEN 3 AND 500)
-    OR (p_action='resume' AND (p_whatsapp_consent_granted IS NULL OR p_whatsapp_opted_out IS NULL))
   THEN RAISE EXCEPTION 'invalid_conversation_control_request' USING ERRCODE='22023'; END IF;
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(p_request_id::text,0));
   SELECT * INTO v_control FROM aichm_private.conversation_control_events
@@ -1050,10 +1105,6 @@ BEGIN
     IF v_control.thread_id=p_thread_id AND v_control.action=p_action
       AND v_control.actor_ref=p_actor_ref AND v_control.reason IS NOT DISTINCT FROM p_reason
       AND v_control.prior_version=p_expected_control_version
-      AND v_control.whatsapp_consent_granted IS NOT DISTINCT FROM
-        (CASE WHEN p_action='resume' THEN p_whatsapp_consent_granted ELSE NULL END)
-      AND v_control.whatsapp_opted_out IS NOT DISTINCT FROM
-        (CASE WHEN p_action='resume' THEN p_whatsapp_opted_out ELSE NULL END)
     THEN
       RETURN QUERY SELECT 'duplicate'::text,v_control.resulting_version; RETURN;
     END IF;
@@ -1062,6 +1113,7 @@ BEGIN
   SELECT * INTO v_thread FROM aichm_private.conversation_threads
   WHERE id=p_thread_id FOR UPDATE;
   IF NOT FOUND THEN RETURN QUERY SELECT 'thread_not_found'::text,NULL::bigint; RETURN; END IF;
+  v_now:=clock_timestamp();
   IF v_thread.control_version<>p_expected_control_version THEN
     RETURN QUERY SELECT 'version_conflict'::text,v_thread.control_version; RETURN;
   END IF;
@@ -1073,35 +1125,31 @@ BEGIN
     v_new_mode:='human';
   ELSE
     IF v_thread.mode<>'human' THEN RETURN QUERY SELECT 'not_human_owned'::text,v_thread.control_version; RETURN; END IF;
-    IF p_whatsapp_opted_out THEN
-      RETURN QUERY SELECT 'whatsapp_opted_out'::text,v_thread.control_version; RETURN;
-    END IF;
-    IF NOT p_whatsapp_consent_granted THEN
-      RETURN QUERY SELECT 'whatsapp_consent_not_granted'::text,v_thread.control_version; RETURN;
-    END IF;
     v_new_mode:='ai';
   END IF;
 
   v_version:=v_thread.control_version+1;
   UPDATE aichm_private.conversation_threads
-  SET mode=v_new_mode,control_version=v_version,updated_at=now()
+  SET mode=v_new_mode,control_version=v_version,updated_at=v_now
   WHERE id=p_thread_id;
   INSERT INTO aichm_private.conversation_control_events(
-    thread_id,request_id,action,actor_ref,reason,prior_version,resulting_version,
-    whatsapp_consent_granted,whatsapp_opted_out
+    thread_id,request_id,action,actor_ref,reason,prior_version,resulting_version,occurred_at
   ) VALUES (p_thread_id,p_request_id,p_action,p_actor_ref,p_reason,
-    v_thread.control_version,v_version,
-    CASE WHEN p_action='resume' THEN p_whatsapp_consent_granted ELSE NULL END,
-    CASE WHEN p_action='resume' THEN p_whatsapp_opted_out ELSE NULL END);
+    v_thread.control_version,v_version,v_now);
 
   IF p_action='takeover' THEN
+    UPDATE aichm_private.conversation_messages m
+    SET delivery_state='cancelled'
+    FROM aichm_private.conversation_outbox o
+    WHERE o.message_id=m.id AND o.thread_id=p_thread_id AND o.author='assistant'
+      AND o.state IN ('pending','claimed') AND m.delivery_state='queued';
     UPDATE aichm_private.conversation_outbox_attempts a
-    SET state='cancelled',finished_at=now()
+    SET state='cancelled',delivery_state='cancelled',finished_at=v_now
     FROM aichm_private.conversation_outbox o
     WHERE a.outbox_id=o.id AND o.thread_id=p_thread_id AND o.author='assistant'
       AND o.state='claimed' AND a.state='claimed';
     UPDATE aichm_private.conversation_outbox
-    SET state='cancelled',lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+    SET state='cancelled',lease_token=NULL,lease_expires_at=NULL,updated_at=v_now
     WHERE thread_id=p_thread_id AND author='assistant' AND state IN ('pending','claimed');
   END IF;
   RETURN QUERY SELECT 'changed'::text,v_version;
@@ -1121,9 +1169,48 @@ ALTER FUNCTION aichm_private.begin_conversation_send(uuid,uuid,uuid,uuid,bigint,
   OWNER TO aichm_conversation_owner;
 ALTER FUNCTION aichm_private.record_conversation_send_result(uuid,uuid,uuid,text,text)
   OWNER TO aichm_conversation_owner;
-ALTER FUNCTION aichm_private.transition_conversation_control(uuid,bigint,text,text,uuid,text,boolean,boolean)
+ALTER FUNCTION aichm_private.transition_conversation_control(uuid,bigint,text,text,uuid,text)
   OWNER TO aichm_conversation_owner;
 REVOKE CREATE ON SCHEMA aichm_private FROM aichm_conversation_owner;
+
+-- Start from no direct ACL grants for any pre-existing role. The dedicated
+-- runtime capability is re-granted EXECUTE only below; no role receives table
+-- or sequence access, including roles outside the currently-known list.
+DO $acl$
+DECLARE
+  role_name text;
+  table_name text;
+  function_oid oid;
+BEGIN
+  FOR role_name IN SELECT rolname FROM pg_catalog.pg_roles
+    WHERE rolname<>'aichm_conversation_owner'
+  LOOP
+    FOREACH table_name IN ARRAY ARRAY[
+      'conversation_threads','conversation_messages','conversation_events',
+      'conversation_outbox','conversation_outbox_attempts',
+      'conversation_delivery_receipts','conversation_control_events'
+    ]
+    LOOP
+      EXECUTE format('REVOKE ALL ON TABLE aichm_private.%I FROM %I',table_name,role_name);
+    END LOOP;
+    FOR function_oid IN
+      SELECT p.oid FROM pg_catalog.pg_proc p
+      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='aichm_private' AND p.proname=ANY(ARRAY[
+        'delivery_transition_allowed','accept_provider_event','link_conversation_thread',
+        'enqueue_conversation_message','claim_next_conversation_outbound',
+        'begin_conversation_send','record_conversation_send_result',
+        'transition_conversation_control'
+      ])
+    LOOP
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %s FROM %I',
+        function_oid::regprocedure,role_name
+      );
+    END LOOP;
+  END LOOP;
+END
+$acl$;
 
 REVOKE ALL ON FUNCTION aichm_private.delivery_transition_allowed(text,text)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
@@ -1139,7 +1226,7 @@ REVOKE ALL ON FUNCTION aichm_private.begin_conversation_send(uuid,uuid,uuid,uuid
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
 REVOKE ALL ON FUNCTION aichm_private.record_conversation_send_result(uuid,uuid,uuid,text,text)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
-REVOKE ALL ON FUNCTION aichm_private.transition_conversation_control(uuid,bigint,text,text,uuid,text,boolean,boolean)
+REVOKE ALL ON FUNCTION aichm_private.transition_conversation_control(uuid,bigint,text,text,uuid,text)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
 
 GRANT EXECUTE ON FUNCTION aichm_private.accept_provider_event(text,text,text,text,text,timestamptz,text,text,text,text,text,text,text,text,text,text,text)
@@ -1154,9 +1241,6 @@ GRANT EXECUTE ON FUNCTION aichm_private.begin_conversation_send(uuid,uuid,uuid,u
   TO aichm_conversation_runtime;
 GRANT EXECUTE ON FUNCTION aichm_private.record_conversation_send_result(uuid,uuid,uuid,text,text)
   TO aichm_conversation_runtime;
-GRANT EXECUTE ON FUNCTION aichm_private.transition_conversation_control(uuid,bigint,text,text,uuid,text,boolean,boolean)
-  TO aichm_conversation_runtime;
-
 -- Existing aichm_crm_conversations_for_replit_lead remains unchanged. This
 -- migration does not backfill or dual-write legacy rows; CRM history cutover
 -- needs a separate reviewed reader change with exact deduplication evidence.

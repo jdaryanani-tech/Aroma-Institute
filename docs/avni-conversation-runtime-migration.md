@@ -8,11 +8,15 @@ loopback PostgreSQL cluster created by the explicit
 `script/test-crm-persistence.ts --run-isolated-ephemeral-postgres
 --suite=avni-conversation-runtime` command.
 
-`migrations/0019_avni_dispatch_grants.sql` is also a draft and has not been
-applied. It adds a Replit consent epoch and a reference/hash-only dispatch-grant
-ledger. It is not yet in the Drizzle journal because the repository's manual
-post-0012 migration chain must be reconciled before enabling it through the
-normal migration runner.
+`migrations/0019_avni_dispatch_grants.sql` and
+`migrations/0020_avni_dispatch_authorization_fence.sql` are also drafts and
+have not been applied. They add a Replit consent epoch and reference/hash-only
+dispatch-grant ledger, then bind grants to an active LMS actor and assignment.
+They are not in the Drizzle journal because the repository's manual post-0012
+migration chain must be reconciled before enabling them through the normal
+migration runner. Migration 0019 deliberately grants no runtime table access;
+0020 is required for the ownership/ACL hardening and constrained application
+role grant. Do not apply 0019 alone.
 
 ## Scope and ownership
 
@@ -54,6 +58,8 @@ The claim RPC only leases bounded work; it does not authorize sending. The
 final `begin_conversation_send` RPC has no caller-supplied consent boolean and
 atomically checks the current lease, attempt, control version, AI ownership,
 open/mapped thread, and exact queued message, idempotency key, and payload hash.
+It only claims assistant-authored AI work; human-authored outbox rows are never
+claimable until a separate trusted human-send authorization boundary exists.
 Replit must hold its consent-row/grant transaction while invoking that fixed
 Supabase RPC. A successful `begin_send` is the in-flight linearization point.
 Provider-observed outbound messages are recorded as `unknown`, never `queued`,
@@ -62,17 +68,21 @@ retryable; an expired `sending` lease becomes `unknown` and is not blindly
 retried. The SQL cannot independently query Replit PostgreSQL. No provider
 sender, transport route, or credential is installed by this migration.
 
-The Replit protocol increments `consent_epoch` only when effective granted
-consent or opt-out state changes, and revokes unused `issued` grants in the
-same database transaction. A grant is short-lived and one-use, bound to the
-canonical Replit lead, exact Supabase thread/outbox/message/attempt, consent
-epoch, conversation control version, attempt number, lease-token hash,
-idempotency key, and payload SHA-256. The cross-database coordinator holds the
-Replit consent/grant transaction around Supabase `begin_send`; it does not call
-a provider. If the RPC result is ambiguous, the attempt becomes unknown and is
-not blindly retried. This is not distributed ACID: if Supabase commits
-`begin_send` but the Replit commit or response is lost, the protocol must stop
-and reconcile; no provider call is made by this implementation.
+The Replit database trigger, not an application caller, owns `consent_epoch`.
+It advances the epoch for effective consent/opt-out transitions and consent
+metadata/version changes, and revokes unused `issued` grants in the same
+transaction. The Replit coordinator locks the active LMS actor, current roles,
+canonical lead, assignment, consent preference, then grant; it refreshes the
+database clock after locks. Each grant binds that actor/role and exact
+assignment version as well as the canonical Replit lead, Supabase
+thread/outbox/message/attempt, consent epoch, conversation control version,
+attempt number, lease-token hash, idempotency key, payload SHA-256, and bounded
+expiry. Redemption rechecks actor activity/role, assignment, lead, and consent
+under locks before calling the fixed Supabase `begin_send` callback. It checks
+database time again after the callback; an ambiguous or late result becomes
+unknown and is not blindly retried. This is not distributed ACID: if Supabase
+commits `begin_send` but the Replit commit or response is lost, the protocol
+must stop and reconcile; no provider call is made by this implementation.
 
 Human takeover increments the control version and cancels pending or claimed
 assistant outbox rows in the same transaction. If takeover wins before
@@ -90,13 +100,20 @@ The migration does not create a provider sender or enable any messaging.
   `aichm_conversation_runtime`. The owner owns only these seven private tables
   and their RPCs; forced RLS has a policy only for that non-login owner. The
   owner has no memberships or schema `CREATE` after migration. The runtime role
-  receives schema `USAGE` and narrowly scoped `EXECUTE`, not table or sequence
-  privileges. No password, login, secret, service credential, or role
-  membership is created.
+  receives schema `USAGE` and narrowly scoped `EXECUTE` for event, thread,
+  enqueue, claim, begin-send, and send-result RPCs, not table or sequence
+  privileges. The control-transition RPC remains owner-only; generic runtime
+  credentials cannot assert an LMS actor. No password, login, secret, service
+  credential, or role membership is created.
 - `anon`, `authenticated`, `service_role`, and `aichm_crm_reader` receive no
   direct privilege on the seven new tables and no execute privilege on the
   write RPCs. RLS is enabled with no client policies. `service_role` is not
   granted the new runtime functions.
+- The migration revokes table and function ACLs from all pre-existing database
+  roles except the owner, re-grants only the runtime RPC boundary, and
+  postconditions reject any unexpected table/function ACL. Runtime membership
+  must be a direct, explicitly approved membership with `admin_option=false`;
+  unexpected or broad role membership is a readiness failure.
 - A separate runtime-readiness check accepts only one explicitly approved
   `LOGIN` role as a direct member of the runtime capability, with no other
   memberships and no superuser, `BYPASSRLS`, create, replication, or inherit
@@ -137,6 +154,16 @@ introduced. The public adapter result contains only a safe status/code,
 conversation mode/version, and the constant `sendAuthorized: false`; it never
 returns lead, Supabase, or thread identifiers.
 
+`server/crm/avni-conversation-control.ts` is also a server-only capability, not
+an HTTP route. It derives control actor identity from the current CRM session,
+reloads active user/role/assignment and consent for the exact crosswalk, and
+hands only server-derived control intent to an injected persistence adapter.
+No browser or n8n control route exists. Resume fails closed without current
+granted consent and no explicit opt-out. The draft Supabase control RPC is not
+granted to the generic runtime role until that trusted adapter is connected
+through a separately reviewed server-only writer boundary. This is not a
+delivery path.
+
 This is intentionally only a preflight. It does not enqueue, claim, mutate a
 conversation, or contact a provider. The preflight result is never permission
 to send. The separate local grant protocol below models the cross-database
@@ -151,6 +178,14 @@ no route or caller wires them to a provider. The `N8N_AVNI_FOLLOWUP_READ_SECRET`
 candidate-read capability is not broadened and cannot access grants or send.
 The server-only keyed HMAC boundary for provider references remains a hard
 prerequisite; no key or adapter is created here.
+
+The Replit-only migration `0020` also requires the existing
+`aichm_crm_owner`, `aichm_app_runtime`, and `aichm_app_login` roles with their
+safe source-defined attributes. It assigns the dispatch ledger to
+`aichm_crm_owner`, allows only `aichm_app_runtime` SELECT/INSERT/UPDATE, and
+requires exactly one non-admin membership (`aichm_app_login` -> runtime) with
+no other runtime/login memberships. Unexpected direct ACLs abort the migration;
+it does not provision or repair any roles or credentials.
 
 ## Objects in the draft
 
@@ -177,8 +212,12 @@ replays return `duplicate`; reuse with different control data returns
 `request_id_conflict`. Provider and outbound idempotency keys must match their
 HMAC token suffix. Injected failure tests verify the draft migration rolls back
 its created roles and objects atomically in the disposable database. The
-Replit-side focused PostgreSQL test applies migration 0019 only to the
-socket-only throwaway CRM database, verifies epoch increments and grant
-invalidation rollback, and uses synthetic UUIDs/hashes. Tests do not call
-Supabase or a provider. A fake transport acceptance/crash is represented only
-in the disposable SQL test to verify the unknown/no-blind-retry boundary.
+Replit-side focused PostgreSQL test applies migrations 0019 and 0020 only to
+the socket-only throwaway CRM database, verifies trigger-owned epoch increments,
+direct-SQL grant invalidation, actor/assignment revalidation, lock-wait expiry,
+and rollback, using synthetic records. The Supabase suite uses its separate
+disposable loopback cluster and includes lock-wait lease expiry, takeover,
+receipt ordering, human-outbox exclusion, role/ACL postconditions, and injected
+rollback. Tests do not call live Supabase or a provider. A fake transport
+acceptance/crash is represented only as a state-machine result; no transport is
+installed.

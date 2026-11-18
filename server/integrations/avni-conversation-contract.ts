@@ -172,7 +172,9 @@ const deliveryStateTransitions: Record<AvniDeliveryState, ReadonlySet<AvniDelive
   delivered: new Set<AvniDeliveryState>(["read"]),
   read: new Set<AvniDeliveryState>(),
   failed: new Set<AvniDeliveryState>(),
-  unknown: new Set<AvniDeliveryState>(["queued", "sent", "delivered", "read", "failed"]),
+  // Unknown is an in-flight outcome, never a retry signal. A later provider
+  // receipt may resolve it; a new retry must use a distinct attempt.
+  unknown: new Set<AvniDeliveryState>(["sent", "delivered", "read", "failed"]),
 };
 
 /** Monotonic within one provider send attempt. Retries receive a new attempt row. */

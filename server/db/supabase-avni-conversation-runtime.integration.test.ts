@@ -90,6 +90,23 @@ async function asRuntime<T>(callback: (client: PoolClient) => Promise<T>): Promi
   }
 }
 
+async function asOwner<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
+  requireHarness();
+  const client = await pool!.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL ROLE aichm_conversation_owner");
+    const value = await callback(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function asReader<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
   requireHarness();
   const client = await pool!.connect();
@@ -192,6 +209,27 @@ async function installSyntheticPrerequisitesAndMigration(): Promise<void> {
   );
 
   const migration = await readFile("supabase/migrations/20261118_avni_conversation_runtime_v1.sql", "utf8");
+  await pool!.query(`
+    CREATE ROLE aichm_conversation_runtime LOGIN INHERIT;
+  `);
+  await assert.rejects(pool!.query(migration), /AVNI_CONVERSATION_ROLE_ATTRIBUTES_UNSAFE/);
+  const unsafeRoleState = await pool!.query<{ can_login: boolean; can_inherit: boolean }>(
+    "SELECT rolcanlogin AS can_login,rolinherit AS can_inherit FROM pg_roles WHERE rolname='aichm_conversation_runtime'",
+  );
+  assert.deepEqual(unsafeRoleState.rows[0], { can_login: true, can_inherit: true },
+    "migration must not repair or silently mutate an unsafe pre-existing role");
+  await pool!.query("DROP ROLE aichm_conversation_runtime");
+  await pool!.query(`
+    CREATE ROLE aichm_conversation_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
+      NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+    GRANT USAGE ON SCHEMA aichm_private TO aichm_conversation_owner;
+  `);
+  await assert.rejects(pool!.query(migration), /AVNI_CONVERSATION_ROLE_ACL_PREEXISTS/);
+  assert.equal((await pool!.query<{ usage: boolean }>(
+    "SELECT has_schema_privilege('aichm_conversation_owner','aichm_private','USAGE') AS usage",
+  )).rows[0].usage, true, "migration must not silently rewrite pre-existing ACLs");
+  await pool!.query("REVOKE USAGE ON SCHEMA aichm_private FROM aichm_conversation_owner");
+  await pool!.query("DROP ROLE aichm_conversation_owner");
   const failingMigration = migration.replace(
     /\nCOMMIT;\s*$/,
     "\nSELECT 1/0;\nCOMMIT;\n",
@@ -390,9 +428,9 @@ async function createReadyThread() {
     [accepted.thread_id, supabaseLeadId, linkRequestId],
   ));
   assert.equal(link.rows[0].outcome, "linked");
-  const resumed = await asRuntime(client => client.query(
+  const resumed = await asOwner(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,1,'resume','replit_lms_user:42',$2,'synthetic approved resume',true,false
+      $1,1,'resume','replit_lms_user:42',$2,'synthetic approved resume'
     )`,
     [accepted.thread_id, randomUUID()],
   ));
@@ -518,6 +556,39 @@ test("runtime readiness is separate, read-only, and accepts only one constrained
       GRANT aichm_conversation_runtime TO ${login};
     `);
     await assertAvniConversationRuntimeReadiness(client, login);
+    await client.query(`GRANT SELECT ON aichm_private.conversation_threads TO ${broadRole}`);
+    await assert.rejects(
+      assertAvniConversationRuntimePostconditions(client),
+      /AVNI_CONVERSATION_RUNTIME_UNEXPECTED_TABLE_ACL_FOUND/,
+    );
+    await client.query(`REVOKE SELECT ON aichm_private.conversation_threads FROM ${broadRole}`);
+    await client.query(`
+      GRANT EXECUTE ON FUNCTION aichm_private.transition_conversation_control(uuid,bigint,text,text,uuid,text)
+      TO ${broadRole}
+    `);
+    await assert.rejects(
+      assertAvniConversationRuntimePostconditions(client),
+      /AVNI_CONVERSATION_RUNTIME_RPC_PRIVILEGE_OR_PATH_DRIFTED/,
+    );
+    await client.query(`
+      REVOKE EXECUTE ON FUNCTION aichm_private.transition_conversation_control(uuid,bigint,text,text,uuid,text)
+      FROM ${broadRole}
+    `);
+    await client.query(`GRANT aichm_conversation_runtime TO ${login} WITH ADMIN OPTION`);
+    await assert.rejects(
+      assertAvniConversationRuntimeReadiness(client, login),
+      /AVNI_CONVERSATION_RUNTIME_LOGIN_NOT_APPROVED/,
+      "approved capability membership must not grant authority to add members",
+    );
+    await client.query(`REVOKE ADMIN OPTION FOR aichm_conversation_runtime FROM ${login}`);
+    await assertAvniConversationRuntimeReadiness(client, login);
+    await client.query(`GRANT ${broadRole} TO aichm_conversation_runtime`);
+    await assert.rejects(
+      assertAvniConversationRuntimeReadiness(client, login),
+      /AVNI_CONVERSATION_RUNTIME_LOGIN_NOT_APPROVED/,
+      "runtime capability cannot itself inherit or set a broad role",
+    );
+    await client.query(`REVOKE ${broadRole} FROM aichm_conversation_runtime`);
     await client.query(`GRANT ${broadRole} TO ${login}`);
     await assert.rejects(
       assertAvniConversationRuntimeReadiness(client, login),
@@ -708,56 +779,70 @@ test("provider events are idempotent, changed replays conflict, and unmapped thr
   assert.equal(conflictingLinkReplay.rows[0].outcome, "request_id_conflict");
 });
 
-test("resume uses consent and opt-out gates, and only a versioned staff action changes ownership", {
+test("provider-observed outbound messages are unknown and create no outbox work", {
+  skip: !enabled,
+}, async () => {
+  const event = makeMessageEvent({
+    providerMessageRef: `provider-observed-${randomUUID()}`,
+    direction: "outbound",
+    author: "assistant",
+    text: "synthetic provider-observed outbound",
+  });
+  const accepted = await acceptMessage(event);
+  const rows = await queryRows<{ delivery_state: string; outbox_count: string }>(`
+    SELECT m.delivery_state,
+      (SELECT count(*)::text FROM aichm_private.conversation_outbox o WHERE o.message_id=m.id) AS outbox_count
+    FROM aichm_private.conversation_messages m WHERE m.id=$1
+  `, [accepted.message_id]);
+  assert.deepEqual(rows[0], { delivery_state: "unknown", outbox_count: "0" });
+});
+
+test("control RPC accepts no caller-supplied consent claims and fences versioned staff actions", {
   skip: !enabled,
 }, async () => {
   const { threadId } = await createReadyThread();
+  await assert.rejects(
+    asRuntime(client => client.query(
+      `SELECT * FROM aichm_private.transition_conversation_control(
+        $1,2,'takeover','replit_lms_user:999',$2,'runtime must not assert an actor'
+      )`,
+      [threadId, randomUUID()],
+    )),
+    /permission denied/i,
+    "the generic runtime capability cannot submit caller-asserted control actors",
+  );
   const takeoverRequestId = randomUUID();
-  const takeover = await asRuntime(client => client.query(
+  const takeover = await asOwner(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,2,'takeover','replit_lms_user:42',$2,'synthetic takeover',false,true
+      $1,2,'takeover','replit_lms_user:42',$2,'synthetic takeover'
     )`,
     [threadId, takeoverRequestId],
   ));
   assert.equal(takeover.rows[0].outcome, "changed");
-  const takeoverReplay = await asRuntime(client => client.query(
+  const takeoverReplay = await asOwner(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,2,'takeover','replit_lms_user:42',$2,'synthetic takeover',false,true
+      $1,2,'takeover','replit_lms_user:42',$2,'synthetic takeover'
     )`,
     [threadId, takeoverRequestId],
   ));
   assert.equal(takeoverReplay.rows[0].outcome, "duplicate");
-  const changedReplay = await asRuntime(client => client.query(
+  const changedReplay = await asOwner(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,2,'takeover','replit_lms_user:42',$2,'different request data',false,true
+      $1,2,'takeover','replit_lms_user:42',$2,'different request data'
     )`,
     [threadId, takeoverRequestId],
   ));
   assert.equal(changedReplay.rows[0].outcome, "request_id_conflict");
-  const noConsent = await asRuntime(client => client.query(
+  const stale = await asOwner(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,3,'resume','replit_lms_user:42',$2,'synthetic consent missing',false,false
-    )`,
-    [threadId, randomUUID()],
-  ));
-  assert.equal(noConsent.rows[0].outcome, "whatsapp_consent_not_granted");
-  const optOut = await asRuntime(client => client.query(
-    `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,3,'resume','replit_lms_user:42',$2,'synthetic opt out',true,true
-    )`,
-    [threadId, randomUUID()],
-  ));
-  assert.equal(optOut.rows[0].outcome, "whatsapp_opted_out");
-  const stale = await asRuntime(client => client.query(
-    `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,2,'resume','replit_lms_user:42',$2,'synthetic stale version',true,false
+      $1,2,'resume','replit_lms_user:42',$2,'synthetic stale version'
     )`,
     [threadId, randomUUID()],
   ));
   assert.equal(stale.rows[0].outcome, "version_conflict");
-  const allowed = await asRuntime(client => client.query(
+  const allowed = await asOwner(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,3,'resume','replit_lms_user:42',$2,'synthetic consent approved',true,false
+      $1,3,'resume','replit_lms_user:42',$2,'synthetic resume after external trusted-preflight fixture'
     )`,
     [threadId, randomUUID()],
   ));
@@ -785,12 +870,12 @@ test("takeover wins atomically against a claimed AI send and invalidates stale q
     const item = claim.rows.find(row => row.outbox_id === queued.rows[0].outbox_id);
     assert.ok(item);
 
-    await taker.query("SET ROLE aichm_conversation_runtime");
+    await taker.query("SET ROLE aichm_conversation_owner");
     const takerPid = (await taker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     let takeoverFinished = false;
     const takeoverPromise = taker.query(
       `SELECT * FROM aichm_private.transition_conversation_control(
-        $1,2,'takeover','replit_lms_user:42',$2,'synthetic concurrent takeover',false,true
+        $1,2,'takeover','replit_lms_user:42',$2,'synthetic concurrent takeover'
       )`,
       [threadId, randomUUID()],
     ).then(result => { takeoverFinished = true; return result; });
@@ -808,6 +893,20 @@ test("takeover wins atomically against a claimed AI send and invalidates stale q
     );
     assert.equal(state[0].state, "cancelled");
     assert.equal(state[0].attempt_count, 1);
+    const triad = await queryRows<{
+      outbox_state: string; attempt_state: string; attempt_delivery: string; message_delivery: string;
+    }>(`
+      SELECT o.state AS outbox_state,a.state AS attempt_state,
+        a.delivery_state AS attempt_delivery,m.delivery_state AS message_delivery
+      FROM aichm_private.conversation_outbox o
+      JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+      JOIN aichm_private.conversation_messages m ON m.id=o.message_id
+      WHERE o.id=$1
+    `, [queued.rows[0].outbox_id]);
+    assert.deepEqual(triad[0], {
+      outbox_state: "cancelled", attempt_state: "cancelled",
+      attempt_delivery: "cancelled", message_delivery: "cancelled",
+    });
   } finally {
     try { await claimant.query("ROLLBACK"); } catch {}
     try { await taker.query("RESET ROLE"); } catch {}
@@ -849,14 +948,94 @@ test("begin_send rejects changed payload/message identity and cancels only the c
     ],
   ));
   assert.equal(denied.rows[0].outcome, "denied");
-  const state = await queryRows<{ outbox_state: string; attempt_state: string }>(`
-    SELECT o.state AS outbox_state,a.state AS attempt_state
+  const state = await queryRows<{
+    outbox_state: string; attempt_state: string; attempt_delivery: string; message_delivery: string;
+  }>(`
+    SELECT o.state AS outbox_state,a.state AS attempt_state,
+      a.delivery_state AS attempt_delivery,m.delivery_state AS message_delivery
     FROM aichm_private.conversation_outbox o
     JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+    JOIN aichm_private.conversation_messages m ON m.id=o.message_id
     WHERE o.id=$1
   `, [queued.rows[0].outbox_id]);
-  assert.equal(state[0].outbox_state, "cancelled");
-  assert.equal(state[0].attempt_state, "cancelled");
+  assert.deepEqual(state[0], {
+    outbox_state: "cancelled", attempt_state: "cancelled",
+    attempt_delivery: "cancelled", message_delivery: "cancelled",
+  });
+});
+
+test("begin_send refreshes database time after lock wait and denies an expired lease", {
+  skip: !enabled,
+}, async () => {
+  const { threadId } = await createReadyThread();
+  const queued = await enqueueAssistant(threadId);
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET state='cancelled' WHERE state='pending' AND id<>$1",
+    [queued.rows[0].outbox_id],
+  );
+  const claim = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_next_conversation_outbound(60)",
+  ));
+  const item = claim.rows.find(row => row.outbox_id === queued.rows[0].outbox_id);
+  assert.ok(item);
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET lease_expires_at=clock_timestamp()+interval '250 milliseconds' WHERE id=$1",
+    [queued.rows[0].outbox_id],
+  );
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox_attempts SET lease_expires_at=clock_timestamp()+interval '250 milliseconds' WHERE id=$1",
+    [item.attempt_id],
+  );
+
+  const blocker = await pool!.connect();
+  const sender = await pool!.connect();
+  try {
+    await blocker.query("BEGIN");
+    const blockerPid = (await blocker.query<{pid:number}>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    await blocker.query(
+      "SELECT id FROM aichm_private.conversation_threads WHERE id=$1 FOR UPDATE",
+      [threadId],
+    );
+    const message=(await pool!.query<{
+      message_id:string; expected_control_version:string; idempotency_key:string; message_fingerprint:string;
+    }>(`
+      SELECT o.message_id,o.expected_control_version,m.idempotency_key,m.message_fingerprint
+      FROM aichm_private.conversation_outbox o
+      JOIN aichm_private.conversation_messages m ON m.id=o.message_id WHERE o.id=$1
+    `,[queued.rows[0].outbox_id])).rows[0];
+    await sender.query("BEGIN");
+    await sender.query("SET LOCAL ROLE aichm_conversation_runtime");
+    const senderPid=(await sender.query<{pid:number}>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    const waiting=sender.query(
+      `SELECT aichm_private.begin_conversation_send($1,$2,$3,$4,$5,$6,$7,$8) AS outcome`,
+      [threadId,queued.rows[0].outbox_id,item.attempt_id,item.lease_token,
+        Number(message.expected_control_version),message.message_id,message.idempotency_key,message.message_fingerprint],
+    );
+    await waitUntilBlockedBy(senderPid,blockerPid);
+    await new Promise(resolve=>setTimeout(resolve,300));
+    await blocker.query("COMMIT");
+    assert.equal((await waiting).rows[0].outcome,"denied");
+    await sender.query("COMMIT");
+    const triad=(await pool!.query<{
+      outbox_state:string;attempt_state:string;attempt_delivery:string;message_delivery:string;
+    }>(`
+      SELECT o.state AS outbox_state,a.state AS attempt_state,a.delivery_state AS attempt_delivery,
+        m.delivery_state AS message_delivery
+      FROM aichm_private.conversation_outbox o
+      JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+      JOIN aichm_private.conversation_messages m ON m.id=o.message_id WHERE o.id=$1
+    `,[queued.rows[0].outbox_id])).rows[0];
+    assert.deepEqual(triad,{
+      outbox_state:"cancelled",attempt_state:"cancelled",
+      attempt_delivery:"cancelled",message_delivery:"cancelled",
+    });
+  } finally {
+    await blocker.query("ROLLBACK").catch(()=>undefined);
+    await sender.query("ROLLBACK").catch(()=>undefined);
+    await sender.query("RESET ROLE").catch(()=>undefined);
+    blocker.release();
+    sender.release();
+  }
 });
 
 test("begin_send wins its fence before takeover; later takeover cannot recall an in-flight request", {
@@ -900,13 +1079,13 @@ test("begin_send wins its fence before takeover; later takeover cannot recall an
     );
     assert.equal(begun.rows[0].outcome, "begun");
 
-    await taker.query("SET ROLE aichm_conversation_runtime");
+    await taker.query("SET ROLE aichm_conversation_owner");
     const senderPid = (await sender.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     const takerPid = (await taker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     let takeoverFinished = false;
     const takeoverPromise = taker.query(
       `SELECT * FROM aichm_private.transition_conversation_control(
-        $1,2,'takeover','replit_lms_user:42',$2,'takeover after begin_send',false,true
+        $1,2,'takeover','replit_lms_user:42',$2,'takeover after begin_send'
       )`,
       [threadId, randomUUID()],
     ).then(result => { takeoverFinished = true; return result; });
@@ -964,10 +1143,10 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
   const claimer = await pool!.connect();
   try {
     await owner.query("BEGIN");
-    await owner.query("SET LOCAL ROLE aichm_conversation_runtime");
+    await owner.query("SET LOCAL ROLE aichm_conversation_owner");
     const takeover = await owner.query(
       `SELECT * FROM aichm_private.transition_conversation_control(
-        $1,2,'takeover','replit_lms_user:42',$2,'synthetic lock winner',false,true
+        $1,2,'takeover','replit_lms_user:42',$2,'synthetic lock winner'
       )`,
       [threadId, randomUUID()],
     );
@@ -1034,15 +1213,21 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
     "SELECT * FROM aichm_private.claim_next_conversation_outbound(60)",
   ));
   assert.equal(afterExpiredSend.rows.some(row => row.outbox_id === sendingQueue.rows[0].outbox_id), false);
-  const unknownState = await queryRows<{ outbox_state: string; attempt_count: number; delivery_state: string }>(`
-    SELECT o.state AS outbox_state,o.attempt_count,a.delivery_state
+  const unknownState = await queryRows<{
+    outbox_state: string; attempt_count: number; attempt_state: string;
+    delivery_state: string; message_delivery: string;
+  }>(`
+    SELECT o.state AS outbox_state,o.attempt_count,a.state AS attempt_state,
+      a.delivery_state,m.delivery_state AS message_delivery
     FROM aichm_private.conversation_outbox o
     JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+    JOIN aichm_private.conversation_messages m ON m.id=o.message_id
     WHERE o.id=$1 ORDER BY a.attempt_number DESC LIMIT 1
   `, [sendingQueue.rows[0].outbox_id]);
-  assert.equal(unknownState[0].outbox_state, "unknown");
-  assert.equal(unknownState[0].delivery_state, "unknown");
-  assert.equal(unknownState[0].attempt_count, 1);
+  assert.deepEqual(unknownState[0],{
+    outbox_state:"unknown",attempt_count:1,attempt_state:"unknown",
+    delivery_state:"unknown",message_delivery:"unknown",
+  });
 
   const { threadId: ceilingThread } = await createReadyThread();
   const ceilingQueue = await enqueueAssistant(ceilingThread);
@@ -1080,6 +1265,43 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
   );
   assert.equal(ceilingState[0].state, "failed");
   assert.equal(ceilingState[0].attempt_count, 8);
+  const exhaustedTriad = await queryRows<{
+    outbox_state: string; attempt_state: string; attempt_delivery: string; message_delivery: string;
+  }>(`
+    SELECT o.state AS outbox_state,a.state AS attempt_state,
+      a.delivery_state AS attempt_delivery,m.delivery_state AS message_delivery
+    FROM aichm_private.conversation_outbox o
+    JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+    JOIN aichm_private.conversation_messages m ON m.id=o.message_id
+    WHERE o.id=$1 ORDER BY a.attempt_number DESC LIMIT 1
+  `, [ceilingQueue.rows[0].outbox_id]);
+  assert.deepEqual(exhaustedTriad[0], {
+    outbox_state: "failed", attempt_state: "failed",
+    attempt_delivery: "failed", message_delivery: "failed",
+  });
+
+  const { threadId: humanThread } = await createReadyThread();
+  const humanTakeover = await asOwner(client => client.query(
+    `SELECT * FROM aichm_private.transition_conversation_control(
+      $1,2,'takeover','replit_lms_user:42',$2,'synthetic human ownership'
+    )`, [humanThread, randomUUID()],
+  ));
+  assert.equal(humanTakeover.rows[0].outcome, "changed");
+  const humanKey = `message:v1:${"b".repeat(64)}`;
+  const humanEnqueue = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.enqueue_conversation_message(
+      $1,3,'human_staff','replit_lms_user:42',$2,$3,'text','synthetic human reply',NULL
+    )`, [humanThread, humanKey, "c".repeat(64)],
+  ));
+  assert.equal(humanEnqueue.rows[0].outcome, "queued");
+  const humanClaim = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_next_conversation_outbound(60)",
+  ));
+  assert.equal(humanClaim.rows.some(row => row.outbox_id === humanEnqueue.rows[0].outbox_id), false);
+  assert.equal((await queryRows<{state:string}>(
+    "SELECT state FROM aichm_private.conversation_outbox WHERE id=$1",
+    [humanEnqueue.rows[0].outbox_id],
+  ))[0].state, "pending");
 });
 
 test("delivery receipts retain raw provider labels and ignore regressions", {
@@ -1102,13 +1324,18 @@ test("delivery receipts retain raw provider labels and ignore regressions", {
   );
   assert.equal(attempt.length, 1);
 
-  async function receipt(state: string, raw: string) {
+  async function receipt(
+    state: string,
+    raw: string,
+    providerEventRef = `receipt-${randomUUID()}`,
+    occurredAt = new Date().toISOString(),
+  ) {
     const candidate = {
       contractVersion: 1,
       provider: "whatsapp",
-      providerEventRef: `receipt-${randomUUID()}`,
+      providerEventRef,
       threadRef,
-      occurredAt: new Date().toISOString(),
+      occurredAt,
       kind: "delivery",
       providerMessageRef,
       deliveryState: state,
@@ -1129,24 +1356,32 @@ test("delivery receipts retain raw provider labels and ignore regressions", {
       ],
     ));
   }
+  assert.equal((await receipt("queued", "ProviderQueuedLate")).rows[0].outcome, "receipt_recorded");
   assert.equal((await receipt("delivered", "ProviderDelivered")).rows[0].outcome, "receipt_recorded");
   await receipt("unknown", "ProviderUnknownLate");
   await receipt("sent", "ProviderSentLate");
   await receipt("read", "ProviderRead");
   await receipt("delivered", "ProviderDeliveredLate");
+  const duplicateRef = `receipt-duplicate-${randomUUID()}`;
+  const duplicateAt = new Date().toISOString();
+  assert.equal((await receipt("read", "ProviderReadDuplicate", duplicateRef,duplicateAt)).rows[0].outcome,"receipt_recorded");
+  assert.equal((await receipt("read", "ProviderReadDuplicate", duplicateRef,duplicateAt)).rows[0].outcome,"duplicate_event");
   const states = await queryRows<{
     delivery_state: string;
+    outbox_state: string;
     receipt_count: string;
     has_raw: boolean;
   }>(`
-    SELECT a.delivery_state,count(r.id)::text AS receipt_count,
+    SELECT a.delivery_state,o.state AS outbox_state,count(r.id)::text AS receipt_count,
       bool_or(r.raw_provider_state='ProviderDelivered') AS has_raw
     FROM aichm_private.conversation_outbox_attempts a
     LEFT JOIN aichm_private.conversation_delivery_receipts r ON r.attempt_id=a.id
-    WHERE a.id=$1 GROUP BY a.delivery_state
+    JOIN aichm_private.conversation_outbox o ON o.id=a.outbox_id
+    WHERE a.id=$1 GROUP BY a.delivery_state,o.state
   `, [attempt[0].id]);
   assert.equal(states[0].delivery_state, "read");
-  assert.equal(Number(states[0].receipt_count), 5);
+  assert.equal(states[0].outbox_state, "delivered");
+  assert.equal(Number(states[0].receipt_count), 7);
   assert.equal(states[0].has_raw, true);
   const message = await queryRows<{ delivery_state: string }>(
     "SELECT delivery_state FROM aichm_private.conversation_messages WHERE id=$1",
@@ -1251,9 +1486,9 @@ test("provider acceptance is recorded as sent, not delivered, and takeover canno
   `, [queued.rows[0].outbox_id]);
   assert.deepEqual(state[0], { outbox_state: "accepted", delivery_state: "sent" });
 
-  const takeover = await asRuntime(client => client.query(
+  const takeover = await asOwner(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
-      $1,2,'takeover','replit_lms_user:42',$2,'synthetic after provider acceptance',false,true
+      $1,2,'takeover','replit_lms_user:42',$2,'synthetic after provider acceptance'
     )`,
     [threadId, randomUUID()],
   ));

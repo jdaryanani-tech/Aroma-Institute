@@ -2,7 +2,6 @@ import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { db } from "../db";
 import { inquiries } from "@shared/schema";
 import { admissionsLeads, admissionsLeadContactPreferences as preferences,
-  admissionsConversationDispatchGrants as dispatchGrants,
   admissionsRegistrationOutbox as outbox, admissionsVideoEvents } from "@shared/admissions-schema";
 import { VSL_WHATSAPP_CONSENT_TEXT, VSL_WHATSAPP_CONSENT_VERSION } from "@shared/vsl-consent";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
@@ -18,9 +17,15 @@ export async function followUpSchemaReady(database: Pick<FollowUpDatabase,"execu
 }
 async function dispatchGrantSchemaReady(database: Pick<FollowUpDatabase,"execute">) {
   const result=await database.execute<{ready:boolean}>(sql`SELECT
-    to_regclass('admissions_conversation_dispatch_grants') IS NOT NULL AND
-    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
-      AND table_name='admissions_lead_contact_preferences' AND column_name='consent_epoch') AS ready`);
+    to_regclass('public.admissions_conversation_dispatch_grants') IS NOT NULL AND
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public'
+      AND table_name='admissions_lead_contact_preferences' AND column_name='consent_epoch') AND
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public'
+      AND table_name='admissions_conversation_dispatch_grants' AND column_name='actor_user_id') AND
+    EXISTS (SELECT 1 FROM pg_catalog.pg_trigger
+      WHERE tgname='admissions_consent_epoch_guard'
+        AND tgrelid='public.admissions_lead_contact_preferences'::regclass
+        AND tgenabled IN ('O','A') AND NOT tgisinternal) AS ready`);
   return result.rows[0]?.ready===true;
 }
 export async function admissionsIntegrationSchemaReady(database: Pick<FollowUpDatabase,"execute"> = db) {
@@ -138,26 +143,30 @@ export async function recordRegistrationFollowUp(tx:Transaction,lead:Lead,firstR
   const protectedChoice=receipt?.optedOutAt || receipt?.consentStatus==="opted_out" || receipt?.consentStatus==="granted";
   if(!receipt || (!protectedChoice && optIn)) {
     const nextStatus=optIn ? "granted" : "not_provided";
-    const previousAllowed=receipt?.consentStatus==="granted" && !receipt.optedOutAt;
-    const nextAllowed=nextStatus==="granted";
-    const previousOptedOut=receipt?.consentStatus==="opted_out" || !!receipt?.optedOutAt;
-    const nextOptedOut=false;
-    const effectiveChange=previousAllowed!==nextAllowed || previousOptedOut!==nextOptedOut;
     const values={
       leadId:lead.id,consentStatus:nextStatus,
       consentRecordedAt:now,consentSource:"vsl_registration",
       consentText:VSL_WHATSAPP_CONSENT_TEXT,consentVersion:VSL_WHATSAPP_CONSENT_VERSION,statusUpdatedAt:now,
-      ...(protocolReady ? {consentEpoch:(receipt?.consentEpoch??0)+(effectiveChange?1:0)} : {}),
     };
     await tx.insert(preferences).values(values).onConflictDoUpdate({target:preferences.leadId,set:values});
-    receipt={
-      consentStatus:nextStatus,optedOutAt:null,consentEpoch:(receipt?.consentEpoch??0)+(protocolReady&&effectiveChange?1:0),
-      consentRecordedAt:now,consentSource:"vsl_registration",consentText:VSL_WHATSAPP_CONSENT_TEXT,
-      consentVersion:VSL_WHATSAPP_CONSENT_VERSION,optOutSource:null,
-    };
-    if(protocolReady&&effectiveChange) {
-      await tx.update(dispatchGrants).set({state:"revoked",completedAt:now,safeOutcome:"send_denied"})
-        .where(and(eq(dispatchGrants.leadId,lead.id),eq(dispatchGrants.state,"issued")));
+    if(protocolReady) {
+      const saved=await tx.execute<ReceiptRow>(sql`SELECT consent_status AS "consentStatus",
+        opted_out_at AS "optedOutAt",consent_epoch AS "consentEpoch",
+        consent_recorded_at AS "consentRecordedAt",consent_source AS "consentSource",
+        consent_text AS "consentText",consent_version AS "consentVersion",
+        opt_out_source AS "optOutSource"
+        FROM admissions_lead_contact_preferences WHERE lead_id=${lead.id}`);
+      receipt=normalizeReceiptDates(saved.rows[0]);
+    } else {
+      const saved=await tx.execute<Omit<ReceiptRow,"consentEpoch">&{consentEpoch?:never}>(sql`SELECT
+        consent_status AS "consentStatus",opted_out_at AS "optedOutAt",
+        consent_recorded_at AS "consentRecordedAt",consent_source AS "consentSource",
+        consent_text AS "consentText",consent_version AS "consentVersion",
+        opt_out_source AS "optOutSource"
+        FROM admissions_lead_contact_preferences WHERE lead_id=${lead.id}`);
+      receipt=saved.rows[0]
+        ? {...normalizeReceiptDates(saved.rows[0]),consentEpoch:0} as ReceiptRow
+        : undefined;
     }
   }
   if(firstRegistration) {
@@ -190,40 +199,15 @@ export async function recordWhatsAppOptOut(leadId:string,source:"admin"|"n8n"|"p
     const [lead]=await tx.select().from(admissionsLeads).where(eq(admissionsLeads.id,leadId));
     if(!lead) return false;
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`admissions:${lead.canonicalPhone}`}))`);
-    const protocolReady=await dispatchGrantSchemaReady(tx);
-    type ExistingReceipt={consentStatus:"not_provided"|"granted"|"opted_out";optedOutAt:Date|null;consentEpoch:number};
-    let prior:ExistingReceipt|undefined;
-    if(protocolReady) {
-      const result=await tx.execute<ExistingReceipt>(sql`SELECT consent_status AS "consentStatus",
-        opted_out_at AS "optedOutAt",consent_epoch AS "consentEpoch"
-        FROM admissions_lead_contact_preferences WHERE lead_id=${leadId} FOR UPDATE`);
-      prior=result.rows[0] ? {
-        ...result.rows[0],optedOutAt:asDate(result.rows[0].optedOutAt),
-        consentEpoch:Number(result.rows[0].consentEpoch),
-      } : undefined;
-    } else {
-      const result=await tx.execute<Omit<ExistingReceipt,"consentEpoch">&{consentEpoch?:never}>(sql`SELECT
-        consent_status AS "consentStatus",opted_out_at AS "optedOutAt"
-        FROM admissions_lead_contact_preferences WHERE lead_id=${leadId} FOR UPDATE`);
-      prior=result.rows[0] ? {...result.rows[0],optedOutAt:asDate(result.rows[0].optedOutAt),consentEpoch:0} : undefined;
-    }
-    const wasOptedOut=prior?.consentStatus==="opted_out" || !!prior?.optedOutAt;
-    const effectiveChange=!wasOptedOut;
     const values={
       leadId,consentStatus:"opted_out" as const,optedOutAt:now,optOutSource:source,statusUpdatedAt:now,
-      ...(protocolReady ? {consentEpoch:(prior?.consentEpoch??0)+(effectiveChange?1:0)} : {}),
     };
     await tx.insert(preferences).values({
       ...values,
     }).onConflictDoUpdate({target:preferences.leadId,set:{
       consentStatus:"opted_out",optedOutAt:sql`coalesce(${preferences.optedOutAt},${now})`,
       optOutSource:sql`coalesce(${preferences.optOutSource},${source})`,statusUpdatedAt:now,
-      ...(protocolReady ? {consentEpoch:values.consentEpoch} : {}),
     }});
-    if(protocolReady&&effectiveChange) {
-      await tx.update(dispatchGrants).set({state:"revoked",completedAt:now,safeOutcome:"send_denied"})
-        .where(and(eq(dispatchGrants.leadId,leadId),eq(dispatchGrants.state,"issued")));
-    }
     return true;
   });
 }

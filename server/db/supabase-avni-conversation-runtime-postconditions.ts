@@ -54,8 +54,7 @@ const EXPECTED_COLUMNS: Record<string, readonly string[]> = {
   conversation_control_events: [
     "id:uuid:true", "thread_id:uuid:true", "request_id:uuid:true", "action:text:true",
     "actor_ref:text:true", "reason:text:false", "prior_version:bigint:true",
-    "resulting_version:bigint:true", "whatsapp_consent_granted:boolean:false",
-    "whatsapp_opted_out:boolean:false", "occurred_at:timestamp with time zone:true",
+    "resulting_version:bigint:true", "occurred_at:timestamp with time zone:true",
   ],
 };
 
@@ -126,7 +125,6 @@ const EXPECTED_CONSTRAINTS = [
   "avni_conversation_control_actor_ck",
   "avni_conversation_control_reason_ck",
   "avni_conversation_control_versions_ck",
-  "avni_conversation_control_resume_evidence_ck",
   "avni_conversation_control_thread_version_uq",
 ] as const;
 
@@ -137,7 +135,7 @@ const EXPECTED_RPC_SIGNATURES: Record<string, string> = {
   claim_next_conversation_outbound: "integer",
   begin_conversation_send: "uuid, uuid, uuid, uuid, bigint, uuid, text, text",
   record_conversation_send_result: "uuid, uuid, uuid, text, text",
-  transition_conversation_control: "uuid, bigint, text, text, uuid, text, boolean, boolean",
+  transition_conversation_control: "uuid, bigint, text, text, uuid, text",
 };
 
 function fail(code: string): never {
@@ -302,14 +300,37 @@ export async function assertAvniConversationRuntimePostconditions(
     SELECT c.relname AS table_name,r.role_name,p.privilege,
       has_table_privilege(r.role_name,c.oid,p.privilege) AS allowed
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-    CROSS JOIN (VALUES ('aichm_conversation_runtime'),('aichm_crm_reader'),
-      ('anon'),('authenticated'),('service_role')) AS r(role_name)
+    CROSS JOIN (SELECT rolname AS role_name FROM pg_roles WHERE rolname IN (
+      'aichm_conversation_runtime','aichm_crm_reader','aichm_crm_owner',
+      'aichm_crm_migrator','aichm_app_runtime','anon','authenticated','service_role'
+    )) AS r
     CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE')) AS p(privilege)
     WHERE n.nspname='aichm_private' AND c.relkind='r'
       AND c.relname=ANY($1::text[])
   `, [AVNI_CONVERSATION_RUNTIME_TABLES]);
   if (privileges.some(privilege => privilege.allowed)) {
     fail("AVNI_CONVERSATION_RUNTIME_DIRECT_TABLE_PRIVILEGE_FOUND");
+  }
+  const { rows: publicTableAcl } = await client.query<{ count: string }>(`
+    SELECT count(*)::text AS count
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
+    WHERE n.nspname='aichm_private' AND c.relkind='r'
+      AND c.relname=ANY($1::text[]) AND acl.grantee=0
+  `, [AVNI_CONVERSATION_RUNTIME_TABLES]);
+  if (Number(publicTableAcl[0]?.count) !== 0) {
+    fail("AVNI_CONVERSATION_RUNTIME_PUBLIC_TABLE_PRIVILEGE_FOUND");
+  }
+  const { rows: unexpectedTableAcl } = await client.query<{ count: string }>(`
+    SELECT count(*)::text AS count
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    JOIN pg_roles owner ON owner.rolname='aichm_conversation_owner'
+    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
+    WHERE n.nspname='aichm_private' AND c.relkind='r'
+      AND c.relname=ANY($1::text[]) AND acl.grantee<>owner.oid
+  `, [AVNI_CONVERSATION_RUNTIME_TABLES]);
+  if (Number(unexpectedTableAcl[0]?.count) !== 0) {
+    fail("AVNI_CONVERSATION_RUNTIME_UNEXPECTED_TABLE_ACL_FOUND");
   }
 
   const rpcNames = Object.keys(EXPECTED_RPC_SIGNATURES);
@@ -325,6 +346,7 @@ export async function assertAvniConversationRuntimePostconditions(
     anon_execute: boolean;
     authenticated_execute: boolean;
     public_execute: boolean;
+    unexpected_execute: boolean;
   }>(`
     SELECT p.proname AS function_name,owner.rolname AS owner_name,
       oidvectortypes(p.proargtypes) AS identity_arguments,
@@ -337,7 +359,16 @@ export async function assertAvniConversationRuntimePostconditions(
       EXISTS (
         SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
         WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'
-      ) AS public_execute
+      ) AS public_execute,
+      EXISTS (
+        SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+        WHERE acl.privilege_type='EXECUTE'
+          AND acl.grantee<>p.proowner
+          AND (
+            acl.grantee<>(SELECT oid FROM pg_roles WHERE rolname='aichm_conversation_runtime')
+            OR p.proname='transition_conversation_control'
+          )
+      ) AS unexpected_execute
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     JOIN pg_roles owner ON owner.oid=p.proowner
     WHERE n.nspname='aichm_private' AND p.proname=ANY($1::text[])
@@ -351,8 +382,9 @@ export async function assertAvniConversationRuntimePostconditions(
       !fn.security_definer ||
       fn.owner_name !== "aichm_conversation_owner" ||
       searchPath !== "search_path=pg_catalog, aichm_private, pg_temp" ||
-      !fn.runtime_execute || fn.reader_execute || fn.service_execute ||
-      fn.anon_execute || fn.authenticated_execute || fn.public_execute
+      fn.runtime_execute !== (fn.function_name !== "transition_conversation_control") ||
+      fn.reader_execute || fn.service_execute ||
+       fn.anon_execute || fn.authenticated_execute || fn.public_execute || fn.unexpected_execute
     ) fail("AVNI_CONVERSATION_RUNTIME_RPC_PRIVILEGE_OR_PATH_DRIFTED");
   }
   const { rows: unsafeDispatchRpcs } = await client.query<{ function_name: string }>(`
@@ -361,6 +393,8 @@ export async function assertAvniConversationRuntimePostconditions(
     WHERE n.nspname='aichm_private' AND (
       p.proname='authorize_conversation_outbound_attempt'
       OR (p.proname IN ('enqueue_conversation_message','claim_next_conversation_outbound')
+        AND pg_get_function_identity_arguments(p.oid) ILIKE '%boolean%')
+      OR (p.proname='transition_conversation_control'
         AND pg_get_function_identity_arguments(p.oid) ILIKE '%boolean%')
     )
   `);
@@ -379,8 +413,8 @@ export async function assertAvniConversationRuntimePostconditions(
       'aichm_private.delivery_transition_allowed(text,text)'::regprocedure,'EXECUTE')
       OR EXISTS (
         SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
-        WHERE p.proname='delivery_transition_allowed' AND acl.grantee=0
-          AND acl.privilege_type='EXECUTE'
+        WHERE p.proname='delivery_transition_allowed' AND acl.privilege_type='EXECUTE'
+          AND acl.grantee<>p.proowner
       ) AS exposed
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname='aichm_private' AND p.proname='delivery_transition_allowed'
@@ -430,6 +464,7 @@ export async function assertAvniConversationRuntimeReadiness(
     can_replicate: boolean;
     membership_count: string;
     runtime_membership: boolean;
+    runtime_membership_admin_option: boolean;
   }>(`
     SELECT r.rolname AS role_name,r.rolcanlogin AS can_login,r.rolinherit AS can_inherit,
       r.rolsuper AS is_superuser,r.rolcreatedb AS can_create_db,
@@ -440,15 +475,38 @@ export async function assertAvniConversationRuntimeReadiness(
         SELECT 1 FROM pg_auth_members m
         JOIN pg_roles granted ON granted.oid=m.roleid
         WHERE m.member=r.oid AND granted.rolname='aichm_conversation_runtime'
-      ) AS runtime_membership
+      ) AS runtime_membership,
+      EXISTS (
+        SELECT 1 FROM pg_auth_members m
+        JOIN pg_roles granted ON granted.oid=m.roleid
+        WHERE m.member=r.oid AND granted.rolname='aichm_conversation_runtime'
+          AND m.admin_option
+      ) AS runtime_membership_admin_option
     FROM pg_roles r WHERE r.rolname=$1
   `, [approvedLoginRole]);
   const login = rows[0];
-  const { rows: runtimeMembers } = await client.query<{ count: string }>(`
-    SELECT count(*)::text AS count
+  const { rows: runtimeMembers } = await client.query<{ count: string; admin_option_count: string }>(`
+    SELECT count(*)::text AS count,
+      count(*) FILTER (WHERE m.admin_option)::text AS admin_option_count
     FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid
     WHERE granted.rolname='aichm_conversation_runtime'
   `);
+  const { rows: runtimeEdges } = await client.query<{
+    count: string;
+    approved_login_edge_count: string;
+    admin_option_count: string;
+  }>(`
+    SELECT count(*)::text AS count,
+      count(*) FILTER (
+        WHERE granted.rolname='aichm_conversation_runtime' AND member.rolname=$1
+      )::text AS approved_login_edge_count,
+      count(*) FILTER (WHERE m.admin_option)::text AS admin_option_count
+    FROM pg_auth_members m
+    JOIN pg_roles granted ON granted.oid=m.roleid
+    JOIN pg_roles member ON member.oid=m.member
+    WHERE granted.rolname IN ('aichm_conversation_owner','aichm_conversation_runtime')
+       OR member.rolname IN ('aichm_conversation_owner','aichm_conversation_runtime')
+  `, [approvedLoginRole]);
   if (
     rows.length !== 1 ||
     !login.can_login ||
@@ -460,7 +518,12 @@ export async function assertAvniConversationRuntimeReadiness(
     login.can_replicate ||
     Number(login.membership_count) !== 1 ||
     !login.runtime_membership ||
-    Number(runtimeMembers[0]?.count) !== 1
+    login.runtime_membership_admin_option ||
+    Number(runtimeMembers[0]?.count) !== 1 ||
+    Number(runtimeMembers[0]?.admin_option_count) !== 0 ||
+    Number(runtimeEdges[0]?.count) !== 1 ||
+    Number(runtimeEdges[0]?.approved_login_edge_count) !== 1 ||
+    Number(runtimeEdges[0]?.admin_option_count) !== 0
   ) fail("AVNI_CONVERSATION_RUNTIME_LOGIN_NOT_APPROVED");
 }
 

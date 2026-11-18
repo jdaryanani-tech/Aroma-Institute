@@ -1,7 +1,12 @@
 import { and, eq, sql } from "drizzle-orm";
+import type { Request } from "express";
 import { admissionsConversationDispatchGrants as grants,
+  admissionsLeads,
   admissionsLeadContactPreferences as preferences } from "@shared/admissions-schema";
+import { admissionsLeadAssignments } from "@shared/schema";
+import { lmsUserRoles, lmsUsers } from "@shared/lms-schema";
 import { db } from "../db";
+import { canReadCanonicalLead, crmAccessLevel, type CrmPrincipal } from "../crm/authorization";
 import {
   beginAvniDispatchAttempt,
   issueAvniDispatchGrant,
@@ -14,15 +19,28 @@ import {
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type GrantRow = typeof grants.$inferSelect;
-export type NewAvniDispatchGrantBinding = Omit<AvniDispatchGrantBinding, "consentEpoch">;
+export type NewAvniDispatchGrantBinding = Omit<
+  AvniDispatchGrantBinding,
+  "consentEpoch" | "actorUserId" | "actorAccessLevel" | "assignmentAssigneeUserId" | "assignmentVersion"
+>;
 
 async function schemaReady(tx: Pick<Transaction, "execute">): Promise<boolean> {
   const result = await tx.execute<{ ready: boolean }>(sql`
-    SELECT to_regclass('admissions_conversation_dispatch_grants') IS NOT NULL
+    SELECT (
+      to_regclass('public.admissions_conversation_dispatch_grants') IS NOT NULL
       AND EXISTS (SELECT 1 FROM information_schema.columns
-        WHERE table_schema=current_schema()
+        WHERE table_schema='public'
           AND table_name='admissions_lead_contact_preferences'
-          AND column_name='consent_epoch') AS ready
+          AND column_name='consent_epoch')
+      AND EXISTS (SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name='admissions_conversation_dispatch_grants'
+          AND column_name='actor_user_id')
+      AND EXISTS (SELECT 1 FROM pg_catalog.pg_trigger
+        WHERE tgname='admissions_consent_epoch_guard'
+          AND tgrelid='public.admissions_lead_contact_preferences'::regclass
+          AND tgenabled IN ('O','A') AND NOT tgisinternal)
+    ) AS ready
   `);
   return result.rows[0]?.ready === true;
 }
@@ -35,12 +53,21 @@ async function transactionTime(tx: Pick<Transaction, "execute">, explicit?: Date
   return value instanceof Date ? value : new Date(value);
 }
 
-function toModel(row: GrantRow): AvniDispatchGrant {
+function toModel(row: GrantRow): AvniDispatchGrant | null {
+  if (
+    row.actorUserId === null ||
+    (row.actorAccessLevel !== "admin" && row.actorAccessLevel !== "admissions") ||
+    row.assignmentVersion === null
+  ) return null;
   return {
     id: row.id,
     idempotencyKey: row.grantIdempotencyKey,
     binding: {
       canonicalLeadId: row.leadId,
+      actorUserId: row.actorUserId,
+      actorAccessLevel: row.actorAccessLevel,
+      assignmentAssigneeUserId: row.assignmentAssigneeUserId,
+      assignmentVersion: row.assignmentVersion,
       supabaseThreadId: row.supabaseThreadId,
       supabaseOutboxId: row.supabaseOutboxId,
       supabaseMessageId: row.supabaseMessageId,
@@ -61,6 +88,70 @@ function toModel(row: GrantRow): AvniDispatchGrant {
   };
 }
 
+type TrustedActorScope = {
+  actorUserId: number;
+  actorAccessLevel: "admin" | "admissions";
+  assignmentAssigneeUserId: number | null;
+  assignmentVersion: number;
+};
+
+async function resolveTrustedActorScope(
+  tx: Transaction,
+  request: Pick<Request, "session" | "lmsUser">,
+  leadId: string,
+): Promise<TrustedActorScope | null> {
+  const sessionUserId = request.session?.lmsUserId;
+  const attachedUserId = request.lmsUser?.id;
+  if (
+    typeof sessionUserId !== "number" ||
+    !Number.isSafeInteger(sessionUserId) ||
+    typeof attachedUserId !== "number" ||
+    !Number.isSafeInteger(attachedUserId) ||
+    sessionUserId !== attachedUserId
+  ) return null;
+
+  const [actor] = await tx.select({ id: lmsUsers.id, isActive: lmsUsers.isActive })
+    .from(lmsUsers).where(eq(lmsUsers.id, sessionUserId)).for("share");
+  if (!actor || !actor.isActive) return null;
+  const roleRows = await tx.select({ role: lmsUserRoles.role })
+    .from(lmsUserRoles).where(eq(lmsUserRoles.userId, sessionUserId))
+    .orderBy(lmsUserRoles.role).for("share");
+  const principal: CrmPrincipal = {
+    id: sessionUserId,
+    roles: roleRows.map(row => String(row.role)),
+  };
+  const accessLevel = crmAccessLevel(principal);
+  if (accessLevel !== "admin" && accessLevel !== "admissions") return null;
+
+  const [lead] = await tx.select({ id: admissionsLeads.id })
+    .from(admissionsLeads).where(eq(admissionsLeads.id, leadId)).for("share");
+  if (!lead) return null;
+  const assignmentRows = await tx.select({
+    assigneeUserId: admissionsLeadAssignments.assigneeUserId,
+    version: admissionsLeadAssignments.version,
+  }).from(admissionsLeadAssignments)
+    .where(eq(admissionsLeadAssignments.leadId, leadId)).for("share");
+  if (assignmentRows.length > 1) return null;
+  const assignment = assignmentRows[0];
+  const assigneeUserId = assignment?.assigneeUserId ?? null;
+  if (!canReadCanonicalLead(principal, leadId, assigneeUserId)) return null;
+  const assignmentVersion = assignment?.version ?? 0;
+  if (!Number.isSafeInteger(assignmentVersion) || assignmentVersion < 0) return null;
+  return {
+    actorUserId: actor.id,
+    actorAccessLevel: accessLevel,
+    assignmentAssigneeUserId: assigneeUserId,
+    assignmentVersion,
+  };
+}
+
+function scopeMatchesBinding(scope: TrustedActorScope, binding: AvniDispatchGrantBinding): boolean {
+  return scope.actorUserId === binding.actorUserId
+    && scope.actorAccessLevel === binding.actorAccessLevel
+    && scope.assignmentAssigneeUserId === binding.assignmentAssigneeUserId
+    && scope.assignmentVersion === binding.assignmentVersion;
+}
+
 /**
  * Issues or idempotently returns a grant while locking the authoritative
  * Replit consent row. This is an internal building block only; no route or
@@ -69,13 +160,15 @@ function toModel(row: GrantRow): AvniDispatchGrant {
 export async function issueAvniDispatchGrantInTransaction(
   tx: Transaction,
   input: {
+    request: Pick<Request, "session" | "lmsUser">;
     binding: NewAvniDispatchGrantBinding;
     now?: Date;
     ttlMs?: number;
   },
 ) {
   if (!await schemaReady(tx)) return { code: "dispatch_schema_unavailable" as const, grant: null };
-  const now = await transactionTime(tx,input.now);
+  const actorScope = await resolveTrustedActorScope(tx, input.request, input.binding.canonicalLeadId);
+  if (!actorScope) return { code: "dispatch_actor_unavailable" as const, grant: null };
   const [preference] = await tx.select({
     consentStatus: preferences.consentStatus,
     optedOutAt: preferences.optedOutAt,
@@ -85,11 +178,14 @@ export async function issueAvniDispatchGrantInTransaction(
 
   const binding: AvniDispatchGrantBinding = {
     ...input.binding,
+    ...actorScope,
     consentEpoch: Number(preference.consentEpoch),
   };
   const [existingRow] = await tx.select().from(grants)
     .where(eq(grants.supabaseAttemptId, binding.supabaseAttemptId)).for("update");
+  const now = await transactionTime(tx, input.now);
   const existing = existingRow ? toModel(existingRow) : null;
+  if (existingRow && !existing) return { code: "dispatch_authorization_changed" as const, grant: null };
   const decision = issueAvniDispatchGrant({
     binding,
     consent: {
@@ -107,6 +203,10 @@ export async function issueAvniDispatchGrantInTransaction(
   await tx.insert(grants).values({
     id: grant.id,
     leadId: binding.canonicalLeadId,
+    actorUserId: binding.actorUserId,
+    actorAccessLevel: binding.actorAccessLevel,
+    assignmentAssigneeUserId: binding.assignmentAssigneeUserId,
+    assignmentVersion: binding.assignmentVersion,
     supabaseThreadId: binding.supabaseThreadId,
     supabaseOutboxId: binding.supabaseOutboxId,
     supabaseMessageId: binding.supabaseMessageId,
@@ -133,27 +233,33 @@ export async function issueAvniDispatchGrantInTransaction(
  */
 export async function beginAvniDispatchInTransaction(input: {
   tx: Transaction;
+  request: Pick<Request, "session" | "lmsUser">;
   grantId: string;
-  binding: AvniDispatchGrantBinding;
   now?: Date;
   beginSupabaseSend: (binding: AvniDispatchGrantBinding) => Promise<SupabaseBeginSendOutcome>;
 }) {
-  const { tx, binding } = input;
+  const { tx } = input;
   if (!await schemaReady(tx)) return {
     allowedToBeginSend: false as const,
     providerCallAllowed: false as const,
     code: "dispatch_schema_unavailable" as const,
     grant: null,
   };
-  const now=await transactionTime(tx,input.now);
   // Read the lead reference without locking, then lock in the same
-  // preference-before-grant order used by every consent writer. Re-read the
-  // grant under lock after the authoritative consent row is locked.
+  // actor/assignment -> preference -> grant order used by consent and CRM
+  // writers. Re-read the grant under lock after authoritative rows are locked.
   const [initialRow] = await tx.select().from(grants).where(eq(grants.id, input.grantId));
   if (!initialRow) return {
     allowedToBeginSend: false as const,
     providerCallAllowed: false as const,
     code: "grant_replayed" as const,
+    grant: null,
+  };
+  const actorScope = await resolveTrustedActorScope(tx, input.request, initialRow.leadId);
+  if (!actorScope) return {
+    allowedToBeginSend: false as const,
+    providerCallAllowed: false as const,
+    code: "dispatch_actor_unavailable" as const,
     grant: null,
   };
   const [preference] = await tx.select({
@@ -179,10 +285,49 @@ export async function beginAvniDispatchInTransaction(input: {
     code: "grant_replayed" as const,
     grant: null,
   };
+  if (row.leadId !== initialRow.leadId) return {
+    allowedToBeginSend: false as const,
+    providerCallAllowed: false as const,
+    code: "dispatch_authorization_changed" as const,
+    grant: null,
+  };
   const grant = toModel(row);
+  if (!grant) {
+    await tx.update(grants).set({ state: "revoked", safeOutcome: "send_denied" })
+      .where(and(eq(grants.id, row.id), eq(grants.state, "issued")));
+    return {
+      allowedToBeginSend: false as const,
+      providerCallAllowed: false as const,
+      code: "dispatch_authorization_changed" as const,
+      grant: null,
+    };
+  }
+  if (!scopeMatchesBinding(actorScope, grant.binding)) {
+    const revoked: AvniDispatchGrant = {
+      ...grant,
+      state: "revoked",
+      completedAt: (await transactionTime(tx, input.now)).toISOString(),
+      safeOutcome: "send_denied",
+    };
+    await tx.update(grants).set({
+      state: revoked.state,
+      completedAt: new Date(revoked.completedAt!),
+      safeOutcome: revoked.safeOutcome,
+    }).where(and(eq(grants.id, grant.id), eq(grants.state, "issued")));
+    return {
+      allowedToBeginSend: false as const,
+      providerCallAllowed: false as const,
+      code: "dispatch_authorization_changed" as const,
+      grant: revoked,
+    };
+  }
+
+  // Use database time only after all Replit locks are held. A grant that
+  // expired while waiting for any lock is never passed to the Supabase fence.
+  const lockedAt = await transactionTime(tx, input.now);
 
   const validation = validateAvniDispatchGrantForBegin({
-    grant, binding, consent, now,
+    grant, binding: grant.binding, consent, now: lockedAt,
   });
   if (!validation.allowedToBeginSend) {
     if (validation.grant && validation.grant.state !== grant.state) {
@@ -197,13 +342,35 @@ export async function beginAvniDispatchInTransaction(input: {
 
   let outcome: SupabaseBeginSendOutcome;
   try {
-    outcome = await input.beginSupabaseSend(binding);
+    outcome = await input.beginSupabaseSend(grant.binding);
   } catch {
     outcome = "unavailable";
   }
-  const decision = beginAvniDispatchAttempt({
-    grant, binding, consent, now, supabaseOutcome: outcome,
-  });
+  // The Supabase RPC checks its own clock after acquiring thread, outbox,
+  // attempt and message locks. Refresh Replit's clock after that bounded RPC
+  // too: if the grant expired while Supabase was waiting, no provider call is
+  // permitted and a possibly committed begin is recorded as unknown.
+  const afterSupabase = await transactionTime(tx, input.now);
+  const expiredDuringRpc = new Date(grant.expiresAt).getTime() <= afterSupabase.getTime();
+  const decision = expiredDuringRpc && outcome !== "denied"
+    ? {
+      allowedToBeginSend: false as const,
+      providerCallAllowed: false as const,
+      code: "supabase_begin_uncertain" as const,
+      grant: {
+        ...grant,
+        state: "unknown" as const,
+        completedAt: afterSupabase.toISOString(),
+        safeOutcome: "ambiguous_result" as const,
+      },
+    }
+    : beginAvniDispatchAttempt({
+      grant,
+      binding: grant.binding,
+      consent,
+      now: afterSupabase,
+      supabaseOutcome: outcome,
+    });
   if (decision.grant && decision.grant.state !== grant.state) {
     await tx.update(grants).set({
       state: decision.grant.state,

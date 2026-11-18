@@ -223,6 +223,37 @@ export async function assertCrmRuntimeRoleSeparationPostconditions(
     unexpectedPrivilege
   ) fail("CRM_RUNTIME_ASSIGNMENT_TABLE_GRANTS_DRIFTED");
 
+  const { rows: dispatchAcl } = await client.query<{
+    role_name: string;
+    has_any_privilege: boolean;
+  }>(`
+    SELECT r.rolname AS role_name,
+      CASE WHEN to_regclass('public.admissions_conversation_dispatch_grants') IS NULL THEN false ELSE
+        has_table_privilege(r.rolname,'public.admissions_conversation_dispatch_grants','SELECT')
+        OR has_table_privilege(r.rolname,'public.admissions_conversation_dispatch_grants','INSERT')
+        OR has_table_privilege(r.rolname,'public.admissions_conversation_dispatch_grants','UPDATE')
+        OR has_table_privilege(r.rolname,'public.admissions_conversation_dispatch_grants','DELETE')
+        OR has_table_privilege(r.rolname,'public.admissions_conversation_dispatch_grants','TRUNCATE')
+        OR has_table_privilege(r.rolname,'public.admissions_conversation_dispatch_grants','REFERENCES')
+        OR has_table_privilege(r.rolname,'public.admissions_conversation_dispatch_grants','TRIGGER')
+      END
+      AS has_any_privilege
+    FROM pg_roles r
+    WHERE r.rolname IN ('anon','authenticated','service_role','aichm_crm_reader',
+      'aichm_crm_owner','aichm_crm_migrator')
+  `);
+  const { rows: publicDispatchAcl } = await client.query<{ public_privileges: number }>(`
+    SELECT count(*)::int AS public_privileges
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
+    WHERE n.nspname='public' AND c.relname='admissions_conversation_dispatch_grants'
+      AND acl.grantee=0
+  `);
+  if (dispatchAcl.some(row => row.has_any_privilege) ||
+      (publicDispatchAcl[0]?.public_privileges ?? 0) !== 0) {
+    fail("CRM_RUNTIME_DISPATCH_GRANT_TABLE_ACL_DRIFTED");
+  }
+
   const { rows: sequenceRows } = await client.query<{
     sequence_name: string;
     owner_table: string | null;

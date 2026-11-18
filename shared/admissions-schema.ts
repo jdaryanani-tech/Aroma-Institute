@@ -105,8 +105,10 @@ export const admissionsConversationDispatchGrants = pgTable("admissions_conversa
   check("admissions_dispatch_grant_actor_scope_ck", sql`
     (${table.actorUserId} IS NULL AND ${table.actorAccessLevel} IS NULL
       AND ${table.assignmentVersion} IS NULL AND ${table.assignmentAssigneeUserId} IS NULL)
-    OR (${table.actorUserId} IS NOT NULL AND ${table.actorAccessLevel} IN ('admin','admissions')
-      AND ${table.assignmentVersion} >= 0)
+    OR (${table.actorUserId} IS NOT NULL
+      AND ${table.actorAccessLevel} IN ('admin','admissions')
+      AND ${table.assignmentVersion} IS NOT NULL AND ${table.assignmentVersion} >= 0
+      AND (${table.assignmentVersion}>0 OR ${table.assignmentAssigneeUserId} IS NULL))
   `),
   check("admissions_dispatch_grant_control_version_ck", sql`${table.controlVersion} >= 0`),
   check("admissions_dispatch_grant_attempt_number_ck", sql`${table.attemptNumber} BETWEEN 1 AND 8`),

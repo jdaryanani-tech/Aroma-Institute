@@ -124,6 +124,12 @@ test("receipt state progression is monotonic within an attempt", () => {
   assert.deepEqual(advanceDeliveryState("failed", "sent"), {
     state: "failed", changed: false, regressionIgnored: true,
   });
+  assert.deepEqual(advanceDeliveryState("unknown", "queued"), {
+    state: "unknown", changed: false, regressionIgnored: true,
+  });
+  assert.deepEqual(advanceDeliveryState("unknown", "delivered"), {
+    state: "delivered", changed: true, regressionIgnored: false,
+  });
 });
 
 test("event validation rejects unknown versions, extra provider payload, and unsafe media URLs", () => {

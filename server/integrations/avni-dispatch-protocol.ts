@@ -11,6 +11,10 @@ export type DispatchConsentSnapshot = {
 
 export type AvniDispatchGrantBinding = {
   canonicalLeadId: string;
+  actorUserId: number;
+  actorAccessLevel: "admin" | "admissions";
+  assignmentAssigneeUserId: number | null;
+  assignmentVersion: number;
   supabaseThreadId: string;
   supabaseOutboxId: string;
   supabaseMessageId: string;
@@ -55,6 +59,10 @@ const uuid = z.string().uuid();
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const bindingSchema = z.object({
   canonicalLeadId: uuid,
+  actorUserId: z.number().int().positive().safe(),
+  actorAccessLevel: z.enum(["admin", "admissions"]),
+  assignmentAssigneeUserId: z.number().int().positive().safe().nullable(),
+  assignmentVersion: z.number().int().nonnegative().safe(),
   supabaseThreadId: uuid,
   supabaseOutboxId: uuid,
   supabaseMessageId: uuid,
@@ -83,6 +91,9 @@ export type DispatchGrantDecisionCode =
   | "grant_revoked"
   | "grant_replayed"
   | "grant_binding_mismatch"
+  | "dispatch_actor_unavailable"
+  | "dispatch_assignment_denied"
+  | "dispatch_authorization_changed"
   | "supabase_begin_denied"
   | "supabase_begin_uncertain"
   | "begin_send_started";
@@ -101,6 +112,10 @@ function sha256(value: string): string {
 function stableBinding(binding: AvniDispatchGrantBinding): string {
   return JSON.stringify([
     binding.canonicalLeadId,
+    binding.actorUserId,
+    binding.actorAccessLevel,
+    binding.assignmentAssigneeUserId,
+    binding.assignmentVersion,
     binding.supabaseThreadId,
     binding.supabaseOutboxId,
     binding.supabaseMessageId,

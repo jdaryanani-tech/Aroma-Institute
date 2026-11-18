@@ -8,7 +8,7 @@ import express from "express";
 import session from "express-session";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq, ne, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import * as core from "@shared/schema";
 import * as lms from "@shared/lms-schema";
 import * as admissions from "@shared/admissions-schema";
@@ -69,9 +69,16 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     assert.equal(await followUpSchemaReady(database),true);
     const avniMigration=await readFile("migrations/0009_avni_tracking.sql","utf8");
     await pool.query(avniMigration);await pool.query(avniMigration);
-    await pool.query("CREATE ROLE aichm_app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS");
+    await pool.query(`
+      CREATE ROLE aichm_app_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
+      CREATE ROLE aichm_app_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS NOREPLICATION;
+      CREATE ROLE aichm_crm_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
+      GRANT aichm_app_runtime TO aichm_app_login;
+    `);
     const dispatchMigration=await readFile("migrations/0019_avni_dispatch_grants.sql","utf8");
     await pool.query(dispatchMigration);await pool.query(dispatchMigration);
+    const dispatchFenceMigration=await readFile("migrations/0020_avni_dispatch_authorization_fence.sql","utf8");
+    await pool.query(dispatchFenceMigration);await pool.query(dispatchFenceMigration);
     const epochCatalog=await pool.query<{data_type:string;is_nullable:string;column_default:string|null}>(`
       SELECT data_type,is_nullable,column_default FROM information_schema.columns
       WHERE table_schema='public' AND table_name='admissions_lead_contact_preferences'
@@ -94,6 +101,39 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
         has_table_privilege('aichm_app_runtime','admissions_conversation_dispatch_grants','DELETE') AS can_delete
     `);
     assert.deepEqual(grantPrivileges.rows[0],{can_select:true,can_insert:true,can_update:true,can_delete:false});
+    await pool.query("CREATE ROLE aichm_dispatch_broad_test NOLOGIN");
+    try {
+      await pool.query("GRANT aichm_app_runtime TO aichm_app_login WITH ADMIN OPTION");
+      await assert.rejects(
+        pool.query(dispatchFenceMigration),
+        /application runtime role membership is not least privilege/,
+        "runtime membership must not grant admin option",
+      );
+      await pool.query("REVOKE ADMIN OPTION FOR aichm_app_runtime FROM aichm_app_login");
+      await pool.query("GRANT aichm_dispatch_broad_test TO aichm_app_runtime");
+      await assert.rejects(
+        pool.query(dispatchFenceMigration),
+        /application runtime role membership is not least privilege/,
+        "unexpected runtime role memberships must abort the draft fence",
+      );
+      await pool.query("REVOKE aichm_dispatch_broad_test FROM aichm_app_runtime");
+      await pool.query("GRANT aichm_dispatch_broad_test TO aichm_app_login");
+      await assert.rejects(
+        pool.query(dispatchFenceMigration),
+        /application runtime role membership is not least privilege/,
+        "the app login cannot inherit an unexpected broad role",
+      );
+      await pool.query("REVOKE aichm_dispatch_broad_test FROM aichm_app_login");
+      await pool.query("GRANT SELECT ON admissions_conversation_dispatch_grants TO aichm_dispatch_broad_test");
+      await assert.rejects(
+        pool.query(dispatchFenceMigration),
+        /dispatch grant table has an unexpected direct ACL/,
+        "unexpected pre-existing table ACLs must abort the draft fence",
+      );
+      await pool.query("REVOKE SELECT ON admissions_conversation_dispatch_grants FROM aichm_dispatch_broad_test");
+    } finally {
+      await pool.query("DROP ROLE IF EXISTS aichm_dispatch_broad_test");
+    }
     assert.equal(await admissionsIntegrationSchemaReady(database),true);
     assert.equal((await database.select().from(outbox)).length,0,"no replay/backfill of pre-migration registrations");
 
@@ -121,6 +161,22 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     const grantAt=status.consent.whatsappAdmissions.recordedAt;
     await registerVslLead(input,new Date(time.getTime()+1000),database);
     assert.equal((await readLeadFollowUpStatus(lead.id,database))!.consent.whatsappAdmissions.recordedAt,grantAt);
+    const [dispatchActor]=await database.insert(lms.lmsUsers).values({
+      phoneE164:"+15550000001",displayName:"Synthetic dispatch admin",isActive:true,
+    }).returning({id:lms.lmsUsers.id});
+    await database.insert(lms.lmsUserRoles).values({userId:dispatchActor.id,role:"admin"});
+    const [admissionsActor]=await database.insert(lms.lmsUsers).values({
+      phoneE164:"+15550000002",displayName:"Synthetic assigned admissions",isActive:true,
+    }).returning({id:lms.lmsUsers.id});
+    await database.insert(lms.lmsUserRoles).values({userId:admissionsActor.id,role:"admissions"});
+    const dispatchRequest={
+      session:{lmsUserId:dispatchActor.id},
+      lmsUser:{id:dispatchActor.id},
+    } as never;
+    const assignedRequest={
+      session:{lmsUserId:admissionsActor.id},
+      lmsUser:{id:admissionsActor.id},
+    } as never;
 
     const makeGrantBinding=(attempt:number,canonicalLeadId=lead.id)=>{
       const key=(label:string)=>createHash("sha256").update(`${label}:${attempt}`).digest("hex");
@@ -134,19 +190,185 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
       };
     };
     const firstBinding=makeGrantBinding(1);
-    const issued=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{binding:firstBinding,now:time}));
+    const issued=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:firstBinding,now:time,
+    }));
     assert.equal(issued.code,"grant_issued");
     assert.ok(issued.grant);
-    const duplicateIssue=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{binding:firstBinding,now:time}));
+    const duplicateIssue=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:firstBinding,now:time,
+    }));
     assert.equal(duplicateIssue.code,"grant_duplicate");
     assert.equal(duplicateIssue.grant?.id,issued.grant?.id);
     const changedPayload=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,
       binding:{...firstBinding,payloadHash:createHash("sha256").update("changed").digest("hex")},now:time,
     }));
     assert.equal(changedPayload.code,"grant_idempotency_conflict");
 
+    const directConsentLead=await registerVslLead({
+      phone:"9000000011",name:"Synthetic direct consent update",entryHost:"test.invalid",entryPath:"/vsl",
+      whatsappAdmissionsConsent:true,
+    },time,database);
+    const directGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:makeGrantBinding(5,directConsentLead.id),
+    }));
+    assert.equal(directGrant.code,"grant_issued");
+    await pool.query(
+      "UPDATE admissions_lead_contact_preferences SET consent_epoch=900 WHERE lead_id=$1",
+      [directConsentLead.id],
+    );
+    assert.equal(await readConsentEpoch(directConsentLead.id),1,
+      "a direct SQL writer cannot forge or skip the epoch");
+    await pool.query(
+      "UPDATE admissions_lead_contact_preferences SET consent_status='not_provided' WHERE lead_id=$1",
+      [directConsentLead.id],
+    );
+    assert.equal(await readConsentEpoch(directConsentLead.id),2,
+      "the trigger increments the epoch for direct effective-consent changes");
+    assert.equal((await database.select().from(grants)
+      .where(eq(grants.id,directGrant.grant!.id)))[0].state,"revoked",
+    "the same database transaction invalidates unused grants");
+    await pool.query(
+      "UPDATE admissions_lead_contact_preferences SET consent_status='granted',consent_version='v1' WHERE lead_id=$1",
+      [directConsentLead.id],
+    );
+    assert.equal(await readConsentEpoch(directConsentLead.id),3);
+    const renewedGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:makeGrantBinding(5,directConsentLead.id),
+    }));
+    assert.equal(renewedGrant.code,"grant_issued");
+    await pool.query(
+      "UPDATE admissions_lead_contact_preferences SET consent_version='v2' WHERE lead_id=$1",
+      [directConsentLead.id],
+    );
+    assert.equal(await readConsentEpoch(directConsentLead.id),4,
+      "a changed consent version is a new authorization epoch");
+    assert.equal((await database.select().from(grants)
+      .where(eq(grants.id,renewedGrant.grant!.id)))[0].state,"revoked");
+
+    const assignmentLead=await registerVslLead({
+      phone:"9000000012",name:"Synthetic reassignment fence",entryHost:"test.invalid",entryPath:"/vsl",
+      whatsappAdmissionsConsent:true,
+    },time,database);
+    const beforeAssignment=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:makeGrantBinding(6,assignmentLead.id),
+    }));
+    assert.equal(beforeAssignment.code,"grant_issued");
+    await database.insert(core.admissionsLeadAssignments).values({
+      leadId:assignmentLead.id,assigneeUserId:admissionsActor.id,
+      assignedBy:dispatchActor.id,updatedAt:new Date(),version:1,
+    });
+    let supersedeCalled=false;
+    const assignmentChanged=await database.transaction(tx=>beginAvniDispatchInTransaction({
+      tx,request:dispatchRequest,grantId:beforeAssignment.grant!.id,
+      beginSupabaseSend:async()=>{supersedeCalled=true;return "begun";},
+    }));
+    assert.equal(assignmentChanged.code,"dispatch_authorization_changed");
+    assert.equal(supersedeCalled,false,"reassignment invalidates a grant before the Supabase fence");
+
+    const staffGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:assignedRequest,binding:makeGrantBinding(7,assignmentLead.id),
+    }));
+    assert.equal(staffGrant.code,"grant_issued");
+    await database.delete(lms.lmsUserRoles).where(eq(lms.lmsUserRoles.userId,admissionsActor.id));
+    let roleChangedBeginCalled=false;
+    const roleChanged=await database.transaction(tx=>beginAvniDispatchInTransaction({
+      tx,request:assignedRequest,grantId:staffGrant.grant!.id,
+      beginSupabaseSend:async()=>{roleChangedBeginCalled=true;return "begun";},
+    }));
+    assert.equal(roleChanged.code,"dispatch_actor_unavailable");
+    assert.equal(roleChangedBeginCalled,false,"role removal is revalidated at redemption");
+    await database.insert(lms.lmsUserRoles).values({userId:admissionsActor.id,role:"admissions"});
+    const inactiveGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:makeGrantBinding(2,assignmentLead.id),
+    }));
+    assert.equal(inactiveGrant.code,"grant_issued");
+    await database.update(lms.lmsUsers).set({isActive:false})
+      .where(eq(lms.lmsUsers.id,dispatchActor.id));
+    let inactiveBeginCalled=false;
+    const inactiveRedemption=await database.transaction(tx=>beginAvniDispatchInTransaction({
+      tx,request:dispatchRequest,grantId:inactiveGrant.grant!.id,
+      beginSupabaseSend:async()=>{inactiveBeginCalled=true;return "begun";},
+    }));
+    assert.equal(inactiveRedemption.code,"dispatch_actor_unavailable");
+    assert.equal(inactiveBeginCalled,false,"inactive actors cannot redeem prior grants");
+    await database.update(lms.lmsUsers).set({isActive:true})
+      .where(eq(lms.lmsUsers.id,dispatchActor.id));
+
+    const expiryLead=await registerVslLead({
+      phone:"9000000013",name:"Synthetic expiry lock wait",entryHost:"test.invalid",entryPath:"/vsl",
+      whatsappAdmissionsConsent:true,
+    },time,database);
+    const shortGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:makeGrantBinding(8,expiryLead.id),ttlMs:250,
+    }));
+    assert.equal(shortGrant.code,"grant_issued");
+    const consentLocker=await pool.connect();
+    let beginBackendPid=0;
+    const beginWasCalled={value:false};
+    try {
+      await consentLocker.query("BEGIN");
+      const blockerPid=(await consentLocker.query<{pid:number}>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      await consentLocker.query(
+        "SELECT lead_id FROM admissions_lead_contact_preferences WHERE lead_id=$1 FOR UPDATE",
+        [expiryLead.id],
+      );
+      const waitingBegin=database.transaction(async tx=>{
+        const pid=await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`);
+        beginBackendPid=Number(pid.rows[0].pid);
+        return beginAvniDispatchInTransaction({
+          tx,request:dispatchRequest,grantId:shortGrant.grant!.id,
+          beginSupabaseSend:async()=>{beginWasCalled.value=true;return "begun";},
+        });
+      });
+      let observedConsentLockWait=false;
+      for(let attempt=0;attempt<200;attempt++) {
+        if(beginBackendPid) {
+          const blocked=await pool.query<{blocked:boolean}>(
+            "SELECT $2::int=ANY(pg_blocking_pids($1::int)) AS blocked",
+            [beginBackendPid,blockerPid],
+          );
+          if(blocked.rows[0]?.blocked) {
+            observedConsentLockWait=true;
+            break;
+          }
+        }
+        await new Promise(resolve=>setTimeout(resolve,5));
+      }
+      assert.ok(beginBackendPid>0);
+      assert.equal(observedConsentLockWait,true,"test observed the redemption blocked behind consent lock");
+      await new Promise(resolve=>setTimeout(resolve,300));
+      await consentLocker.query("COMMIT");
+      const expiredAfterWait=await waitingBegin;
+      assert.equal(expiredAfterWait.code,"grant_expired");
+      assert.equal(beginWasCalled.value,false,"expiry is checked after consent/grant locks");
+    } finally {
+      await consentLocker.query("ROLLBACK").catch(()=>undefined);
+      consentLocker.release();
+    }
+    const rpcExpiryLead=await registerVslLead({
+      phone:"9000000014",name:"Synthetic Supabase lock expiry",entryHost:"test.invalid",entryPath:"/vsl",
+      whatsappAdmissionsConsent:true,
+    },time,database);
+    const rpcExpiryGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:makeGrantBinding(1,rpcExpiryLead.id),ttlMs:250,
+    }));
+    assert.equal(rpcExpiryGrant.code,"grant_issued");
+    const expiredAcrossRpc=await database.transaction(tx=>beginAvniDispatchInTransaction({
+      tx,request:dispatchRequest,grantId:rpcExpiryGrant.grant!.id,
+      beginSupabaseSend:async()=>{
+        await new Promise(resolve=>setTimeout(resolve,300));
+        return "begun";
+      },
+    }));
+    assert.equal(expiredAcrossRpc.code,"supabase_begin_uncertain");
+    assert.equal(expiredAcrossRpc.grant?.state,"unknown",
+      "an RPC that may have committed after grant expiry cannot be blindly reused");
+    assert.equal(expiredAcrossRpc.providerCallAllowed,false);
+
     const beginDecision=await database.transaction(tx=>beginAvniDispatchInTransaction({
-      tx,grantId:issued.grant!.id,binding:issued.grant!.binding,now:time,
+      tx,request:dispatchRequest,grantId:issued.grant!.id,now:time,
       beginSupabaseSend:async()=> "begun",
     }));
     assert.equal(beginDecision.code,"begin_send_started");
@@ -155,7 +377,7 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
 
     const unusedBindings=[makeGrantBinding(2),makeGrantBinding(3)];
     const unused=await Promise.all(unusedBindings.map(binding=>database.transaction(tx=>
-      issueAvniDispatchGrantInTransaction(tx,{binding,now:time}))));
+      issueAvniDispatchGrantInTransaction(tx,{request:dispatchRequest,binding,now:time}))));
     assert.ok(unused.every(item=>item.code==="grant_issued"));
     await pool.query(`
       CREATE FUNCTION fail_dispatch_grant_revocation() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -200,13 +422,19 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     assert.equal(status.consent.whatsappAdmissions.status,"opted_out");
     assert.equal(status.consent.whatsappAdmissions.allowed,false);
     assert.equal(await readConsentEpoch(lead.id),2);
-    assert.equal((await database.select().from(grants).where(eq(grants.state,"issued"))).length,0);
-    assert.ok((await database.select().from(grants).where(eq(grants.state,"revoked"))).length>=2);
-    assert.equal((await database.select().from(grants).where(eq(grants.state,"in_flight"))).length,1,
+    assert.equal((await database.select().from(grants).where(and(
+      eq(grants.leadId,lead.id),eq(grants.state,"issued"),
+    ))).length,0);
+    assert.ok((await database.select().from(grants).where(and(
+      eq(grants.leadId,lead.id),eq(grants.state,"revoked"),
+    ))).length>=2);
+    assert.equal((await database.select().from(grants).where(and(
+      eq(grants.leadId,lead.id),eq(grants.state,"in_flight"),
+    ))).length,1,
       "opt-out invalidates unused grants but cannot recall an in-flight begin_send");
     let staleBeginInvoked=false;
     const staleRedemption=await database.transaction(tx=>beginAvniDispatchInTransaction({
-      tx,grantId:unused[0].grant!.id,binding:unused[0].grant!.binding,now:time,
+      tx,request:dispatchRequest,grantId:unused[0].grant!.id,now:time,
       beginSupabaseSend:async()=>{staleBeginInvoked=true;return "begun";},
     }));
     assert.equal(staleRedemption.providerCallAllowed,false);
@@ -218,7 +446,7 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     },time,database);
     const barrierBinding=makeGrantBinding(4,barrierLead.id);
     const barrierGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
-      binding:barrierBinding,now:time,
+      request:dispatchRequest,binding:barrierBinding,now:time,
     }));
     assert.equal(barrierGrant.code,"grant_issued");
     let beginPid=0;
@@ -231,7 +459,7 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
       const pid=await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`);
       beginPid=Number(pid.rows[0].pid);
       return beginAvniDispatchInTransaction({
-        tx,grantId:barrierGrant.grant!.id,binding:barrierGrant.grant!.binding,now:time,
+        tx,request:dispatchRequest,grantId:barrierGrant.grant!.id,now:time,
         beginSupabaseSend:async()=>{
           beginEntered();
           await releaseSupabase;
