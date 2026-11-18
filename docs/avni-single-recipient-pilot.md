@@ -29,7 +29,7 @@ existing server-side read-only Supabase pool and the narrowly scoped
 `find_human_pilot_outbound` RPC; it remains unavailable until the v3 migration
 and reader grant are reviewed and present.
 
-## Implemented server-side boundaries (not wired)
+## Implemented server-side boundaries
 
 - Replit authorization resolves the actor only from the current LMS session,
   rechecks active status and the current admin role, validates the lead's
@@ -49,13 +49,19 @@ and reader grant are reviewed and present.
   ordered after runtime v1 and read preflight v2. None of the Supabase
   migrations is applied by this work.
 - The Evolution adapter accepts an injected transport only. Its production
-  HTTP client is intentionally absent because this repository does not define
-  the deployed Evolution endpoint, authentication/header format, request body,
-  idempotency guarantees, or authoritative definite-rejection responses.
-  Timeouts and ambiguous results are `unknown`; they are never blindly retried.
-  No provider receipt callback is connected by this feature. `accepted` means
-  only that a future transport reports provider acceptance; it is not a
-  delivered/read claim.
+  HTTP client now targets the supplied host using the current upstream
+  Evolution API shape: `POST /message/sendText/{instance}`, `apikey` header,
+  JSON `{ number, text }`, and a response `key.id`. E.164 is validated before
+  converting the recipient to digits for the request. Redirects are not
+  followed, response bodies are size-bounded and never logged, and only
+  authentication rejection statuses are definite failures; other HTTP errors,
+  malformed responses and timeouts are `unknown`, with no blind retry.
+  The deployed Evolution version and its instance/auth configuration have not
+  been verified. Its API does not expose a documented idempotency contract in
+  this repository/source check; duplicate protection is therefore the durable
+  CRM/Supabase outbox key plus terminal handling of unknown outcomes, not a
+  claim of provider-side deduplication. No provider receipt callback is
+  connected. `accepted` is not a delivered/read claim.
 - The Supabase writer accepts injected pools and uses fixed RPCs. No writable
   runtime pool or credential is connected. The existing CRM reader is not
   promoted to a writer.
@@ -66,6 +72,10 @@ and reader grant are reviewed and present.
 
 - `AVNI_SINGLE_RECIPIENT_DISPATCH_ENABLED` — explicit boolean gate, default off.
 - `AVNI_PILOT_RECIPIENT_E164` — one-recipient allowlist. No value is set here.
+- `EVOLUTION_API_KEY` — dedicated Replit secret for the `apikey` header. It
+  must not be copied from or read through the n8n credential reference.
+- `EVOLUTION_API_INSTANCE` — Evolution instance path segment; no value is set
+  here. The API host is fixed in server source, so there is no base-URL variable.
 - A reviewed, dedicated Supabase conversation runtime login/pool is still
   required. The source already names `SUPABASE_AVNI_RUNTIME_DATABASE_URL` and
   `SUPABASE_DB_SSL_CA`; those are presence-only readiness names, not proof of
@@ -75,9 +85,16 @@ and reader grant are reviewed and present.
   remain prerequisites. No key name or value is invented here; the owner must
   approve a workspace-managed secret contract before a provider key source is
   wired.
-- The Evolution API URL, credential name/header, request shape and response
-  contract are not specified by this repository. No Evolution configuration
-  names are invented; obtain the deployment's documented contract first.
+- The implementation-time Production and Development presence-only checks report
+  `EVOLUTION_API_KEY`, `EVOLUTION_API_INSTANCE`, the dispatch gate, and the
+  recipient allowlist as unconfigured. The Supabase writer URL is also absent;
+  the read-only Supabase URL and CA names are present, but their values and
+  connection validity were not inspected.
+- The app cannot consume an n8n Header Auth credential by reference. The
+  dedicated Replit secret above is required; the n8n secret was not accessed.
+- The dispatcher is hard-disabled in server registration as well as gated by
+  `AVNI_SINGLE_RECIPIENT_DISPATCH_ENABLED`. Even if the HTTP transport is
+  configured, missing writer/HMAC dependencies prevent queueing or sending.
 
 ## Required before a controlled send can be considered
 

@@ -26,7 +26,16 @@ import {
   AVNI_PILOT_RECIPIENT_ENV,
   registerAvniPilotDispatchRoute,
 } from "./avni-pilot-dispatch-route";
-import { createAvniPilotStatusReader } from "./avni-single-recipient-pilot";
+import {
+  createAvniPilotStatusReader,
+  createAvniSingleRecipientPilotDispatcher,
+} from "./avni-single-recipient-pilot";
+import {
+  createEvolutionPilotHttpClient,
+  createEvolutionPilotTransport,
+  EVOLUTION_API_INSTANCE_ENV,
+  EVOLUTION_API_KEY_ENV,
+} from "./evolution-pilot-transport";
 import {
   AVNI_FOLLOWUP_READ_SECRET_ENV,
   avniReadCredentialIsDedicated,
@@ -88,18 +97,30 @@ export const avniIntegrationAuth: RequestHandler = async (req, res, next) => {
 export function registerAvniIntegrationRoutes(app: Express) {
 
   const schemaReady = () => admissionsIntegrationSchemaReady(db);
-  // The current repository has no approved Evolution HTTP contract, HMAC key
-  // provider, or dedicated Supabase writer pool. Keep dependencies unavailable
-  // here; a true feature flag alone can never enable a send.
+  const evolutionPilotTransport = createEvolutionPilotTransport(
+    createEvolutionPilotHttpClient({
+      apiKey: process.env[EVOLUTION_API_KEY_ENV],
+      instanceName: process.env[EVOLUTION_API_INSTANCE_ENV],
+    }),
+  );
+  // Keep a second, code-level off switch in addition to the environment gate.
+  // No Replit HMAC provider or least-privilege Supabase writer pool is
+  // configured, so this dispatcher must remain unable to begin a send.
+  const pilotDispatch = createAvniSingleRecipientPilotDispatcher({
+    pool,
+    supabaseWriter: null,
+    hmacKeyProvider: null,
+    transport: evolutionPilotTransport,
+    grantEngine: null,
+    enabled: false,
+    approvedRecipientE164: process.env[AVNI_PILOT_RECIPIENT_ENV] ?? null,
+  });
   registerAvniPilotDispatchRoute(app, {
     authenticate: requireLmsUser,
     authorizeAdmin: requireLmsRole("admin"),
     enabled: process.env[AVNI_PILOT_DISPATCH_GATE_ENV] === "true",
     approvedRecipientE164: process.env[AVNI_PILOT_RECIPIENT_ENV] ?? null,
-    // No Evolution request contract or Supabase writer credential is present
-    // in this source tree. Keep the feature fail-closed until those adapters
-    // are separately reviewed and injected.
-    dispatch: null,
+    dispatch: pilotDispatch,
     // The existing read-only pool can inspect persisted status after the
     // reviewed RPC migration is present. It never queries Evolution or retries.
     readStatus: createAvniPilotStatusReader({
@@ -157,6 +178,8 @@ export function registerAvniIntegrationRoutes(app: Express) {
       "SUPABASE_AVNI_READONLY_DATABASE_URL",
       "SUPABASE_AVNI_RUNTIME_DATABASE_URL",
       "SUPABASE_DB_SSL_CA",
+      EVOLUTION_API_KEY_ENV,
+      EVOLUTION_API_INSTANCE_ENV,
       AVNI_PILOT_DISPATCH_GATE_ENV,
       AVNI_PILOT_RECIPIENT_ENV,
     ];
@@ -184,15 +207,17 @@ export function registerAvniIntegrationRoutes(app: Express) {
       singleRecipientPilot: {
         routeRegistered: true,
         featureGateRequested: process.env[AVNI_PILOT_DISPATCH_GATE_ENV] === "true",
+        dispatchHandlerRegistered: true,
+        dispatchHardDisabled: true,
         dispatcherWired: false,
         statusReaderWired: true,
         statusReaderRequiresV3Migration: true,
-        providerClientWired: false,
+        providerClientWired: evolutionPilotTransport.configured,
         hmacKeyProviderWired: false,
         supabaseWriterPoolWired: false,
         runtimeMigrationRequired: true,
         productionSendingAvailable: false,
-        safeCode: "provider_contract_writer_and_hmac_prerequisites_missing",
+        safeCode: "writer_hmac_and_live_provider_contract_prerequisites_missing",
       },
     });
   });

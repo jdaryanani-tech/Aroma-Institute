@@ -194,6 +194,7 @@ function createDispatcher(options: {
   rendezvousInitialLookups?: boolean;
   grantIssueCode?: string;
   grantBeginDenyCode?: string;
+  enabled?: boolean;
 }) {
   const { pool, queries } = syntheticPool({
     consent: options.consent,
@@ -228,7 +229,7 @@ function createDispatcher(options: {
     hmacKeyProvider: syntheticKeys(),
     transport,
     grantEngine: grant.engine,
-    enabled: true,
+    enabled: options.enabled ?? true,
     approvedRecipientE164: recipient,
   });
   return { dispatch, state, queries, writerCalls, grantCalls: grant.calls, get providerCalls() { return providerCalls; } };
@@ -377,6 +378,19 @@ test("approved recipient mismatch and missing HMAC/writer/transport prerequisite
     expectedControlVersion: 2,
     idempotencyKey,
   }), { status: "unknown", safeCode: "dispatch_runtime_unavailable" });
+});
+
+test("hard-disabled dispatcher never queries CRM, Supabase, or transport even with valid dependencies", async () => {
+  const runtime = createDispatcher({ enabled: false });
+  assert.deepEqual(await runtime.dispatch(request, {
+    canonicalLeadId: leadId,
+    recipientE164: recipient,
+    expectedControlVersion: 2,
+    idempotencyKey,
+  }), { status: "unknown", safeCode: "dispatch_disabled" });
+  assert.equal(runtime.queries.length, 0);
+  assert.equal(runtime.writerCalls.length, 0);
+  assert.equal(runtime.providerCalls, 0);
 });
 
 test("canonical phone mismatch and a denied begin-send fence never reach the provider", async () => {
