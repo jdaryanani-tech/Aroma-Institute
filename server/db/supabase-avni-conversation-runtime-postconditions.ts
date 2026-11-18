@@ -151,6 +151,11 @@ const EXPECTED_RPC_SIGNATURES: Record<string, string> = {
   transition_conversation_control: "uuid, bigint, text, text, uuid, text",
   resolve_provider_reference_aliases: "text, text, text[]",
   bind_provider_reference_aliases: "text, text, text[], uuid",
+  read_human_pilot_thread: "uuid, bigint",
+  find_human_pilot_outbound: "text",
+  claim_human_pilot_outbound: "uuid, integer",
+  begin_human_pilot_send: "uuid, uuid, uuid, uuid, bigint, text, text",
+  record_human_pilot_send_result: "uuid, uuid, uuid, text, text[]",
 };
 const RUNTIME_EXECUTABLE_RPCS = new Set([
   "accept_provider_event",
@@ -159,7 +164,13 @@ const RUNTIME_EXECUTABLE_RPCS = new Set([
   "claim_next_conversation_outbound",
   "begin_conversation_send",
   "record_conversation_send_result",
+  "read_human_pilot_thread",
+  "find_human_pilot_outbound",
+  "claim_human_pilot_outbound",
+  "begin_human_pilot_send",
+  "record_human_pilot_send_result",
 ]);
+const READER_EXECUTABLE_RPCS = new Set(["read_human_pilot_thread"]);
 
 function fail(code: string): never {
   const error = new Error(code) as Error & { code: string };
@@ -387,16 +398,22 @@ export async function assertAvniConversationRuntimePostconditions(
         SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
         WHERE acl.privilege_type='EXECUTE'
           AND acl.grantee<>p.proowner
-          AND (
-            acl.grantee<>(SELECT oid FROM pg_roles WHERE rolname='aichm_conversation_runtime')
-            OR NOT (p.proname=ANY($2::text[]))
-          )
+            AND NOT (
+              (acl.grantee=(SELECT oid FROM pg_roles WHERE rolname='aichm_conversation_runtime')
+                AND p.proname=ANY($2::text[]))
+              OR (acl.grantee=(SELECT oid FROM pg_roles WHERE rolname='aichm_crm_reader')
+                AND p.proname=ANY($3::text[]))
+            )
       ) AS unexpected_execute
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     JOIN pg_roles owner ON owner.oid=p.proowner
     WHERE n.nspname='aichm_private' AND p.proname=ANY($1::text[])
     ORDER BY p.proname
-  `, [rpcNames, Array.from(RUNTIME_EXECUTABLE_RPCS)]);
+  `, [
+    rpcNames,
+    Array.from(RUNTIME_EXECUTABLE_RPCS),
+    Array.from(READER_EXECUTABLE_RPCS),
+  ]);
   if (functions.length !== rpcNames.length) fail("AVNI_CONVERSATION_RUNTIME_RPC_MISSING");
   for (const fn of functions) {
     const searchPath = fn.configuration?.find(value => value.startsWith("search_path="));
@@ -406,10 +423,52 @@ export async function assertAvniConversationRuntimePostconditions(
       fn.owner_name !== "aichm_conversation_owner" ||
       searchPath !== "search_path=pg_catalog, aichm_private, pg_temp" ||
        fn.runtime_execute !== RUNTIME_EXECUTABLE_RPCS.has(fn.function_name) ||
-      fn.reader_execute || fn.service_execute ||
+       fn.reader_execute !== READER_EXECUTABLE_RPCS.has(fn.function_name) || fn.service_execute ||
        fn.anon_execute || fn.authenticated_execute || fn.public_execute || fn.unexpected_execute
     ) fail("AVNI_CONVERSATION_RUNTIME_RPC_PRIVILEGE_OR_PATH_DRIFTED");
   }
+  const { rows: pilotControlTrigger } = await client.query<{
+    trigger_count: string;
+    trigger_enabled: string | null;
+    function_owner: string | null;
+    security_definer: boolean | null;
+    configuration: string | null;
+    runtime_execute: boolean | null;
+    public_execute: boolean | null;
+    unexpected_execute: boolean | null;
+  }>(`
+    SELECT count(*)::text AS trigger_count,
+      min(t.tgenabled::text) AS trigger_enabled,
+      min(owner.rolname) AS function_owner,
+      bool_and(p.prosecdef) AS security_definer,
+      min(p.proconfig::text) AS configuration,
+      bool_or(has_function_privilege('aichm_conversation_runtime',p.oid,'EXECUTE')) AS runtime_execute,
+      bool_or(has_function_privilege('anon',p.oid,'EXECUTE')
+        OR has_function_privilege('authenticated',p.oid,'EXECUTE')
+        OR has_function_privilege('service_role',p.oid,'EXECUTE')) AS public_execute,
+      bool_or(EXISTS (
+        SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+        WHERE acl.privilege_type='EXECUTE' AND acl.grantee<>p.proowner
+      )) AS unexpected_execute
+    FROM pg_trigger t
+    JOIN pg_proc p ON p.oid=t.tgfoid
+    JOIN pg_roles owner ON owner.oid=p.proowner
+    WHERE t.tgrelid='aichm_private.conversation_threads'::regclass
+      AND t.tgname='avni_cancel_stale_human_pilot_outbound'
+      AND NOT t.tgisinternal
+      AND pg_get_triggerdef(t.oid) ILIKE '%AFTER UPDATE OF mode, control_version%'
+  `);
+  const trigger = pilotControlTrigger[0];
+  if (
+    Number(trigger?.trigger_count) !== 1 ||
+    trigger?.trigger_enabled !== "O" ||
+    trigger.function_owner !== "aichm_conversation_owner" ||
+    trigger.security_definer !== true ||
+    trigger.runtime_execute ||
+    trigger.public_execute ||
+    trigger.unexpected_execute ||
+    !trigger.configuration?.includes("search_path=pg_catalog, aichm_private, pg_temp")
+  ) fail("AVNI_HUMAN_PILOT_CONTROL_TRIGGER_DRIFTED");
   const { rows: unsafeDispatchRpcs } = await client.query<{ function_name: string }>(`
     SELECT p.proname AS function_name
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace

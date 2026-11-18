@@ -19,6 +19,11 @@ import { createAvniDiagnosticsHandler } from "./avni-diagnostics";
 import { registerAvniProductionDiagnosticsRoute } from "./avni-production-diagnostics";
 import { registerAvniCrmFollowUpRoutes } from "../crm/avni-follow-up-routes";
 import {
+  AVNI_PILOT_DISPATCH_GATE_ENV,
+  AVNI_PILOT_RECIPIENT_ENV,
+  registerAvniPilotDispatchRoute,
+} from "./avni-pilot-dispatch-route";
+import {
   AVNI_FOLLOWUP_READ_SECRET_ENV,
   avniReadCredentialIsDedicated,
   createAvniFollowUpReadAuth,
@@ -79,6 +84,19 @@ export const avniIntegrationAuth: RequestHandler = async (req, res, next) => {
 export function registerAvniIntegrationRoutes(app: Express) {
 
   const schemaReady = () => admissionsIntegrationSchemaReady(db);
+  // The current repository has no approved Evolution HTTP contract, HMAC key
+  // provider, or dedicated Supabase writer pool. Keep dependencies unavailable
+  // here; a true feature flag alone can never enable a send.
+  registerAvniPilotDispatchRoute(app, {
+    authenticate: requireLmsUser,
+    authorizeAdmin: requireLmsRole("admin"),
+    enabled: process.env[AVNI_PILOT_DISPATCH_GATE_ENV] === "true",
+    approvedRecipientE164: process.env[AVNI_PILOT_RECIPIENT_ENV] ?? null,
+    // No Evolution request contract or Supabase writer credential is present
+    // in this source tree. Keep the feature fail-closed until those adapters
+    // are separately reviewed and injected.
+    dispatch: null,
+  });
   registerAvniCrmFollowUpRoutes(
     app,
     avniIntegrationAuth,
@@ -128,7 +146,10 @@ export function registerAvniIntegrationRoutes(app: Express) {
       "AICHM_VAPID_PUBLIC_KEY",
       "AICHM_VAPID_PRIVATE_KEY",
       "SUPABASE_AVNI_READONLY_DATABASE_URL",
+      "SUPABASE_AVNI_RUNTIME_DATABASE_URL",
       "SUPABASE_DB_SSL_CA",
+      AVNI_PILOT_DISPATCH_GATE_ENV,
+      AVNI_PILOT_RECIPIENT_ENV,
     ];
     const configured = Object.fromEntries(names.map((name) => [name, Boolean(process.env[name]?.trim())]));
     let schemaReady = false, calendarReady = false;
@@ -151,6 +172,17 @@ export function registerAvniIntegrationRoutes(app: Express) {
       transcriptStore: "supabase",
       supabaseConversationReaderConfigured: isSupabaseAvniReadConfigured(),
       supabaseRuntimeBusinessData: false,
+      singleRecipientPilot: {
+        routeRegistered: true,
+        featureGateRequested: process.env[AVNI_PILOT_DISPATCH_GATE_ENV] === "true",
+        dispatcherWired: false,
+        providerClientWired: false,
+        hmacKeyProviderWired: false,
+        supabaseWriterPoolWired: false,
+        runtimeMigrationRequired: true,
+        productionSendingAvailable: false,
+        safeCode: "provider_contract_writer_and_hmac_prerequisites_missing",
+      },
     });
   });
 

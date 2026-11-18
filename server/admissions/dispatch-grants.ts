@@ -99,6 +99,7 @@ async function resolveTrustedActorScope(
   tx: Transaction,
   request: Pick<Request, "session" | "lmsUser">,
   leadId: string,
+  requireAdmin = false,
 ): Promise<TrustedActorScope | null> {
   const sessionUserId = request.session?.lmsUserId;
   const attachedUserId = request.lmsUser?.id;
@@ -122,6 +123,7 @@ async function resolveTrustedActorScope(
   };
   const accessLevel = crmAccessLevel(principal);
   if (accessLevel !== "admin" && accessLevel !== "admissions") return null;
+  if (requireAdmin && accessLevel !== "admin") return null;
 
   const [lead] = await tx.select({ id: admissionsLeads.id })
     .from(admissionsLeads).where(eq(admissionsLeads.id, leadId)).for("share");
@@ -162,12 +164,15 @@ export async function issueAvniDispatchGrantInTransaction(
   input: {
     request: Pick<Request, "session" | "lmsUser">;
     binding: NewAvniDispatchGrantBinding;
+    requireAdmin?: boolean;
     now?: Date;
     ttlMs?: number;
   },
 ) {
   if (!await schemaReady(tx)) return { code: "dispatch_schema_unavailable" as const, grant: null };
-  const actorScope = await resolveTrustedActorScope(tx, input.request, input.binding.canonicalLeadId);
+  const actorScope = await resolveTrustedActorScope(
+    tx, input.request, input.binding.canonicalLeadId, input.requireAdmin === true,
+  );
   if (!actorScope) return { code: "dispatch_actor_unavailable" as const, grant: null };
   const [preference] = await tx.select({
     consentStatus: preferences.consentStatus,
@@ -229,12 +234,15 @@ export async function issueAvniDispatchGrantInTransaction(
  * Performs the last Replit consent check and calls the supplied Supabase
  * begin_send adapter while the Replit consent and grant rows remain locked.
  * The callback must be a bounded, fixed RPC call. This function never invokes
- * a provider or turns its result into permission to send.
+ * a provider. Provider permission is returned only when the trusted caller
+ * explicitly opts in and the Supabase begin_send result is exactly "begun".
  */
 export async function beginAvniDispatchInTransaction(input: {
   tx: Transaction;
   request: Pick<Request, "session" | "lmsUser">;
   grantId: string;
+  requireAdmin?: boolean;
+  allowProviderCallAfterBegin?: boolean;
   now?: Date;
   beginSupabaseSend: (binding: AvniDispatchGrantBinding) => Promise<SupabaseBeginSendOutcome>;
 }) {
@@ -255,7 +263,9 @@ export async function beginAvniDispatchInTransaction(input: {
     code: "grant_replayed" as const,
     grant: null,
   };
-  const actorScope = await resolveTrustedActorScope(tx, input.request, initialRow.leadId);
+  const actorScope = await resolveTrustedActorScope(
+    tx, input.request, initialRow.leadId, input.requireAdmin === true,
+  );
   if (!actorScope) return {
     allowedToBeginSend: false as const,
     providerCallAllowed: false as const,
@@ -379,5 +389,40 @@ export async function beginAvniDispatchInTransaction(input: {
       safeOutcome: decision.grant.safeOutcome,
     }).where(and(eq(grants.id, grant.id), eq(grants.state, "issued")));
   }
-  return decision;
+  return {
+    ...decision,
+    providerCallAllowed: input.allowProviderCallAfterBegin === true
+      && decision.allowedToBeginSend === true
+      && decision.code === "begin_send_started",
+  };
+}
+
+/**
+ * Persists a terminal provider outcome after the provider boundary. This is
+ * separate from begin_send: a failed settlement is treated as unknown by the
+ * caller and must never cause a new attempt automatically.
+ */
+export async function settleAvniDispatchGrantInTransaction(input: {
+  tx: Transaction;
+  grantId: string;
+  outcome: "accepted" | "failed" | "unknown";
+  now?: Date;
+}): Promise<boolean> {
+  if (!await schemaReady(input.tx)) return false;
+  const [row] = await input.tx.select().from(grants)
+    .where(eq(grants.id, input.grantId)).for("update");
+  if (!row || row.state !== "in_flight") return false;
+  const now = await transactionTime(input.tx, input.now);
+  const terminal = input.outcome === "accepted"
+    ? { state: "accepted" as const, safeOutcome: "provider_accepted" as const }
+    : input.outcome === "failed"
+      ? { state: "failed" as const, safeOutcome: "definite_failure" as const }
+      : { state: "unknown" as const, safeOutcome: "ambiguous_result" as const };
+  const updated = await input.tx.update(grants).set({
+    state: terminal.state,
+    safeOutcome: terminal.safeOutcome,
+    completedAt: now,
+  }).where(and(eq(grants.id, input.grantId), eq(grants.state, "in_flight")))
+    .returning({ id: grants.id });
+  return updated.length === 1;
 }

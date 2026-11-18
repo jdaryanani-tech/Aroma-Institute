@@ -25,6 +25,7 @@ export const AVNI_MIGRATION_SOURCE_ORDER = {
     "20261107_aichm_two_database_contract.sql",
     "20261118_avni_conversation_runtime_v1.sql",
     "20261118_avni_conversation_runtime_v2_preflight.sql",
+    "20261118_avni_human_pilot_dispatch_v3.sql",
   ],
 } as const;
 

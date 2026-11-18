@@ -47,6 +47,7 @@ let pool: Pool | undefined;
 let legacyHistoryAfter: unknown[] = [];
 let migrationRollbackVerified = false;
 let preflightMigrationRollbackVerified = false;
+let pilotMigrationRollbackVerified = false;
 
 // These keys are deterministic test-only fixtures, never production secrets.
 function syntheticKeyProvider(activeKeyId = "test-a"): AvniHmacKeyProvider {
@@ -75,9 +76,10 @@ function syntheticAliases(
   reference: string,
   kind: AvniProviderReferenceKind,
   activeKeyId: string,
+  provider = "whatsapp",
 ): string[] {
   return createAvniProviderReferenceAliases({
-    provider: "whatsapp",
+    provider,
     kind,
     rawReference: reference,
   }, syntheticKeyProvider(activeKeyId)).map(alias => alias.token);
@@ -343,6 +345,44 @@ async function installSyntheticPrerequisitesAndMigration(): Promise<void> {
     preflightRollbackClient.release();
   }
   await pool!.query(preflightMigration);
+  const pilotMigration = await readFile(
+    "supabase/migrations/20261118_avni_human_pilot_dispatch_v3.sql",
+    "utf8",
+  );
+  const failingPilotMigration = pilotMigration.replace(
+    /\nCOMMIT;\s*$/,
+    "\nSELECT 1/0;\nCOMMIT;\n",
+  );
+  assert.notEqual(failingPilotMigration, pilotMigration);
+  const pilotRollbackClient = await pool!.connect();
+  try {
+    await assert.rejects(pilotRollbackClient.query(failingPilotMigration), /division by zero/i);
+    await pilotRollbackClient.query("ROLLBACK");
+    const absent = await pilotRollbackClient.query<{
+      functions_absent: boolean;
+      trigger_absent: boolean;
+    }>(`
+      SELECT
+        to_regprocedure('aichm_private.read_human_pilot_thread(uuid,bigint)') IS NULL
+        AND
+        to_regprocedure('aichm_private.find_human_pilot_outbound(text)') IS NULL
+        AND to_regprocedure('aichm_private.claim_human_pilot_outbound(uuid,integer)') IS NULL
+        AND to_regprocedure('aichm_private.begin_human_pilot_send(uuid,uuid,uuid,uuid,bigint,text,text)') IS NULL
+        AND to_regprocedure('aichm_private.record_human_pilot_send_result(uuid,uuid,uuid,text,text[])') IS NULL
+        AS functions_absent,
+        NOT EXISTS (
+          SELECT 1 FROM pg_trigger
+          WHERE tgrelid='aichm_private.conversation_threads'::regclass
+            AND tgname='avni_cancel_stale_human_pilot_outbound'
+        ) AS trigger_absent
+    `);
+    assert.equal(absent.rows[0]?.functions_absent, true);
+    assert.equal(absent.rows[0]?.trigger_absent, true);
+    pilotMigrationRollbackVerified = true;
+  } finally {
+    pilotRollbackClient.release();
+  }
+  await pool!.query(pilotMigration);
   const client = await pool!.connect();
   try {
     await assertAvniConversationRuntimePostconditions(client);
@@ -400,6 +440,12 @@ test("injected preflight migration failure rolls back RPC, policy and column pri
   skip: !enabled,
 }, () => {
   assert.equal(preflightMigrationRollbackVerified, true);
+});
+
+test("injected human pilot migration failure rolls back its RPC boundary", {
+  skip: !enabled,
+}, () => {
+  assert.equal(pilotMigrationRollbackVerified, true);
 });
 
 function makeMessageEvent(overrides: Partial<Extract<AvniConversationEvent, { kind: "message" }>> = {}) {
@@ -484,6 +530,19 @@ async function createReadyThread() {
     threadKey: accepted.threadKey as string,
     threadRef: accepted.event.threadRef,
   };
+}
+
+async function createHumanPilotThread() {
+  const ready = await createReadyThread();
+  const takeover = await asOwner(client => client.query(
+    `SELECT * FROM aichm_private.transition_conversation_control(
+      $1,2,'takeover','replit_lms_user:42',$2,'synthetic pilot human control'
+    )`,
+    [ready.threadId, randomUUID()],
+  ));
+  assert.equal(takeover.rows[0].outcome, "changed");
+  assert.equal(Number(takeover.rows[0].control_version), 3);
+  return { ...ready, controlVersion: 3 };
 }
 
 async function enqueueAssistant(threadId: string, version = 2) {
@@ -1424,6 +1483,285 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
     "SELECT state FROM aichm_private.conversation_outbox WHERE id=$1",
     [humanEnqueue.rows[0].outbox_id],
   ))[0].state, "pending");
+});
+
+test("human pilot uses a targeted claim/begin fence and persists an HMAC-only accepted result", {
+  skip: !enabled,
+}, async () => {
+  const human = await createHumanPilotThread();
+  const reference = `pilot-${randomUUID()}`;
+  const messageKey = `message:v1:${"d".repeat(64)}`;
+  const fingerprint = "e".repeat(64);
+  const queued = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.enqueue_conversation_message(
+      $1,$2,'human_staff','replit_lms_user:42',$3,$4,'text','synthetic pilot text',NULL
+    )`,
+    [human.threadId, human.controlVersion, messageKey, fingerprint],
+  ));
+  assert.equal(queued.rows[0].outcome, "queued");
+  const found = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.find_human_pilot_outbound($1)",
+    [messageKey],
+  ));
+  assert.equal(found.rows[0].state, "pending");
+  assert.equal(Number(found.rows[0].attempt_number), 0);
+
+  const claim = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+    [queued.rows[0].outbox_id],
+  ));
+  assert.equal(claim.rows.length, 1);
+  const result = await asRuntime(client => client.query(
+    `SELECT aichm_private.begin_human_pilot_send(
+      $1,$2,$3,$4,$5,$6,$7
+    ) AS outcome`,
+    [
+      claim.rows[0].outbox_id, claim.rows[0].attempt_id, claim.rows[0].lease_token,
+      claim.rows[0].thread_id, human.controlVersion, "replit_lms_user:42", fingerprint,
+    ],
+  ));
+  assert.equal(result.rows[0].outcome, "begun");
+  const aliases = syntheticAliases(reference, "message", "test-a");
+  const accepted = await asRuntime(client => client.query(
+    `SELECT aichm_private.record_human_pilot_send_result(
+      $1,$2,$3,'sent',$4::text[]
+    ) AS outcome`,
+    [claim.rows[0].outbox_id, claim.rows[0].attempt_id, claim.rows[0].lease_token, aliases],
+  ));
+  assert.equal(accepted.rows[0].outcome, "sent");
+
+  const triad = await queryRows<{
+    outbox_state: string;
+    attempt_state: string;
+    attempt_delivery: string;
+    message_delivery: string;
+    provider_key: string;
+  }>(`
+    SELECT o.state AS outbox_state,a.state AS attempt_state,
+      a.delivery_state AS attempt_delivery,m.delivery_state AS message_delivery,
+      m.provider_message_key AS provider_key
+    FROM aichm_private.conversation_outbox o
+    JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+    JOIN aichm_private.conversation_messages m ON m.id=o.message_id
+    WHERE o.id=$1
+  `, [claim.rows[0].outbox_id]);
+  assert.deepEqual(triad[0], {
+    outbox_state: "accepted",
+    attempt_state: "sent",
+    attempt_delivery: "sent",
+    message_delivery: "sent",
+    provider_key: aliases[0],
+  });
+  const replay = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.find_human_pilot_outbound($1)",
+    [messageKey],
+  ));
+  assert.equal(replay.rows[0].state, "accepted");
+  assert.equal(Number(replay.rows[0].attempt_number), 1);
+  assert.equal(
+    (await asRuntime(client => client.query(
+      "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+      [claim.rows[0].outbox_id],
+    ))).rows.length,
+    0,
+    "accepted idempotency key cannot create another send attempt",
+  );
+});
+
+test("human pilot begin fence cancels all three records after a takeover/resume version change", {
+  skip: !enabled,
+}, async () => {
+  const human = await createHumanPilotThread();
+  const messageKey = `message:v1:${"f".repeat(64)}`;
+  const fingerprint = "a".repeat(64);
+  const queued = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.enqueue_conversation_message(
+      $1,$2,'human_staff','replit_lms_user:42',$3,$4,'text','synthetic pilot text',NULL
+    )`,
+    [human.threadId, human.controlVersion, messageKey, fingerprint],
+  ));
+  const claim = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+    [queued.rows[0].outbox_id],
+  ));
+  assert.equal(claim.rows.length, 1);
+  const resumed = await asOwner(client => client.query(
+    `SELECT * FROM aichm_private.transition_conversation_control(
+      $1,3,'resume','replit_lms_user:42',$2,'synthetic pilot cancellation'
+    )`,
+    [human.threadId, randomUUID()],
+  ));
+  assert.equal(resumed.rows[0].outcome, "changed");
+  const denied = await asRuntime(client => client.query(
+    `SELECT aichm_private.begin_human_pilot_send(
+      $1,$2,$3,$4,$5,$6,$7
+    ) AS outcome`,
+    [
+      claim.rows[0].outbox_id, claim.rows[0].attempt_id, claim.rows[0].lease_token,
+      claim.rows[0].thread_id, human.controlVersion, "replit_lms_user:42", fingerprint,
+    ],
+  ));
+  assert.equal(denied.rows[0].outcome, "denied");
+  const states = await queryRows<{
+    outbox_state: string; attempt_state: string; attempt_delivery: string; message_delivery: string;
+  }>(`
+    SELECT o.state AS outbox_state,a.state AS attempt_state,
+      a.delivery_state AS attempt_delivery,m.delivery_state AS message_delivery
+    FROM aichm_private.conversation_outbox o
+    JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+    JOIN aichm_private.conversation_messages m ON m.id=o.message_id
+    WHERE o.id=$1
+  `, [queued.rows[0].outbox_id]);
+  assert.deepEqual(states[0], {
+    outbox_state: "cancelled",
+    attempt_state: "cancelled",
+    attempt_delivery: "cancelled",
+    message_delivery: "cancelled",
+  });
+});
+
+test("human pilot safely reclaims only expired claims and makes expired sending leases terminal unknown", {
+  skip: !enabled,
+}, async () => {
+  const human = await createHumanPilotThread();
+  const messageKey = `message:v1:${"b".repeat(64)}`;
+  const fingerprint = "c".repeat(64);
+  const queued = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.enqueue_conversation_message(
+      $1,$2,'human_staff','replit_lms_user:42',$3,$4,'text','synthetic pilot text',NULL
+    )`,
+    [human.threadId, human.controlVersion, messageKey, fingerprint],
+  ));
+  const firstClaim = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+    [queued.rows[0].outbox_id],
+  ));
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    [queued.rows[0].outbox_id],
+  );
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox_attempts SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    [firstClaim.rows[0].attempt_id],
+  );
+  const secondClaim = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+    [queued.rows[0].outbox_id],
+  ));
+  assert.equal(secondClaim.rows.length, 1);
+  assert.equal(Number(secondClaim.rows[0].attempt_number), 2);
+  assert.equal((await queryRows<{ state: string }>(
+    "SELECT state FROM aichm_private.conversation_outbox_attempts WHERE id=$1",
+    [firstClaim.rows[0].attempt_id],
+  ))[0].state, "cancelled");
+  assert.equal((await asRuntime(client => client.query(
+    `SELECT aichm_private.begin_human_pilot_send($1,$2,$3,$4,$5,$6,$7) AS outcome`,
+    [
+      secondClaim.rows[0].outbox_id, secondClaim.rows[0].attempt_id,
+      secondClaim.rows[0].lease_token, secondClaim.rows[0].thread_id,
+      human.controlVersion, "replit_lms_user:42", fingerprint,
+    ],
+  ))).rows[0].outcome, "begun");
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    [queued.rows[0].outbox_id],
+  );
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox_attempts SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    [secondClaim.rows[0].attempt_id],
+  );
+  assert.equal((await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+    [queued.rows[0].outbox_id],
+  ))).rows.length, 0);
+  const finalState = await queryRows<{
+    outbox_state: string; attempt_state: string; attempt_delivery: string; message_delivery: string;
+  }>(`
+    SELECT o.state AS outbox_state,a.state AS attempt_state,
+      a.delivery_state AS attempt_delivery,m.delivery_state AS message_delivery
+    FROM aichm_private.conversation_outbox o
+    JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+    JOIN aichm_private.conversation_messages m ON m.id=o.message_id
+    WHERE o.id=$1 ORDER BY a.attempt_number DESC LIMIT 1
+  `, [queued.rows[0].outbox_id]);
+  assert.deepEqual(finalState[0], {
+    outbox_state: "unknown",
+    attempt_state: "unknown",
+    attempt_delivery: "unknown",
+    message_delivery: "unknown",
+  });
+});
+
+test("late accepted provider response after lease expiry stays unknown, binds HMAC reference, and cannot retry", {
+  skip: !enabled,
+}, async () => {
+  const human = await createHumanPilotThread();
+  const messageKey = `message:v1:${"c".repeat(64)}`;
+  const fingerprint = "d".repeat(64);
+  const queued = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.enqueue_conversation_message(
+      $1,$2,'human_staff','replit_lms_user:42',$3,$4,'text','synthetic pilot text',NULL
+    )`,
+    [human.threadId, human.controlVersion, messageKey, fingerprint],
+  ));
+  const claim = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+    [queued.rows[0].outbox_id],
+  ));
+  assert.equal((await asRuntime(client => client.query(
+    `SELECT aichm_private.begin_human_pilot_send($1,$2,$3,$4,$5,$6,$7) AS outcome`,
+    [
+      claim.rows[0].outbox_id, claim.rows[0].attempt_id, claim.rows[0].lease_token,
+      claim.rows[0].thread_id, human.controlVersion, "replit_lms_user:42", fingerprint,
+    ],
+  ))).rows[0].outcome, "begun");
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    [queued.rows[0].outbox_id],
+  );
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox_attempts SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    [claim.rows[0].attempt_id],
+  );
+  assert.equal((await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+    [queued.rows[0].outbox_id],
+  ))).rows.length, 0);
+  const alias = syntheticAliases("late-provider-reference", "message", "test-a")[0];
+  const result = await asRuntime(client => client.query(
+    `SELECT aichm_private.record_human_pilot_send_result(
+      $1,$2,$3,'sent',$4::text[]
+    ) AS outcome`,
+    [claim.rows[0].outbox_id, claim.rows[0].attempt_id, claim.rows[0].lease_token, [alias]],
+  ));
+  assert.equal(result.rows[0].outcome, "unknown");
+  const duplicate = await asRuntime(client => client.query(
+    `SELECT aichm_private.record_human_pilot_send_result(
+      $1,$2,$3,'sent',$4::text[]
+    ) AS outcome`,
+    [claim.rows[0].outbox_id, claim.rows[0].attempt_id, claim.rows[0].lease_token, [alias]],
+  ));
+  assert.equal(duplicate.rows[0].outcome, "unknown");
+  const row = await queryRows<{
+    outbox_state: string; attempt_state: string; message_state: string; provider_key: string;
+  }>(`
+    SELECT o.state AS outbox_state,a.state AS attempt_state,
+      m.delivery_state AS message_state,m.provider_message_key AS provider_key
+    FROM aichm_private.conversation_outbox o
+    JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+    JOIN aichm_private.conversation_messages m ON m.id=o.message_id
+    WHERE o.id=$1
+  `, [queued.rows[0].outbox_id]);
+  assert.deepEqual(row[0], {
+    outbox_state: "unknown",
+    attempt_state: "unknown",
+    message_state: "unknown",
+    provider_key: alias,
+  });
+  assert.equal((await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_human_pilot_outbound($1,30)",
+    [queued.rows[0].outbox_id],
+  ))).rows.length, 0);
 });
 
 test("delivery receipts retain raw provider labels and ignore regressions", {

@@ -372,8 +372,38 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
       beginSupabaseSend:async()=> "begun",
     }));
     assert.equal(beginDecision.code,"begin_send_started");
-    assert.equal(beginDecision.providerCallAllowed,false,"begin_send never authorizes a provider call");
+    assert.equal(beginDecision.providerCallAllowed,false,"provider permission is opt-in and disabled by default");
     assert.equal((await database.select().from(grants).where(eq(grants.id,issued.grant!.id)))[0].state,"in_flight");
+
+    const pilotBoundaryLead=await registerVslLead({
+      phone:"9000000015",name:"Synthetic gated pilot boundary",entryHost:"test.invalid",entryPath:"/vsl",
+      whatsappAdmissionsConsent:true,
+    },time,database);
+    const pilotBoundaryGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:makeGrantBinding(2,pilotBoundaryLead.id),requireAdmin:true,
+    }));
+    assert.equal(pilotBoundaryGrant.code,"grant_issued");
+    const disabledProviderPermission=await database.transaction(tx=>beginAvniDispatchInTransaction({
+      tx,request:dispatchRequest,grantId:pilotBoundaryGrant.grant!.id,requireAdmin:true,
+      beginSupabaseSend:async()=>"begun",
+    }));
+    assert.equal(disabledProviderPermission.providerCallAllowed,false);
+
+    const explicitProviderPermissionLead=await registerVslLead({
+      phone:"9000000016",name:"Synthetic explicitly enabled boundary",entryHost:"test.invalid",entryPath:"/vsl",
+      whatsappAdmissionsConsent:true,
+    },time,database);
+    const explicitProviderPermissionGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      request:dispatchRequest,binding:makeGrantBinding(3,explicitProviderPermissionLead.id),requireAdmin:true,
+    }));
+    assert.equal(explicitProviderPermissionGrant.code,"grant_issued");
+    const explicitProviderPermission=await database.transaction(tx=>beginAvniDispatchInTransaction({
+      tx,request:dispatchRequest,grantId:explicitProviderPermissionGrant.grant!.id,
+      requireAdmin:true,allowProviderCallAfterBegin:true,beginSupabaseSend:async()=>"begun",
+    }));
+    assert.equal(explicitProviderPermission.code,"begin_send_started");
+    assert.equal(explicitProviderPermission.providerCallAllowed,true,
+      "only a trusted server caller may opt in after a successful begin_send fence");
 
     const unusedBindings=[makeGrantBinding(2),makeGrantBinding(3)];
     const unused=await Promise.all(unusedBindings.map(binding=>database.transaction(tx=>
