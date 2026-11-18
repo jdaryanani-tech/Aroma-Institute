@@ -24,6 +24,7 @@ export const CRM_RUNTIME_TABLE_PRIVILEGES: Record<string, readonly string[]> = {
   admissions_lead_assignments: ["SELECT"],
   admissions_lead_assignment_history: ["SELECT"],
   admissions_lead_contact_preferences: ["SELECT", "INSERT", "UPDATE"],
+  admissions_conversation_dispatch_grants: ["SELECT", "INSERT", "UPDATE"],
   admissions_registration_outbox: ["SELECT", "INSERT", "UPDATE"],
   admissions_vsl_playbacks: ["SELECT", "INSERT", "UPDATE"],
   admissions_vsl_events: ["SELECT", "INSERT"],

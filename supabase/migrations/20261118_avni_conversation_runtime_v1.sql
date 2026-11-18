@@ -677,8 +677,7 @@ CREATE OR REPLACE FUNCTION aichm_private.enqueue_conversation_message(
   p_message_fingerprint text,
   p_message_type text,
   p_body text,
-  p_media_ref text,
-  p_whatsapp_send_allowed boolean DEFAULT false
+  p_media_ref text
 ) RETURNS TABLE(outcome text,outbox_id uuid,message_id uuid,control_version bigint)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, aichm_private, pg_temp
@@ -704,11 +703,7 @@ BEGIN
     OR (p_author='assistant' AND p_actor_ref IS NOT NULL)
     OR (p_author='human_staff' AND p_actor_ref IS NULL)
     OR (p_author='human_staff' AND p_actor_ref !~ '^replit_lms_user:[1-9][0-9]{0,9}$')
-    OR p_whatsapp_send_allowed IS NULL
   THEN RAISE EXCEPTION 'invalid_conversation_outbound_request' USING ERRCODE='22023'; END IF;
-  IF NOT p_whatsapp_send_allowed THEN
-    RETURN QUERY SELECT 'whatsapp_send_not_authorized'::text,NULL::uuid,NULL::uuid,NULL::bigint; RETURN;
-  END IF;
 
   SELECT * INTO v_thread FROM aichm_private.conversation_threads
   WHERE id=p_thread_id FOR UPDATE;
@@ -760,7 +755,6 @@ END
 $function$;
 
 CREATE OR REPLACE FUNCTION aichm_private.claim_next_conversation_outbound(
-  p_whatsapp_send_allowed boolean,
   p_lease_seconds integer DEFAULT 60
 ) RETURNS TABLE(
   outbox_id uuid,attempt_id uuid,thread_id uuid,provider text,message_id uuid,
@@ -781,7 +775,7 @@ DECLARE
   v_expired_outbox aichm_private.conversation_outbox%ROWTYPE;
   v_expired_attempt_id uuid;
 BEGIN
-  IF p_lease_seconds NOT BETWEEN 5 AND 300 OR p_whatsapp_send_allowed IS NULL THEN
+  IF p_lease_seconds NOT BETWEEN 5 AND 300 THEN
     RAISE EXCEPTION 'invalid_conversation_lease' USING ERRCODE='22023';
   END IF;
 
@@ -849,7 +843,6 @@ BEGIN
     OR v_outbox.attempt_count>=v_outbox.max_attempts
     OR v_thread.mapping_status<>'mapped' OR v_thread.lifecycle<>'open'
     OR v_thread.control_version<>v_outbox.expected_control_version
-    OR NOT p_whatsapp_send_allowed
     OR NOT ((v_outbox.author='assistant' AND v_thread.mode='ai')
       OR (v_outbox.author='human_staff' AND v_thread.mode='human'))
   THEN RETURN; END IF;
@@ -872,12 +865,16 @@ BEGIN
 END
 $function$;
 
-CREATE OR REPLACE FUNCTION aichm_private.authorize_conversation_outbound_attempt(
+CREATE OR REPLACE FUNCTION aichm_private.begin_conversation_send(
+  p_thread_id uuid,
   p_outbox_id uuid,
   p_attempt_id uuid,
   p_lease_token uuid,
-  p_whatsapp_send_allowed boolean
-) RETURNS boolean
+  p_expected_control_version bigint,
+  p_message_id uuid,
+  p_message_idempotency_key text,
+  p_payload_hash text
+) RETURNS text
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, aichm_private, pg_temp
 AS $function$
@@ -885,29 +882,57 @@ DECLARE
   v_outbox aichm_private.conversation_outbox%ROWTYPE;
   v_attempt aichm_private.conversation_outbox_attempts%ROWTYPE;
   v_thread aichm_private.conversation_threads%ROWTYPE;
-  v_thread_id uuid;
-  v_authorized boolean;
+  v_message aichm_private.conversation_messages%ROWTYPE;
 BEGIN
-  SELECT o.thread_id INTO v_thread_id FROM aichm_private.conversation_outbox o
-  WHERE o.id=p_outbox_id;
-  IF NOT FOUND THEN RETURN false; END IF;
+  IF p_thread_id IS NULL OR p_outbox_id IS NULL OR p_attempt_id IS NULL
+    OR p_lease_token IS NULL OR p_expected_control_version IS NULL
+    OR p_message_id IS NULL OR p_message_idempotency_key IS NULL
+    OR p_message_idempotency_key !~ '^message:v1:[0-9a-f]{64}$'
+    OR p_payload_hash IS NULL OR p_payload_hash !~ '^[0-9a-f]{64}$'
+  THEN RAISE EXCEPTION 'invalid_conversation_begin_send_request' USING ERRCODE='22023'; END IF;
+
+  -- Take the same thread lock as control transitions. Whichever acquires it
+  -- first wins: takeover first fences this send; begin_send first marks it
+  -- in-flight and a later takeover cannot recall the provider request.
   SELECT * INTO v_thread FROM aichm_private.conversation_threads
-  WHERE id=v_thread_id FOR UPDATE;
+  WHERE id=p_thread_id FOR UPDATE;
+  IF NOT FOUND THEN RETURN 'thread_not_found'; END IF;
   SELECT * INTO v_outbox FROM aichm_private.conversation_outbox
-  WHERE id=p_outbox_id FOR UPDATE;
-  IF NOT FOUND THEN RETURN false; END IF;
+  WHERE id=p_outbox_id AND thread_id=p_thread_id FOR UPDATE;
+  IF NOT FOUND THEN RETURN 'outbox_not_found'; END IF;
   SELECT * INTO v_attempt FROM aichm_private.conversation_outbox_attempts
   WHERE id=p_attempt_id AND outbox_id=p_outbox_id FOR UPDATE;
-  IF NOT FOUND THEN RETURN false; END IF;
-  v_authorized:=v_outbox.state='claimed' AND v_attempt.state='claimed'
+  IF NOT FOUND THEN RETURN 'attempt_not_found'; END IF;
+
+  -- A repeated RPC after a lost response never authorizes a second external
+  -- call. The caller must treat this as an unknown/reconciliation outcome.
+  IF v_outbox.state='sending' AND v_attempt.state='sending'
     AND v_outbox.lease_token=p_lease_token AND v_attempt.lease_token=p_lease_token
-    AND v_outbox.lease_expires_at>now() AND v_attempt.lease_expires_at>now()
-    AND v_outbox.expected_control_version=v_thread.control_version
-    AND v_thread.lifecycle='open' AND v_thread.mapping_status='mapped'
-    AND p_whatsapp_send_allowed
-    AND ((v_outbox.author='assistant' AND v_thread.mode='ai')
-      OR (v_outbox.author='human_staff' AND v_thread.mode='human'));
-  IF NOT v_authorized THEN
+    AND v_outbox.message_id=p_message_id
+    AND v_outbox.idempotency_key=p_message_idempotency_key
+  THEN RETURN 'already_begun'; END IF;
+
+  SELECT * INTO v_message FROM aichm_private.conversation_messages
+  WHERE id=p_message_id AND thread_id=p_thread_id FOR UPDATE;
+  IF NOT FOUND THEN RETURN 'message_not_found'; END IF;
+
+  IF v_outbox.state<>'claimed' OR v_attempt.state<>'claimed'
+    OR v_outbox.lease_token<>p_lease_token OR v_attempt.lease_token<>p_lease_token
+    OR v_outbox.lease_expires_at<=now() OR v_attempt.lease_expires_at<=now()
+    OR v_outbox.attempt_count<>v_attempt.attempt_number
+    OR v_outbox.expected_control_version<>p_expected_control_version
+    OR v_thread.control_version<>p_expected_control_version
+    OR v_thread.lifecycle<>'open' OR v_thread.mapping_status<>'mapped'
+    OR v_thread.supabase_lead_id IS NULL
+    OR v_thread.mode<>'ai'
+    OR v_outbox.author<>'assistant' OR v_attempt.provider<>v_thread.provider
+    OR v_outbox.message_id<>p_message_id
+    OR v_outbox.idempotency_key<>p_message_idempotency_key
+    OR v_message.idempotency_key<>p_message_idempotency_key
+    OR v_message.message_fingerprint<>p_payload_hash
+    OR v_message.direction<>'outbound' OR v_message.author<>'assistant'
+    OR v_message.delivery_state<>'queued'
+  THEN
     IF v_outbox.state='claimed' AND v_outbox.lease_token=p_lease_token THEN
       UPDATE aichm_private.conversation_outbox
       SET state='cancelled',lease_token=NULL,lease_expires_at=NULL,updated_at=now()
@@ -916,7 +941,7 @@ BEGIN
       SET state='cancelled',finished_at=now()
       WHERE id=p_attempt_id AND state='claimed';
     END IF;
-    RETURN false;
+    RETURN 'denied';
   END IF;
 
   UPDATE aichm_private.conversation_outbox
@@ -925,9 +950,16 @@ BEGIN
   UPDATE aichm_private.conversation_outbox_attempts
   SET state='sending',started_at=now()
   WHERE id=p_attempt_id;
-  RETURN true;
+  RETURN 'begun';
 END
 $function$;
+
+/*
+ * The former caller-supplied p_whatsapp_send_allowed flag is intentionally
+ * absent. Replit must hold and validate its consent-epoch grant while invoking
+ * this RPC. This function only establishes the in-flight fence; it does not
+ * call a provider or assert that cross-database authorization is atomic.
+ */
 
 CREATE OR REPLACE FUNCTION aichm_private.record_conversation_send_result(
   p_outbox_id uuid,
@@ -1078,11 +1110,11 @@ ALTER FUNCTION aichm_private.accept_provider_event(text,text,text,text,text,time
   OWNER TO aichm_conversation_owner;
 ALTER FUNCTION aichm_private.link_conversation_thread(uuid,uuid,bigint,text,uuid,text)
   OWNER TO aichm_conversation_owner;
-ALTER FUNCTION aichm_private.enqueue_conversation_message(uuid,bigint,text,text,text,text,text,text,text,boolean)
+ALTER FUNCTION aichm_private.enqueue_conversation_message(uuid,bigint,text,text,text,text,text,text,text)
   OWNER TO aichm_conversation_owner;
-ALTER FUNCTION aichm_private.claim_next_conversation_outbound(boolean,integer)
+ALTER FUNCTION aichm_private.claim_next_conversation_outbound(integer)
   OWNER TO aichm_conversation_owner;
-ALTER FUNCTION aichm_private.authorize_conversation_outbound_attempt(uuid,uuid,uuid,boolean)
+ALTER FUNCTION aichm_private.begin_conversation_send(uuid,uuid,uuid,uuid,bigint,uuid,text,text)
   OWNER TO aichm_conversation_owner;
 ALTER FUNCTION aichm_private.record_conversation_send_result(uuid,uuid,uuid,text,text)
   OWNER TO aichm_conversation_owner;
@@ -1096,11 +1128,11 @@ REVOKE ALL ON FUNCTION aichm_private.accept_provider_event(text,text,text,text,t
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
 REVOKE ALL ON FUNCTION aichm_private.link_conversation_thread(uuid,uuid,bigint,text,uuid,text)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
-REVOKE ALL ON FUNCTION aichm_private.enqueue_conversation_message(uuid,bigint,text,text,text,text,text,text,text,boolean)
+REVOKE ALL ON FUNCTION aichm_private.enqueue_conversation_message(uuid,bigint,text,text,text,text,text,text,text)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
-REVOKE ALL ON FUNCTION aichm_private.claim_next_conversation_outbound(boolean,integer)
+REVOKE ALL ON FUNCTION aichm_private.claim_next_conversation_outbound(integer)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
-REVOKE ALL ON FUNCTION aichm_private.authorize_conversation_outbound_attempt(uuid,uuid,uuid,boolean)
+REVOKE ALL ON FUNCTION aichm_private.begin_conversation_send(uuid,uuid,uuid,uuid,bigint,uuid,text,text)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
 REVOKE ALL ON FUNCTION aichm_private.record_conversation_send_result(uuid,uuid,uuid,text,text)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
@@ -1111,11 +1143,11 @@ GRANT EXECUTE ON FUNCTION aichm_private.accept_provider_event(text,text,text,tex
   TO aichm_conversation_runtime;
 GRANT EXECUTE ON FUNCTION aichm_private.link_conversation_thread(uuid,uuid,bigint,text,uuid,text)
   TO aichm_conversation_runtime;
-GRANT EXECUTE ON FUNCTION aichm_private.enqueue_conversation_message(uuid,bigint,text,text,text,text,text,text,text,boolean)
+GRANT EXECUTE ON FUNCTION aichm_private.enqueue_conversation_message(uuid,bigint,text,text,text,text,text,text,text)
   TO aichm_conversation_runtime;
-GRANT EXECUTE ON FUNCTION aichm_private.claim_next_conversation_outbound(boolean,integer)
+GRANT EXECUTE ON FUNCTION aichm_private.claim_next_conversation_outbound(integer)
   TO aichm_conversation_runtime;
-GRANT EXECUTE ON FUNCTION aichm_private.authorize_conversation_outbound_attempt(uuid,uuid,uuid,boolean)
+GRANT EXECUTE ON FUNCTION aichm_private.begin_conversation_send(uuid,uuid,uuid,uuid,bigint,uuid,text,text)
   TO aichm_conversation_runtime;
 GRANT EXECUTE ON FUNCTION aichm_private.record_conversation_send_result(uuid,uuid,uuid,text,text)
   TO aichm_conversation_runtime;

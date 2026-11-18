@@ -1,12 +1,18 @@
 # AVNI conversation runtime migration draft
 
-`supabase/migrations/20261118_avni_conversation_runtime_v1.sql` and
+`supabase/migrations/20261118_avni_conversation_runtime_v1.sql`,
 `supabase/migrations/20261118_avni_conversation_runtime_v2_preflight.sql` are unapplied,
 review-only migration drafts. They were not run against Supabase, Development,
 or Production. Their verification suite uses only a disposable
 loopback PostgreSQL cluster created by the explicit
 `script/test-crm-persistence.ts --run-isolated-ephemeral-postgres
 --suite=avni-conversation-runtime` command.
+
+`migrations/0019_avni_dispatch_grants.sql` is also a draft and has not been
+applied. It adds a Replit consent epoch and a reference/hash-only dispatch-grant
+ledger. It is not yet in the Drizzle journal because the repository's manual
+post-0012 migration chain must be reconciled before enabling it through the
+normal migration runner.
 
 ## Scope and ownership
 
@@ -44,24 +50,38 @@ is monotonic: stale receipts remain auditable but do not regress the current
 attempt or message. Retries use a new attempt number. `sent` means the provider
 accepted the send; it is not reported as delivered.
 
-The claim and final authorization RPCs compare the queue's control version,
-thread mode, open lifecycle, mapping, lease, and a caller-supplied
-`p_whatsapp_send_allowed` assertion. The assertion must come from a fresh,
-server-side Replit consent/opt-out check, never from a client or provider
-  payload. Provider-observed outbound messages are recorded as `unknown`, never
-  `queued`, and that ingress path creates no outbox item. An expired `claimed`
-  lease is retryable; an expired `sending` lease becomes `unknown` and is not
-  blindly retried. The SQL cannot independently query Replit PostgreSQL; no live sender,
-  transport route, or credential is installed by this migration. Until a trusted
-Replit authorization layer and least-privilege database login are separately
-provisioned, no runtime can execute the RPCs.
+The claim RPC only leases bounded work; it does not authorize sending. The
+final `begin_conversation_send` RPC has no caller-supplied consent boolean and
+atomically checks the current lease, attempt, control version, AI ownership,
+open/mapped thread, and exact queued message, idempotency key, and payload hash.
+Replit must hold its consent-row/grant transaction while invoking that fixed
+Supabase RPC. A successful `begin_send` is the in-flight linearization point.
+Provider-observed outbound messages are recorded as `unknown`, never `queued`,
+and that ingress path creates no outbox item. An expired `claimed` lease is
+retryable; an expired `sending` lease becomes `unknown` and is not blindly
+retried. The SQL cannot independently query Replit PostgreSQL. No provider
+sender, transport route, or credential is installed by this migration.
+
+The Replit protocol increments `consent_epoch` only when effective granted
+consent or opt-out state changes, and revokes unused `issued` grants in the
+same database transaction. A grant is short-lived and one-use, bound to the
+canonical Replit lead, exact Supabase thread/outbox/message/attempt, consent
+epoch, conversation control version, attempt number, lease-token hash,
+idempotency key, and payload SHA-256. The cross-database coordinator holds the
+Replit consent/grant transaction around Supabase `begin_send`; it does not call
+a provider. If the RPC result is ambiguous, the attempt becomes unknown and is
+not blindly retried. This is not distributed ACID: if Supabase commits
+`begin_send` but the Replit commit or response is lost, the protocol must stop
+and reconcile; no provider call is made by this implementation.
 
 Human takeover increments the control version and cancels pending or claimed
-assistant outbox rows in the same transaction. A sending/accepted message is
-not recalled. Final send authorization must occur immediately before a future
-provider call. Resume is compare-and-swap and requires a server-verified
-granted-consent/non-opted-out assertion. The migration does not create a
-provider sender or enable any messaging.
+assistant outbox rows in the same transaction. If takeover wins before
+`begin_send`, the send is denied. If `begin_send` wins first, a later takeover
+blocks future work but cannot recall an already in-flight provider request.
+Likewise, a later consent revocation/opt-out invalidates future grants but
+cannot guarantee recall of a request that crossed the in-flight boundary. This
+is an explicit policy requiring owner approval before live sending is enabled.
+The migration does not create a provider sender or enable any messaging.
 
 ## Access and rollout prerequisites
 
@@ -105,7 +125,7 @@ provider sender or enable any messaging.
   provider webhook claims about actor, assignment, consent, or opt-out are
   never authoritative. These checks are not implemented by the SQL draft.
 
-## Replit preflight adapter boundary
+## Replit preflight and dispatch protocol boundary
 
 `server/crm/avni-conversation-authorization.ts` is a server-only adapter, not an
 HTTP route. It reads actor identity only from the authenticated LMS session,
@@ -118,12 +138,19 @@ conversation mode/version, and the constant `sendAuthorized: false`; it never
 returns lead, Supabase, or thread identifiers.
 
 This is intentionally only a preflight. It does not enqueue, claim, mutate a
-conversation, or contact a provider. The Replit consent check and a Supabase
-outbox write/provider call are not atomic across databases. A later sender must
-not treat this result as permission to send; a separate cross-database
-authorization protocol must be designed and tested first. The background
-`avni-followup-reader` capability remains separate and cannot call this
-interactive adapter.
+conversation, or contact a provider. The preflight result is never permission
+to send. The separate local grant protocol below models the cross-database
+boundary, but it is not wired to a live Supabase writer or provider. The
+background `avni-followup-reader` capability remains separate and cannot call
+this interactive adapter or read the grant ledger.
+
+The local dispatch protocol is separate from that preflight. Its in-transaction
+grant helpers require current consent and epoch, and a supplied fixed
+`begin_send` callback. They return `providerCallAllowed: false` in every case;
+no route or caller wires them to a provider. The `N8N_AVNI_FOLLOWUP_READ_SECRET`
+candidate-read capability is not broadened and cannot access grants or send.
+The server-only keyed HMAC boundary for provider references remains a hard
+prerequisite; no key or adapter is created here.
 
 ## Objects in the draft
 
@@ -149,4 +176,9 @@ Control request IDs are serialized with transaction advisory locks. Exact
 replays return `duplicate`; reuse with different control data returns
 `request_id_conflict`. Provider and outbound idempotency keys must match their
 HMAC token suffix. Injected failure tests verify the draft migration rolls back
-its created roles and objects atomically in the disposable database.
+its created roles and objects atomically in the disposable database. The
+Replit-side focused PostgreSQL test applies migration 0019 only to the
+socket-only throwaway CRM database, verifies epoch increments and grant
+invalidation rollback, and uses synthetic UUIDs/hashes. Tests do not call
+Supabase or a provider. A fake transport acceptance/crash is represented only
+in the disposable SQL test to verify the unknown/no-blind-retry boundary.

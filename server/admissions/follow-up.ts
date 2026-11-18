@@ -2,6 +2,7 @@ import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { db } from "../db";
 import { inquiries } from "@shared/schema";
 import { admissionsLeads, admissionsLeadContactPreferences as preferences,
+  admissionsConversationDispatchGrants as dispatchGrants,
   admissionsRegistrationOutbox as outbox, admissionsVideoEvents } from "@shared/admissions-schema";
 import { VSL_WHATSAPP_CONSENT_TEXT, VSL_WHATSAPP_CONSENT_VERSION } from "@shared/vsl-consent";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
@@ -14,6 +15,13 @@ export async function followUpSchemaReady(database: Pick<FollowUpDatabase,"execu
     to_regclass('admissions_lead_contact_preferences') IS NOT NULL AND
     to_regclass('admissions_registration_outbox') IS NOT NULL AS ready`);
   return result.rows[0]?.ready === true;
+}
+async function dispatchGrantSchemaReady(database: Pick<FollowUpDatabase,"execute">) {
+  const result=await database.execute<{ready:boolean}>(sql`SELECT
+    to_regclass('admissions_conversation_dispatch_grants') IS NOT NULL AND
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+      AND table_name='admissions_lead_contact_preferences' AND column_name='consent_epoch') AS ready`);
+  return result.rows[0]?.ready===true;
 }
 export async function admissionsIntegrationSchemaReady(database: Pick<FollowUpDatabase,"execute"> = db) {
   const result=await database.execute<{ready:boolean}>(sql`SELECT
@@ -29,15 +37,58 @@ export async function admissionsIntegrationSchemaReady(database: Pick<FollowUpDa
   return result.rows[0]?.ready===true;
 }
 
-export function consentView(row?: typeof preferences.$inferSelect) {
+type ConsentPreferenceViewRow=Pick<typeof preferences.$inferSelect,
+  "consentStatus"|"consentRecordedAt"|"consentSource"|"consentText"|"consentVersion"|
+  "statusUpdatedAt"|"optedOutAt"|"optOutSource"> & {consentEpoch?:number};
+
+function asDate(value:Date|string|null|undefined):Date|null {
+  if(value==null) return null;
+  return value instanceof Date ? value : new Date(value);
+}
+
+function normalizeReceiptDates<T extends {consentRecordedAt?:Date|string|null;statusUpdatedAt?:Date|string|null;optedOutAt?:Date|string|null}>(
+  row:T|undefined,
+):T|undefined {
+  return row ? {
+    ...row,
+    consentRecordedAt:asDate(row.consentRecordedAt),
+    statusUpdatedAt:asDate(row.statusUpdatedAt),
+    optedOutAt:asDate(row.optedOutAt),
+    ...("consentEpoch" in row ? {consentEpoch:Number(row.consentEpoch)} : {}),
+  } : undefined;
+}
+
+export function consentView(row?: ConsentPreferenceViewRow) {
   return {
     status:row?.consentStatus ?? "not_recorded",
-    recordedAt:row?.consentRecordedAt?.toISOString() ?? null,
+    consentEpoch:row?.consentEpoch ?? 0,
+    recordedAt:asDate(row?.consentRecordedAt)?.toISOString() ?? null,
     source:row?.consentSource ?? null,text:row?.consentText ?? null,version:row?.consentVersion ?? null,
     optedOut:!!row?.optedOutAt || row?.consentStatus==="opted_out",
-    optedOutAt:row?.optedOutAt?.toISOString() ?? null,optOutSource:row?.optOutSource ?? null,
+    optedOutAt:asDate(row?.optedOutAt)?.toISOString() ?? null,optOutSource:row?.optOutSource ?? null,
     allowed:row?.consentStatus==="granted" && !row?.optedOutAt,
   };
+}
+
+async function readConsentPreference(leadId:string,database:Pick<FollowUpDatabase,"execute">) {
+  const protocolReady=await dispatchGrantSchemaReady(database);
+  if(protocolReady) {
+    const result=await database.execute<ConsentPreferenceViewRow>(sql`SELECT
+      consent_status AS "consentStatus",consent_recorded_at AS "consentRecordedAt",
+      consent_source AS "consentSource",consent_text AS "consentText",
+      consent_version AS "consentVersion",status_updated_at AS "statusUpdatedAt",
+      opted_out_at AS "optedOutAt",opt_out_source AS "optOutSource",
+      consent_epoch AS "consentEpoch"
+      FROM admissions_lead_contact_preferences WHERE lead_id=${leadId}`);
+    return normalizeReceiptDates(result.rows[0]);
+  }
+  const result=await database.execute<ConsentPreferenceViewRow>(sql`SELECT
+    consent_status AS "consentStatus",consent_recorded_at AS "consentRecordedAt",
+    consent_source AS "consentSource",consent_text AS "consentText",
+    consent_version AS "consentVersion",status_updated_at AS "statusUpdatedAt",
+    opted_out_at AS "optedOutAt",opt_out_source AS "optOutSource"
+    FROM admissions_lead_contact_preferences WHERE lead_id=${leadId}`);
+  return result.rows[0] ? {...normalizeReceiptDates(result.rows[0]),consentEpoch:0} : undefined;
 }
 
 async function counsellingFormsByPhone(canonicalPhone:string,database:FollowUpDatabase) {
@@ -56,21 +107,71 @@ async function counsellingFormsByPhone(canonicalPhone:string,database:FollowUpDa
 /** Called within the identity transaction, under its canonical-phone advisory lock. */
 export async function recordRegistrationFollowUp(tx:Transaction,lead:Lead,firstRegistration:boolean,optIn:boolean,now:Date) {
   if(!await followUpSchemaReady(tx)) return false; // Stage 1 stays available pending migration.
-  let [receipt]=await tx.select().from(preferences).where(eq(preferences.leadId,lead.id)).for("update");
+  const protocolReady=await dispatchGrantSchemaReady(tx);
+  type ReceiptRow={
+    consentStatus:"not_provided"|"granted"|"opted_out";
+    optedOutAt:Date|null;
+    consentEpoch:number;
+    consentRecordedAt:Date|null;
+    consentSource:string|null;
+    consentText:string|null;
+    consentVersion:string|null;
+    optOutSource:string|null;
+  };
+  let receipt:ReceiptRow|undefined;
+  if(protocolReady) {
+    const result=await tx.execute<ReceiptRow>(sql`SELECT consent_status AS "consentStatus",
+      opted_out_at AS "optedOutAt",consent_epoch AS "consentEpoch",
+      consent_recorded_at AS "consentRecordedAt",consent_source AS "consentSource",
+      consent_text AS "consentText",consent_version AS "consentVersion",
+      opt_out_source AS "optOutSource"
+      FROM admissions_lead_contact_preferences WHERE lead_id=${lead.id} FOR UPDATE`);
+    receipt=normalizeReceiptDates(result.rows[0]);
+  } else {
+    const result=await tx.execute<Omit<ReceiptRow,"consentEpoch">&{consentEpoch?:never}>(sql`SELECT
+      consent_status AS "consentStatus",opted_out_at AS "optedOutAt",
+      consent_recorded_at AS "consentRecordedAt",consent_source AS "consentSource",
+      consent_text AS "consentText",consent_version AS "consentVersion",
+      opt_out_source AS "optOutSource"
+      FROM admissions_lead_contact_preferences WHERE lead_id=${lead.id} FOR UPDATE`);
+    receipt=result.rows[0] ? {...normalizeReceiptDates(result.rows[0]),consentEpoch:0} : undefined;
+  }
   const protectedChoice=receipt?.optedOutAt || receipt?.consentStatus==="opted_out" || receipt?.consentStatus==="granted";
   if(!receipt || (!protectedChoice && optIn)) {
+    const nextStatus=optIn ? "granted" : "not_provided";
+    const previousAllowed=receipt?.consentStatus==="granted" && !receipt.optedOutAt;
+    const nextAllowed=nextStatus==="granted";
+    const previousOptedOut=receipt?.consentStatus==="opted_out" || !!receipt?.optedOutAt;
+    const nextOptedOut=false;
+    const effectiveChange=previousAllowed!==nextAllowed || previousOptedOut!==nextOptedOut;
     const values={
-      leadId:lead.id,consentStatus:optIn ? "granted" : "not_provided",
+      leadId:lead.id,consentStatus:nextStatus,
       consentRecordedAt:now,consentSource:"vsl_registration",
       consentText:VSL_WHATSAPP_CONSENT_TEXT,consentVersion:VSL_WHATSAPP_CONSENT_VERSION,statusUpdatedAt:now,
+      ...(protocolReady ? {consentEpoch:(receipt?.consentEpoch??0)+(effectiveChange?1:0)} : {}),
     };
-    [receipt]=await tx.insert(preferences).values(values).onConflictDoUpdate({
-      target:preferences.leadId,set:values,
-    }).returning();
+    await tx.insert(preferences).values(values).onConflictDoUpdate({target:preferences.leadId,set:values});
+    receipt={
+      consentStatus:nextStatus,optedOutAt:null,consentEpoch:(receipt?.consentEpoch??0)+(protocolReady&&effectiveChange?1:0),
+      consentRecordedAt:now,consentSource:"vsl_registration",consentText:VSL_WHATSAPP_CONSENT_TEXT,
+      consentVersion:VSL_WHATSAPP_CONSENT_VERSION,optOutSource:null,
+    };
+    if(protocolReady&&effectiveChange) {
+      await tx.update(dispatchGrants).set({state:"revoked",completedAt:now,safeOutcome:"send_denied"})
+        .where(and(eq(dispatchGrants.leadId,lead.id),eq(dispatchGrants.state,"issued")));
+    }
   }
   if(firstRegistration) {
     const eventId=`vsl-registration:${lead.id}`;
-    const consent=consentView(receipt);
+    const consent={
+      status:receipt?.consentStatus ?? "not_recorded",
+      recordedAt:receipt?.consentRecordedAt?.toISOString() ?? null,
+      source:receipt?.consentSource ?? null,text:receipt?.consentText ?? null,
+      version:receipt?.consentVersion ?? null,
+      optedOut:!!receipt?.optedOutAt || receipt?.consentStatus==="opted_out",
+      optedOutAt:receipt?.optedOutAt?.toISOString() ?? null,optOutSource:receipt?.optOutSource ?? null,
+      allowed:receipt?.consentStatus==="granted" && !receipt?.optedOutAt,
+    };
     await tx.insert(outbox).values({
       leadId:lead.id,idempotencyKey:eventId,createdAt:now,availableAt:now,
       payload:{
@@ -90,12 +191,40 @@ export async function recordWhatsAppOptOut(leadId:string,source:"admin"|"n8n"|"p
     const [lead]=await tx.select().from(admissionsLeads).where(eq(admissionsLeads.id,leadId));
     if(!lead) return false;
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`admissions:${lead.canonicalPhone}`}))`);
+    const protocolReady=await dispatchGrantSchemaReady(tx);
+    type ExistingReceipt={consentStatus:"not_provided"|"granted"|"opted_out";optedOutAt:Date|null;consentEpoch:number};
+    let prior:ExistingReceipt|undefined;
+    if(protocolReady) {
+      const result=await tx.execute<ExistingReceipt>(sql`SELECT consent_status AS "consentStatus",
+        opted_out_at AS "optedOutAt",consent_epoch AS "consentEpoch"
+        FROM admissions_lead_contact_preferences WHERE lead_id=${leadId} FOR UPDATE`);
+      prior=result.rows[0] ? {
+        ...result.rows[0],optedOutAt:asDate(result.rows[0].optedOutAt),
+        consentEpoch:Number(result.rows[0].consentEpoch),
+      } : undefined;
+    } else {
+      const result=await tx.execute<Omit<ExistingReceipt,"consentEpoch">&{consentEpoch?:never}>(sql`SELECT
+        consent_status AS "consentStatus",opted_out_at AS "optedOutAt"
+        FROM admissions_lead_contact_preferences WHERE lead_id=${leadId} FOR UPDATE`);
+      prior=result.rows[0] ? {...result.rows[0],optedOutAt:asDate(result.rows[0].optedOutAt),consentEpoch:0} : undefined;
+    }
+    const wasOptedOut=prior?.consentStatus==="opted_out" || !!prior?.optedOutAt;
+    const effectiveChange=!wasOptedOut;
+    const values={
+      leadId,consentStatus:"opted_out" as const,optedOutAt:now,optOutSource:source,statusUpdatedAt:now,
+      ...(protocolReady ? {consentEpoch:(prior?.consentEpoch??0)+(effectiveChange?1:0)} : {}),
+    };
     await tx.insert(preferences).values({
-      leadId,consentStatus:"opted_out",optedOutAt:now,optOutSource:source,statusUpdatedAt:now,
+      ...values,
     }).onConflictDoUpdate({target:preferences.leadId,set:{
       consentStatus:"opted_out",optedOutAt:sql`coalesce(${preferences.optedOutAt},${now})`,
       optOutSource:sql`coalesce(${preferences.optOutSource},${source})`,statusUpdatedAt:now,
+      ...(protocolReady ? {consentEpoch:values.consentEpoch} : {}),
     }});
+    if(protocolReady&&effectiveChange) {
+      await tx.update(dispatchGrants).set({state:"revoked",completedAt:now,safeOutcome:"send_denied"})
+        .where(and(eq(dispatchGrants.leadId,leadId),eq(dispatchGrants.state,"issued")));
+    }
     return true;
   });
 }
@@ -163,7 +292,7 @@ export async function readLeadFollowUpByPhone(phone:string,database:FollowUpData
 }
 
 async function buildLeadStatus(lead:Lead,database:FollowUpDatabase) {
-  const [receipt]=await database.select().from(preferences).where(eq(preferences.leadId,lead.id));
+  const receipt=await readConsentPreference(lead.id,database);
   const [form]=await database.select({
     id:inquiries.id,at:inquiries.counsellingSubmittedAt,
     consent:sql<unknown>`${inquiries.counsellingAnswers}->'consentToContact'`,

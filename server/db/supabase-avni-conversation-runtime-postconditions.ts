@@ -133,9 +133,9 @@ const EXPECTED_CONSTRAINTS = [
 const EXPECTED_RPC_SIGNATURES: Record<string, string> = {
   accept_provider_event: "text, text, text, text, text, timestamp with time zone, text, text, text, text, text, text, text, text, text, text, text",
   link_conversation_thread: "uuid, uuid, bigint, text, uuid, text",
-  enqueue_conversation_message: "uuid, bigint, text, text, text, text, text, text, text, boolean",
-  claim_next_conversation_outbound: "boolean, integer",
-  authorize_conversation_outbound_attempt: "uuid, uuid, uuid, boolean",
+  enqueue_conversation_message: "uuid, bigint, text, text, text, text, text, text, text",
+  claim_next_conversation_outbound: "integer",
+  begin_conversation_send: "uuid, uuid, uuid, uuid, bigint, uuid, text, text",
   record_conversation_send_result: "uuid, uuid, uuid, text, text",
   transition_conversation_control: "uuid, bigint, text, text, uuid, text, boolean, boolean",
 };

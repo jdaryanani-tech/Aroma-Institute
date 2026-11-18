@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, doublePrecision, jsonb, boolean, uniqueIndex, index, check } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, integer, bigint, doublePrecision, jsonb, boolean, uniqueIndex, index, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 export const admissionsLeads = pgTable("admissions_leads", {
@@ -65,7 +65,48 @@ export const admissionsLeadContactPreferences = pgTable("admissions_lead_contact
   statusUpdatedAt: timestamp("status_updated_at", { withTimezone: true }).defaultNow().notNull(),
   optedOutAt: timestamp("opted_out_at", { withTimezone: true }),
   optOutSource: text("opt_out_source"),
+  consentEpoch: bigint("consent_epoch", { mode: "number" }).notNull().default(0),
 }, t => [check("admissions_contact_consent_status", sql`${t.consentStatus} IN ('not_provided','granted','opted_out')`)]);
+
+/**
+ * Internal, one-use authorization ledger for the future AVNI dispatcher.
+ * It stores only opaque database references and hashes, never message text,
+ * contact data, provider IDs, credentials, or provider payloads.
+ */
+export const admissionsConversationDispatchGrants = pgTable("admissions_conversation_dispatch_grants", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  leadId: uuid("lead_id").notNull().references(() => admissionsLeads.id),
+  supabaseThreadId: uuid("supabase_thread_id").notNull(),
+  supabaseOutboxId: uuid("supabase_outbox_id").notNull(),
+  supabaseMessageId: uuid("supabase_message_id").notNull(),
+  supabaseAttemptId: uuid("supabase_attempt_id").notNull().unique(),
+  messageIdempotencyKey: text("message_idempotency_key").notNull(),
+  grantIdempotencyKey: text("grant_idempotency_key").notNull().unique(),
+  consentEpoch: bigint("consent_epoch", { mode: "number" }).notNull(),
+  controlVersion: bigint("control_version", { mode: "number" }).notNull(),
+  attemptNumber: integer("attempt_number").notNull(),
+  leaseTokenHash: text("lease_token_hash").notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  state: text("state").notNull().default("issued"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  redeemedAt: timestamp("redeemed_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  safeOutcome: text("safe_outcome"),
+}, table => [
+  index("admissions_conversation_dispatch_grants_lead_state_idx").on(table.leadId, table.state, table.expiresAt),
+  index("admissions_conversation_dispatch_grants_expiry_idx").on(table.state, table.expiresAt),
+  check("admissions_dispatch_grant_consent_epoch_ck", sql`${table.consentEpoch} >= 0`),
+  check("admissions_dispatch_grant_control_version_ck", sql`${table.controlVersion} >= 0`),
+  check("admissions_dispatch_grant_attempt_number_ck", sql`${table.attemptNumber} BETWEEN 1 AND 8`),
+  check("admissions_dispatch_grant_lease_hash_ck", sql`${table.leaseTokenHash} ~ '^[0-9a-f]{64}$'`),
+  check("admissions_dispatch_grant_payload_hash_ck", sql`${table.payloadHash} ~ '^[0-9a-f]{64}$'`),
+  check("admissions_dispatch_grant_author_ck", sql`${table.messageIdempotencyKey} ~ '^message:v1:[0-9a-f]{64}$'`),
+  check("admissions_dispatch_grant_key_ck", sql`${table.grantIdempotencyKey} ~ '^dispatch:v1:[0-9a-f]{64}$'`),
+  check("admissions_dispatch_grant_state_ck", sql`${table.state} IN ('issued','in_flight','accepted','failed','unknown','revoked','expired','aborted')`),
+  check("admissions_dispatch_grant_outcome_ck", sql`${table.safeOutcome} IS NULL OR ${table.safeOutcome} IN ('provider_accepted','definite_failure','ambiguous_result','send_denied','authorization_expired')`),
+  check("admissions_dispatch_grant_expiry_ck", sql`${table.expiresAt} > ${table.createdAt} AND ${table.expiresAt} <= ${table.createdAt} + interval '60 seconds'`),
+]);
 
 export const admissionsRegistrationOutbox = pgTable("admissions_registration_outbox", {
   id: uuid("id").defaultRandom().primaryKey(),

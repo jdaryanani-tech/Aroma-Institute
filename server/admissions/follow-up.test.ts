@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import session from "express-session";
 import { Pool } from "pg";
@@ -11,7 +11,10 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { eq, ne } from "drizzle-orm";
 import * as core from "@shared/schema";
 import * as lms from "@shared/lms-schema";
-import { admissionsLeads, admissionsLeadContactPreferences as preferences, admissionsRegistrationOutbox as outbox, admissionsVideoEvents } from "@shared/admissions-schema";
+import * as admissions from "@shared/admissions-schema";
+import { admissionsLeads, admissionsLeadContactPreferences as preferences,
+  admissionsConversationDispatchGrants as grants, admissionsRegistrationOutbox as outbox,
+  admissionsVideoEvents } from "@shared/admissions-schema";
 import { VSL_WHATSAPP_CONSENT_TEXT, VSL_WHATSAPP_CONSENT_VERSION } from "@shared/vsl-consent";
 import { registerVslLead, saveLinkedCounsellingInquiry } from "./identity";
 import { admissionsIntegrationSchemaReady, followUpSchemaReady, readLeadFollowUpByPhone, readLeadFollowUpStatus, recordWhatsAppOptOut } from "./follow-up";
@@ -19,6 +22,7 @@ import { registerAdmissionsRoutes } from "./routes";
 import { registerFollowUpStatusRoute } from "./follow-up-routes";
 import { dispatchVslRegistrationOnce, isTrustedVslWebhookUrl, vslRetryDelayMs } from "./outbox-dispatcher";
 import { buildCounsellingWebhookPayload } from "../n8n-counselling";
+import { beginAvniDispatchInTransaction, issueAvniDispatchGrantInTransaction } from "./dispatch-grants";
 
 test("registration dispatcher is off by default and blocks native development networking",async()=>{
   assert.deepEqual(await dispatchVslRegistrationOnce(),{state:"disabled"});
@@ -46,11 +50,12 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
   assert.equal(u.hostname,"localhost");assert.equal(u.pathname,"/follow_up_test");
   assert.ok(u.searchParams.get("host")?.includes("/generated-artifacts/follow-up-db-"));
   const pool=new Pool({connectionString:testUrl});
-  const database=drizzle(pool,{schema:{...core,...lms}});
+  const database=drizzle(pool,{schema:{...core,...lms,...admissions}});
   const server=createServer();
   let listening=false;
   try {
     // Fresh test DB only: prove the additive migration creates missing tables and repeats safely.
+    await pool.query("DROP TABLE IF EXISTS admissions_conversation_dispatch_grants");
     await pool.query("DROP TABLE admissions_registration_outbox, admissions_lead_contact_preferences");
     assert.equal(await followUpSchemaReady(database),false);
     const fallback=await registerVslLead({phone:"9000000099",name:"Synthetic before migration",entryHost:"test.invalid",entryPath:"/vsl"},new Date(),database);
@@ -60,6 +65,8 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     assert.equal(await followUpSchemaReady(database),true);
     const avniMigration=await readFile("migrations/0009_avni_tracking.sql","utf8");
     await pool.query(avniMigration);await pool.query(avniMigration);
+    const dispatchMigration=await readFile("migrations/0019_avni_dispatch_grants.sql","utf8");
+    await pool.query(dispatchMigration);await pool.query(dispatchMigration);
     assert.equal(await admissionsIntegrationSchemaReady(database),true);
     assert.equal((await database.select().from(outbox)).length,0,"no replay/backfill of pre-migration registrations");
 
@@ -83,9 +90,60 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     assert.equal((await database.select().from(core.inquiries)).length,inquiryCount);
     status=(await readLeadFollowUpStatus(lead.id,database))!;
     assert.equal(status.consent.whatsappAdmissions.allowed,true);
+    assert.equal(status.consent.whatsappAdmissions.consentEpoch,1);
     const grantAt=status.consent.whatsappAdmissions.recordedAt;
     await registerVslLead(input,new Date(time.getTime()+1000),database);
     assert.equal((await readLeadFollowUpStatus(lead.id,database))!.consent.whatsappAdmissions.recordedAt,grantAt);
+
+    const makeGrantBinding=(attempt:number)=>{
+      const key=(label:string)=>createHash("sha256").update(`${label}:${attempt}`).digest("hex");
+      return {
+        canonicalLeadId:lead.id,
+        supabaseThreadId:randomUUID(),supabaseOutboxId:randomUUID(),
+        supabaseMessageId:randomUUID(),supabaseAttemptId:randomUUID(),
+        messageIdempotencyKey:`message:v1:${key("message")}`,
+        controlVersion:3,attemptNumber:attempt,leaseTokenHash:key("lease"),
+        payloadHash:key("payload"),
+      };
+    };
+    const firstBinding=makeGrantBinding(1);
+    const issued=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{binding:firstBinding,now:time}));
+    assert.equal(issued.code,"grant_issued");
+    assert.ok(issued.grant);
+    const duplicateIssue=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{binding:firstBinding,now:time}));
+    assert.equal(duplicateIssue.code,"grant_duplicate");
+    assert.equal(duplicateIssue.grant?.id,issued.grant?.id);
+    const changedPayload=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      binding:{...firstBinding,payloadHash:createHash("sha256").update("changed").digest("hex")},now:time,
+    }));
+    assert.equal(changedPayload.code,"grant_idempotency_conflict");
+
+    const beginDecision=await database.transaction(tx=>beginAvniDispatchInTransaction({
+      tx,grantId:issued.grant!.id,binding:issued.grant!.binding,now:time,
+      beginSupabaseSend:async()=> "begun",
+    }));
+    assert.equal(beginDecision.code,"begin_send_started");
+    assert.equal(beginDecision.providerCallAllowed,false,"begin_send never authorizes a provider call");
+    assert.equal((await database.select().from(grants).where(eq(grants.id,issued.grant!.id)))[0].state,"in_flight");
+
+    const unusedBindings=[makeGrantBinding(2),makeGrantBinding(3)];
+    const unused=await Promise.all(unusedBindings.map(binding=>database.transaction(tx=>
+      issueAvniDispatchGrantInTransaction(tx,{binding,now:time}))));
+    assert.ok(unused.every(item=>item.code==="grant_issued"));
+    await pool.query(`
+      CREATE FUNCTION fail_dispatch_grant_revocation() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic grant invalidation failure'; END $$;
+      CREATE TRIGGER fail_dispatch_grant_revocation BEFORE UPDATE
+        ON admissions_conversation_dispatch_grants
+        FOR EACH ROW EXECUTE FUNCTION fail_dispatch_grant_revocation();
+    `);
+    await assert.rejects(recordWhatsAppOptOut(lead.id,"prospect",database,time),/synthetic grant invalidation failure/);
+    await pool.query("DROP TRIGGER fail_dispatch_grant_revocation ON admissions_conversation_dispatch_grants");
+    await pool.query("DROP FUNCTION fail_dispatch_grant_revocation()");
+    assert.equal((await readLeadFollowUpStatus(lead.id,database))!.consent.whatsappAdmissions.allowed,true,
+      "consent write rolls back if same-transaction grant invalidation fails");
+    assert.equal((await readLeadFollowUpStatus(lead.id,database))!.consent.whatsappAdmissions.consentEpoch,1);
+    assert.ok((await database.select().from(grants).where(eq(grants.state,"issued"))).length>=2);
 
     const answers:core.CounsellingAnswers={
       fullName:"Synthetic consent test",ageRange:"18to20",currentActivity:"college",city:"Ahmedabad",
@@ -114,6 +172,11 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     status=(await readLeadFollowUpStatus(lead.id,database))!;
     assert.equal(status.consent.whatsappAdmissions.status,"opted_out");
     assert.equal(status.consent.whatsappAdmissions.allowed,false);
+    assert.equal(status.consent.whatsappAdmissions.consentEpoch,2);
+    assert.equal((await database.select().from(grants).where(eq(grants.state,"issued"))).length,0);
+    assert.ok((await database.select().from(grants).where(eq(grants.state,"revoked"))).length>=2);
+    assert.equal((await database.select().from(grants).where(eq(grants.state,"in_flight"))).length,1,
+      "opt-out invalidates unused grants but cannot recall an in-flight begin_send");
     assert.equal(status.consent.counsellingQuestion29.consentToContact,true);
     assert.equal(status.consent.counsellingQuestion29.allowed,false);
     assert.equal(status.consent.whatsappAdmissions.optOutSource,"prospect");
