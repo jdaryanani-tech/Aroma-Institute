@@ -1,5 +1,6 @@
 import { pgTable, uuid, text, timestamp, integer, bigint, doublePrecision, jsonb, boolean, uniqueIndex, index, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import { lmsUsers } from "./lms-schema";
 
 export const admissionsLeads = pgTable("admissions_leads", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -76,6 +77,10 @@ export const admissionsLeadContactPreferences = pgTable("admissions_lead_contact
 export const admissionsConversationDispatchGrants = pgTable("admissions_conversation_dispatch_grants", {
   id: uuid("id").defaultRandom().primaryKey(),
   leadId: uuid("lead_id").notNull().references(() => admissionsLeads.id),
+  actorUserId: integer("actor_user_id").references(() => lmsUsers.id),
+  actorAccessLevel: text("actor_access_level"),
+  assignmentAssigneeUserId: integer("assignment_assignee_user_id").references(() => lmsUsers.id),
+  assignmentVersion: integer("assignment_version"),
   supabaseThreadId: uuid("supabase_thread_id").notNull(),
   supabaseOutboxId: uuid("supabase_outbox_id").notNull(),
   supabaseMessageId: uuid("supabase_message_id").notNull(),
@@ -97,6 +102,12 @@ export const admissionsConversationDispatchGrants = pgTable("admissions_conversa
   index("admissions_conversation_dispatch_grants_lead_state_idx").on(table.leadId, table.state, table.expiresAt),
   index("admissions_conversation_dispatch_grants_expiry_idx").on(table.state, table.expiresAt),
   check("admissions_dispatch_grant_consent_epoch_ck", sql`${table.consentEpoch} >= 0`),
+  check("admissions_dispatch_grant_actor_scope_ck", sql`
+    (${table.actorUserId} IS NULL AND ${table.actorAccessLevel} IS NULL
+      AND ${table.assignmentVersion} IS NULL AND ${table.assignmentAssigneeUserId} IS NULL)
+    OR (${table.actorUserId} IS NOT NULL AND ${table.actorAccessLevel} IN ('admin','admissions')
+      AND ${table.assignmentVersion} >= 0)
+  `),
   check("admissions_dispatch_grant_control_version_ck", sql`${table.controlVersion} >= 0`),
   check("admissions_dispatch_grant_attempt_number_ck", sql`${table.attemptNumber} BETWEEN 1 AND 8`),
   check("admissions_dispatch_grant_lease_hash_ck", sql`${table.leaseTokenHash} ~ '^[0-9a-f]{64}$'`),
