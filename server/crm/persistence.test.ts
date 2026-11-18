@@ -10,6 +10,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { listCrm, detailCrm } from "./read";
 import { updateCrm } from "./write";
 import { assignCrmLead } from "./assignment";
+import { createAvniFollowUpReadAuth } from "./avni-follow-up-read-auth";
+import { registerAvniCrmFollowUpRoutes } from "./avni-follow-up-routes";
+import { N8N_INTEGRATION_SECRET_HEADER } from "../integrations/n8n-auth";
 import { assertCrmAssignmentSchemaPostconditions } from "../db/crm-forward-migration-postconditions";
 import {
   assertCrmMetaLeadAdsPostconditions,
@@ -99,7 +102,16 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
            created_at timestamptz NOT NULL DEFAULT now(),registered_at timestamptz,last_registered_at timestamptz,
            entry_source text,entry_path text,entry_host text,
            questionnaire_status text NOT NULL DEFAULT 'not_submitted',questionnaire_completed_at timestamptz,
-           legacy_match_status text NOT NULL DEFAULT 'none'
+           legacy_match_status text NOT NULL DEFAULT 'none',
+           CONSTRAINT admissions_leads_indian_phone CHECK (canonical_phone ~ '^91[6-9][0-9]{9}$')
+         );
+         CREATE TABLE admissions_lead_contact_preferences(
+           lead_id uuid PRIMARY KEY REFERENCES admissions_leads(id),
+           consent_status text NOT NULL DEFAULT 'not_provided',
+           consent_recorded_at timestamptz,consent_source text,consent_text text,consent_version text,
+           status_updated_at timestamptz NOT NULL DEFAULT now(),opted_out_at timestamptz,opt_out_source text,
+           CONSTRAINT admissions_contact_consent_status
+             CHECK (consent_status IN ('not_provided','granted','opted_out'))
          );
          ALTER TABLE inquiries ADD CONSTRAINT inquiries_lead_id_fk FOREIGN KEY(lead_id) REFERENCES admissions_leads(id);
          CREATE TABLE admissions_crm_profiles(
@@ -675,6 +687,246 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
       ]);
       assert.equal(assignmentRace.filter(result=>result.status==="fulfilled").length,1);
       assert.equal((await db.query("SELECT version FROM admissions_lead_assignments WHERE lead_id=$1",[l.id])).rows[0].version,5);
+
+       // Exercise the real AVNI due-candidate SQL against only this harness's
+       // identity-verified disposable loopback PostgreSQL instance.
+       await db.query(`
+         INSERT INTO lms_users(id,display_name,is_active) VALUES
+           (8,'Synthetic AVNI Assignee',true),(9,'Synthetic Inactive Assignee',true),
+           (10,'Synthetic Role-Changing Assignee',true);
+         INSERT INTO lms_user_roles(user_id,role) VALUES
+           (8,'admissions'),(9,'admissions'),(10,'admissions');
+       `);
+       type DueFixtureOptions = {
+         stage: string | null;
+         followUpAt: Date | null;
+         consent?: "missing" | "granted" | "not_provided" | "opted_out" | "granted_with_opt_out";
+         assignment?: "active" | "inactive" | "wrong_role" | "none" | "null";
+         version?: number;
+       };
+       const dueFixtures = new Map<string, { leadId: string; inquiryId: number; followUpAt: Date | null }>();
+       let duePhoneSequence = 0;
+       async function addDueFixture(key: string, options: DueFixtureOptions) {
+         duePhoneSequence += 1;
+         const phone = `91${String(6_000_000_000 + duePhoneSequence)}`;
+         const { rows: [lead] } = await db.query(
+           "INSERT INTO admissions_leads(canonical_phone,name,entry_source) VALUES($1,$2,'synthetic_test') RETURNING id",
+           [phone, `Synthetic AVNI ${key}`],
+         );
+         const { rows: [inquiry] } = await db.query(
+           `INSERT INTO inquiries(name,email,phone,program_interest,lead_id)
+            VALUES($1,'',$2,'Synthetic',$3) RETURNING id`,
+           [`Synthetic AVNI ${key}`, phone, lead.id],
+         );
+         await db.query(
+           `INSERT INTO admissions_crm_profiles(inquiry_id,stage,follow_up_at,updated_by,version)
+            VALUES($1,$2,$3,1,$4)`,
+           [inquiry.id, options.stage, options.followUpAt, options.version ?? 1],
+         );
+         if (options.consent !== "missing") {
+           const consent = options.consent ?? "granted";
+           await db.query(
+             `INSERT INTO admissions_lead_contact_preferences(lead_id,consent_status,opted_out_at)
+              VALUES($1,$2,$3)`,
+             [
+               lead.id,
+               consent === "granted_with_opt_out" ? "granted" : consent,
+               consent === "opted_out" || consent === "granted_with_opt_out" ? new Date() : null,
+             ],
+           );
+         }
+         const assignment = options.assignment ?? "active";
+         if (assignment !== "none") {
+           const assigneeUserId = assignment === "null" ? 8
+             : assignment === "inactive" ? 9
+             : assignment === "wrong_role" ? 10
+             : 8;
+           await assignCrmLead(db, lead.id, {
+             expectedVersion: 0,
+             assigneeUserId,
+             reason: `Synthetic AVNI assignment ${key}`,
+             requestId: randomUUID(),
+           }, adminPrincipal);
+           if (assignment === "null") {
+             await assignCrmLead(db, lead.id, {
+               expectedVersion: 1,
+               assigneeUserId: null,
+               reason: `Synthetic AVNI unassignment ${key}`,
+               requestId: randomUUID(),
+             }, adminPrincipal);
+           }
+         }
+         const fixture = { leadId: lead.id as string, inquiryId: inquiry.id as number, followUpAt: options.followUpAt };
+         dueFixtures.set(key, fixture);
+         return fixture;
+       }
+
+       const dueNow = Date.now();
+       const dueAt = (minutesAgo: number) => new Date(dueNow - minutesAgo * 60_000);
+       const fixtureSpecs: Array<[string, DueFixtureOptions]> = [
+         ["routine_valid", { stage: "contacted", followUpAt: dueAt(20), version: 7 }],
+         ["future_follow_up", { stage: "contacted", followUpAt: new Date(dueNow + 24 * 60 * 60_000) }],
+         ["null_follow_up", { stage: "contacted", followUpAt: null }],
+         ["lost_stage", { stage: "lost", followUpAt: dueAt(19) }],
+         ["enrolled_stage", { stage: "enrolled", followUpAt: dueAt(18) }],
+         ["null_stage", { stage: null, followUpAt: dueAt(17) }],
+         ["missing_consent", { stage: "contacted", followUpAt: dueAt(16), consent: "missing" }],
+         ["not_provided_consent", { stage: "contacted", followUpAt: dueAt(15), consent: "not_provided" }],
+         ["opted_out_status", { stage: "contacted", followUpAt: dueAt(14), consent: "opted_out" }],
+         ["opted_out_timestamp", { stage: "contacted", followUpAt: dueAt(13), consent: "granted_with_opt_out" }],
+         ["unassigned_no_row", { stage: "contacted", followUpAt: dueAt(12), assignment: "none" }],
+         ["unassigned_null_row", { stage: "contacted", followUpAt: dueAt(11), assignment: "null" }],
+         ["inactive_assignee", { stage: "contacted", followUpAt: dueAt(10), assignment: "inactive" }],
+         ["wrong_role_assignee", { stage: "contacted", followUpAt: dueAt(9), assignment: "wrong_role" }],
+         ["pending_pause_checkin", { stage: "nurture", followUpAt: dueAt(4) }],
+         ["delivered_pause_checkin_cleared", { stage: "nurture", followUpAt: null }],
+         ["delivered_pause_checkin_stale_due", { stage: "nurture", followUpAt: dueAt(2) }],
+         ["reengaged_pause_lead", { stage: "nurture", followUpAt: dueAt(1) }],
+       ];
+       for (const [key, options] of fixtureSpecs) await addDueFixture(key, options);
+
+       // The schema invariant prevents missing or malformed canonical phones
+       // from existing as admissions leads; verify both rejection paths here.
+       await assert.rejects(
+         db.query("INSERT INTO admissions_leads(canonical_phone,name) VALUES(NULL,'Synthetic missing phone')"),
+         (error: unknown) => !!error && typeof error === "object" && "code" in error
+           && (error as { code?: unknown }).code === "23502",
+       );
+       await assert.rejects(
+         db.query("INSERT INTO admissions_leads(canonical_phone,name) VALUES('not-a-phone','Synthetic invalid phone')"),
+         (error: unknown) => !!error && typeof error === "object" && "code" in error
+           && (error as { code?: unknown }).code === "23514",
+       );
+       await db.query("UPDATE lms_users SET is_active=false WHERE id=9");
+       await db.query("DELETE FROM lms_user_roles WHERE user_id=10");
+       await db.query("INSERT INTO lms_user_roles(user_id,role) VALUES(10,'trainer')");
+
+       const pendingPause = dueFixtures.get("pending_pause_checkin")!;
+       const deliveredCleared = dueFixtures.get("delivered_pause_checkin_cleared")!;
+       const deliveredStale = dueFixtures.get("delivered_pause_checkin_stale_due")!;
+       const reengaged = dueFixtures.get("reengaged_pause_lead")!;
+       const pauseAt = new Date(dueNow - 60_000);
+       async function addActivity(
+         inquiryId: number,
+         type: string,
+         occurredAt: Date,
+         data: Record<string, unknown>,
+       ) {
+         await db.query(
+           `INSERT INTO admissions_crm_activities(inquiry_id,type,occurred_at,actor_id,data)
+            VALUES($1,$2,$3,1,$4::jsonb)`,
+           [inquiryId, type, occurredAt, JSON.stringify(data)],
+         );
+       }
+       for (const [key, fixture] of [
+         ["pending", pendingPause],
+         ["delivered-cleared", deliveredCleared],
+         ["delivered-stale", deliveredStale],
+         ["reengaged", reengaged],
+       ] as const) {
+         const pauseEventHash = `synthetic-pause-${key}`;
+         await addActivity(fixture.inquiryId, "stage", pauseAt, {
+           automationAction: "pause",
+           automationEventHash: pauseEventHash,
+         });
+         if (key === "delivered-cleared" || key === "delivered-stale") {
+           await addActivity(fixture.inquiryId, "followup", new Date(dueNow - 30_000), {
+             automationAction: "delivery",
+             automationFollowUpKind: "pause_checkin",
+             pauseEventHash,
+           });
+         }
+         if (key === "reengaged") {
+           await addActivity(fixture.inquiryId, "followup", new Date(dueNow - 30_000), {
+             noteSource: "synthetic_reengagement",
+           });
+         }
+       }
+
+       const readSecret = "isolated-avni-follow-up-read-secret";
+       const readAudit: Array<{ outcome: string }> = [];
+       const dueApp = express();
+       dueApp.use(express.json());
+       const candidateReadAuth = createAvniFollowUpReadAuth({
+         getSecret: () => readSecret,
+         getBroadSecret: () => "distinct-isolated-broad-secret",
+         logger: entry => readAudit.push(entry),
+       });
+       registerAvniCrmFollowUpRoutes(
+         dueApp,
+         (_req, res) => { res.status(401).json({ code: "write_auth_not_used" }); },
+         candidateReadAuth,
+         db,
+       );
+       const dueServer = createServer(dueApp);
+       dueServer.listen(0, "127.0.0.1");
+       await once(dueServer, "listening");
+       const dueAddress = dueServer.address();
+       assert.ok(dueAddress && typeof dueAddress !== "string");
+       const dueOrigin = `http://127.0.0.1:${dueAddress.port}`;
+       async function fetchDue(body: Record<string, unknown>) {
+         const response = await fetch(`${dueOrigin}/api/integrations/n8n/crm/follow-ups/due`, {
+           method: "POST",
+           headers: {
+             "content-type": "application/json",
+             [N8N_INTEGRATION_SECRET_HEADER]: readSecret,
+           },
+           body: JSON.stringify(body),
+         });
+         const result = await response.json() as {
+           items: Array<{ candidateRef: string; followUpAt: string; expectedVersion: number; followUpKind: string }>;
+           nextCursor: { followUpAt: string; candidateRef: string } | null;
+         };
+         assert.equal(response.status, 200);
+         assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0");
+         return result;
+       }
+       try {
+         const firstPage = await fetchDue({ limit: 2 });
+         assert.equal(firstPage.items.length, 2);
+         assert.ok(firstPage.nextCursor);
+         const secondPage = await fetchDue({ limit: 2, cursor: firstPage.nextCursor });
+         assert.equal(secondPage.items.length, 2);
+         assert.equal(secondPage.nextCursor, null);
+         const returned = [...firstPage.items, ...secondPage.items];
+         assert.deepEqual(returned.map(item => item.candidateRef), [
+           dueFixtures.get("routine_valid")!.leadId,
+           pendingPause.leadId,
+           deliveredStale.leadId,
+           reengaged.leadId,
+         ]);
+         assert.deepEqual(returned.map(item => item.followUpKind), [
+           "routine", "pause_checkin", "routine", "routine",
+         ]);
+         assert.equal(returned[0].expectedVersion, 7);
+         const excludedIds = fixtureSpecs
+           .filter(([key]) => ![
+             "routine_valid", "pending_pause_checkin",
+             "delivered_pause_checkin_stale_due", "reengaged_pause_lead",
+           ].includes(key))
+           .map(([key]) => dueFixtures.get(key)!.leadId);
+         assert.equal(excludedIds.some(id => returned.some(item => item.candidateRef === id)), false);
+         assert.equal(returned.some(item => item.candidateRef === deliveredCleared.leadId), false);
+         const serialized = JSON.stringify([...firstPage.items, ...secondPage.items, readAudit]);
+         assert.equal(serialized.includes("Synthetic AVNI"), false);
+         assert.equal(serialized.includes("60000000"), false);
+         assert.deepEqual(readAudit.map(entry => entry.outcome), ["success", "success"]);
+       } finally {
+         await new Promise<void>((resolve, reject) => {
+           dueServer.close(error => error ? reject(error) : resolve());
+         });
+       }
+
+       assert.equal(
+         (await db.query(
+           "SELECT count(*)::int AS count FROM admissions_leads WHERE canonical_phone IS NULL OR canonical_phone !~ '^91[6-9][0-9]{9}$'",
+         )).rows[0].count,
+         0,
+       );
+       const dueFixtureInquiryIds = [...dueFixtures.values()].map(fixture => fixture.inquiryId);
+       await db.query("DELETE FROM admissions_crm_activities WHERE inquiry_id=ANY($1::integer[])", [dueFixtureInquiryIds]);
+       await db.query("DELETE FROM admissions_crm_profiles WHERE inquiry_id=ANY($1::integer[])", [dueFixtureInquiryIds]);
+       await db.query("DELETE FROM inquiries WHERE id=ANY($1::integer[])", [dueFixtureInquiryIds]);
       await db.query("DROP TABLE admissions_crm_profiles,admissions_crm_activities");
       assert.equal((await listCrm(appDb!,{},adminPrincipal)).capabilities.crmPersistence,false);
       await assert.rejects(updateCrm(appDb!,`lead:${l.id}`,{expectedVersion:0,note:"no schema"},adminPrincipal),/migration is pending/);
