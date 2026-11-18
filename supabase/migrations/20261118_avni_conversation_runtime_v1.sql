@@ -1016,9 +1016,9 @@ BEGIN
       AND v_control.actor_ref=p_actor_ref AND v_control.reason IS NOT DISTINCT FROM p_reason
       AND v_control.prior_version=p_expected_control_version
       AND v_control.whatsapp_consent_granted IS NOT DISTINCT FROM
-        CASE WHEN p_action='resume' THEN p_whatsapp_consent_granted ELSE NULL END
+        (CASE WHEN p_action='resume' THEN p_whatsapp_consent_granted ELSE NULL END)
       AND v_control.whatsapp_opted_out IS NOT DISTINCT FROM
-        CASE WHEN p_action='resume' THEN p_whatsapp_opted_out ELSE NULL END
+        (CASE WHEN p_action='resume' THEN p_whatsapp_opted_out ELSE NULL END)
     THEN
       RETURN QUERY SELECT 'duplicate'::text,v_control.resulting_version; RETURN;
     END IF;

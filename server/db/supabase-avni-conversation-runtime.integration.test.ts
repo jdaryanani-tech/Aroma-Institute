@@ -175,19 +175,12 @@ async function installSyntheticPrerequisitesAndMigration(): Promise<void> {
   const migration = await readFile("supabase/migrations/20261118_avni_conversation_runtime_v1.sql", "utf8");
   const failingMigration = migration.replace(
     /\nCOMMIT;\s*$/,
-    "\nDO $injected_failure$ BEGIN RAISE EXCEPTION 'AVNI_TEST_INJECTED_MIGRATION_FAILURE'; END; $injected_failure$;\nCOMMIT;\n",
+    "\nSELECT 1/0;\nCOMMIT;\n",
   );
   assert.notEqual(failingMigration, migration, "the test must inject a failure before the migration COMMIT");
   const rollbackClient = await pool!.connect();
   try {
-    const injectedFailure = await rollbackClient.query(failingMigration).then(
-      () => null,
-      error => error as Error & { position?: string },
-    );
-    assert.ok(injectedFailure, "migration must fail at the injected statement");
-    if (!injectedFailure.message.includes("AVNI_TEST_INJECTED_MIGRATION_FAILURE")) {
-      throw new Error(`AVNI_TEST_MIGRATION_PARSE_FAILED_AT_${injectedFailure.position ?? "UNKNOWN"}`);
-    }
+    await assert.rejects(rollbackClient.query(failingMigration), /division by zero/i);
     await rollbackClient.query("ROLLBACK");
     const state = await rollbackClient.query<{
       role_count: string;
@@ -353,6 +346,10 @@ async function enqueueAssistant(threadId: string, version = 2) {
 }
 
 async function claimAndAuthorize(outboxId: string) {
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET state='cancelled',lease_token=NULL,lease_expires_at=NULL WHERE state='pending' AND id<>$1",
+    [outboxId],
+  );
   const claim = await asRuntime(client => client.query(
     "SELECT * FROM aichm_private.claim_next_conversation_outbound(true,60)",
   ));
@@ -587,6 +584,10 @@ test("takeover wins atomically against a claimed AI send and invalidates stale q
 }, async () => {
   const { threadId } = await createReadyThread();
   const queued = await enqueueAssistant(threadId);
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET state='cancelled' WHERE state='pending' AND id<>$1",
+    [queued.rows[0].outbox_id],
+  );
   assert.equal(queued.rows[0].outcome, "queued");
   const claimant = await pool!.connect();
   const taker = await pool!.connect();
@@ -637,6 +638,10 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
 }, async () => {
   const { threadId } = await createReadyThread();
   const queued = await enqueueAssistant(threadId);
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET state='cancelled' WHERE state='pending' AND id<>$1",
+    [queued.rows[0].outbox_id],
+  );
   const owner = await pool!.connect();
   const claimer = await pool!.connect();
   try {
@@ -667,6 +672,10 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
 
   const { threadId: retryThread } = await createReadyThread();
   const retryQueue = await enqueueAssistant(retryThread);
+  await pool!.query(
+    "UPDATE aichm_private.conversation_outbox SET state='cancelled' WHERE state='pending' AND id<>$1",
+    [retryQueue.rows[0].outbox_id],
+  );
   const firstClaim = await asRuntime(client => client.query(
     "SELECT * FROM aichm_private.claim_next_conversation_outbound(true,60)",
   ));
@@ -720,6 +729,10 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
   const { threadId: ceilingThread } = await createReadyThread();
   const ceilingQueue = await enqueueAssistant(ceilingThread);
   for (let expectedAttempt = 1; expectedAttempt <= 8; expectedAttempt += 1) {
+    await pool!.query(
+      "UPDATE aichm_private.conversation_outbox SET state='cancelled' WHERE state='pending' AND id<>$1",
+      [ceilingQueue.rows[0].outbox_id],
+    );
     const batch = await asRuntime(client => client.query(
       "SELECT * FROM aichm_private.claim_next_conversation_outbound(true,60)",
     ));
