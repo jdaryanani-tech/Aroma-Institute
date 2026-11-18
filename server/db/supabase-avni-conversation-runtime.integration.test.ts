@@ -1222,7 +1222,7 @@ test("a late receipt for a prior attempt is retained without mutating the curren
     WHERE outbox_id=$1 ORDER BY attempt_number
   `, [queued.rows[0].outbox_id]);
   assert.equal(result.length, 2);
-  assert.equal(result[0].delivery_state, "sent");
+  assert.equal(result[0].delivery_state, "failed");
   assert.equal(result[1].delivery_state, "sent");
   assert.equal(result[1].provider_message_key, currentProviderMessageKey);
   const outbox = await queryRows<{ state: string }>(

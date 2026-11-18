@@ -49,19 +49,18 @@ function asDate(value:Date|string|null|undefined):Date|null {
 function normalizeReceiptDates<T extends {consentRecordedAt?:Date|string|null;statusUpdatedAt?:Date|string|null;optedOutAt?:Date|string|null}>(
   row:T|undefined,
 ):T|undefined {
-  return row ? {
+  return row ? ({
     ...row,
     consentRecordedAt:asDate(row.consentRecordedAt),
     statusUpdatedAt:asDate(row.statusUpdatedAt),
     optedOutAt:asDate(row.optedOutAt),
     ...("consentEpoch" in row ? {consentEpoch:Number(row.consentEpoch)} : {}),
-  } : undefined;
+  } as T) : undefined;
 }
 
 export function consentView(row?: ConsentPreferenceViewRow) {
   return {
     status:row?.consentStatus ?? "not_recorded",
-    consentEpoch:row?.consentEpoch ?? 0,
     recordedAt:asDate(row?.consentRecordedAt)?.toISOString() ?? null,
     source:row?.consentSource ?? null,text:row?.consentText ?? null,version:row?.consentVersion ?? null,
     optedOut:!!row?.optedOutAt || row?.consentStatus==="opted_out",
@@ -80,7 +79,7 @@ async function readConsentPreference(leadId:string,database:Pick<FollowUpDatabas
       opted_out_at AS "optedOutAt",opt_out_source AS "optOutSource",
       consent_epoch AS "consentEpoch"
       FROM admissions_lead_contact_preferences WHERE lead_id=${leadId}`);
-    return normalizeReceiptDates(result.rows[0]);
+    return normalizeReceiptDates(result.rows[0]) as ConsentPreferenceViewRow|undefined;
   }
   const result=await database.execute<ConsentPreferenceViewRow>(sql`SELECT
     consent_status AS "consentStatus",consent_recorded_at AS "consentRecordedAt",
@@ -88,7 +87,7 @@ async function readConsentPreference(leadId:string,database:Pick<FollowUpDatabas
     consent_version AS "consentVersion",status_updated_at AS "statusUpdatedAt",
     opted_out_at AS "optedOutAt",opt_out_source AS "optOutSource"
     FROM admissions_lead_contact_preferences WHERE lead_id=${leadId}`);
-  return result.rows[0] ? {...normalizeReceiptDates(result.rows[0]),consentEpoch:0} : undefined;
+  return result.rows[0] ? {...normalizeReceiptDates(result.rows[0]),consentEpoch:0} as ConsentPreferenceViewRow : undefined;
 }
 
 async function counsellingFormsByPhone(canonicalPhone:string,database:FollowUpDatabase) {
@@ -134,7 +133,7 @@ export async function recordRegistrationFollowUp(tx:Transaction,lead:Lead,firstR
       consent_text AS "consentText",consent_version AS "consentVersion",
       opt_out_source AS "optOutSource"
       FROM admissions_lead_contact_preferences WHERE lead_id=${lead.id} FOR UPDATE`);
-    receipt=result.rows[0] ? {...normalizeReceiptDates(result.rows[0]),consentEpoch:0} : undefined;
+    receipt=result.rows[0] ? {...normalizeReceiptDates(result.rows[0]),consentEpoch:0} as ReceiptRow : undefined;
   }
   const protectedChoice=receipt?.optedOutAt || receipt?.consentStatus==="opted_out" || receipt?.consentStatus==="granted";
   if(!receipt || (!protectedChoice && optIn)) {

@@ -355,6 +355,16 @@ export async function assertAvniConversationRuntimePostconditions(
       fn.anon_execute || fn.authenticated_execute || fn.public_execute
     ) fail("AVNI_CONVERSATION_RUNTIME_RPC_PRIVILEGE_OR_PATH_DRIFTED");
   }
+  const { rows: unsafeDispatchRpcs } = await client.query<{ function_name: string }>(`
+    SELECT p.proname AS function_name
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='aichm_private' AND (
+      p.proname='authorize_conversation_outbound_attempt'
+      OR (p.proname IN ('enqueue_conversation_message','claim_next_conversation_outbound')
+        AND pg_get_function_identity_arguments(p.oid) ILIKE '%boolean%')
+    )
+  `);
+  if (unsafeDispatchRpcs.length) fail("AVNI_CALLER_ASSERTED_SEND_PERMISSION_RPC_PRESENT");
 
   const { rows: helper } = await client.query<{ exposed: boolean }>(`
     SELECT has_function_privilege('aichm_conversation_runtime',

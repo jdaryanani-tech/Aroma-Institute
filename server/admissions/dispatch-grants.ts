@@ -27,6 +27,14 @@ async function schemaReady(tx: Pick<Transaction, "execute">): Promise<boolean> {
   return result.rows[0]?.ready === true;
 }
 
+async function transactionTime(tx: Pick<Transaction, "execute">, explicit?: Date): Promise<Date> {
+  if (explicit) return explicit;
+  const result = await tx.execute<{ now: Date | string }>(sql`SELECT clock_timestamp() AS now`);
+  const value = result.rows[0]?.now;
+  if (!value) throw new Error("AVNI_DISPATCH_DATABASE_TIME_UNAVAILABLE");
+  return value instanceof Date ? value : new Date(value);
+}
+
 function toModel(row: GrantRow): AvniDispatchGrant {
   return {
     id: row.id,
@@ -67,6 +75,7 @@ export async function issueAvniDispatchGrantInTransaction(
   },
 ) {
   if (!await schemaReady(tx)) return { code: "dispatch_schema_unavailable" as const, grant: null };
+  const now = await transactionTime(tx,input.now);
   const [preference] = await tx.select({
     consentStatus: preferences.consentStatus,
     optedOutAt: preferences.optedOutAt,
@@ -88,7 +97,7 @@ export async function issueAvniDispatchGrantInTransaction(
       consentStatus: preference.consentStatus as DispatchConsentSnapshot["consentStatus"],
       optedOutAt: preference.optedOutAt?.toISOString() ?? null,
     },
-    now: input.now,
+    now,
     ttlMs: input.ttlMs,
     existing,
   });
@@ -136,19 +145,22 @@ export async function beginAvniDispatchInTransaction(input: {
     code: "dispatch_schema_unavailable" as const,
     grant: null,
   };
-  const [row] = await tx.select().from(grants).where(eq(grants.id, input.grantId)).for("update");
-  if (!row) return {
+  const now=await transactionTime(tx,input.now);
+  // Read the lead reference without locking, then lock in the same
+  // preference-before-grant order used by every consent writer. Re-read the
+  // grant under lock after the authoritative consent row is locked.
+  const [initialRow] = await tx.select().from(grants).where(eq(grants.id, input.grantId));
+  if (!initialRow) return {
     allowedToBeginSend: false as const,
     providerCallAllowed: false as const,
     code: "grant_replayed" as const,
     grant: null,
   };
-  const grant = toModel(row);
   const [preference] = await tx.select({
     consentStatus: preferences.consentStatus,
     optedOutAt: preferences.optedOutAt,
     consentEpoch: preferences.consentEpoch,
-  }).from(preferences).where(eq(preferences.leadId, grant.binding.canonicalLeadId)).for("update");
+  }).from(preferences).where(eq(preferences.leadId, initialRow.leadId)).for("update");
   const consent: DispatchConsentSnapshot | null = preference ? {
     consentEpoch: Number(preference.consentEpoch),
     consentStatus: preference.consentStatus as DispatchConsentSnapshot["consentStatus"],
@@ -158,11 +170,19 @@ export async function beginAvniDispatchInTransaction(input: {
     allowedToBeginSend: false as const,
     providerCallAllowed: false as const,
     code: "grant_revoked" as const,
-    grant,
+    grant: toModel(initialRow),
   };
+  const [row] = await tx.select().from(grants).where(eq(grants.id, input.grantId)).for("update");
+  if (!row) return {
+    allowedToBeginSend: false as const,
+    providerCallAllowed: false as const,
+    code: "grant_replayed" as const,
+    grant: null,
+  };
+  const grant = toModel(row);
 
   const validation = validateAvniDispatchGrantForBegin({
-    grant, binding, consent, now: input.now,
+    grant, binding, consent, now,
   });
   if (!validation.allowedToBeginSend) {
     if (validation.grant && validation.grant.state !== grant.state) {
@@ -182,7 +202,7 @@ export async function beginAvniDispatchInTransaction(input: {
     outcome = "unavailable";
   }
   const decision = beginAvniDispatchAttempt({
-    grant, binding, consent, now: input.now, supabaseOutcome: outcome,
+    grant, binding, consent, now, supabaseOutcome: outcome,
   });
   if (decision.grant && decision.grant.state !== grant.state) {
     await tx.update(grants).set({

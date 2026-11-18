@@ -917,21 +917,24 @@ BEGIN
   IF NOT FOUND THEN RETURN 'message_not_found'; END IF;
 
   IF v_outbox.state<>'claimed' OR v_attempt.state<>'claimed'
-    OR v_outbox.lease_token<>p_lease_token OR v_attempt.lease_token<>p_lease_token
-    OR v_outbox.lease_expires_at<=now() OR v_attempt.lease_expires_at<=now()
+    OR v_outbox.lease_token IS DISTINCT FROM p_lease_token
+    OR v_attempt.lease_token IS DISTINCT FROM p_lease_token
+    OR v_outbox.lease_expires_at IS NULL OR v_outbox.lease_expires_at<=now()
+    OR v_attempt.lease_expires_at<=now()
     OR v_outbox.attempt_count<>v_attempt.attempt_number
-    OR v_outbox.expected_control_version<>p_expected_control_version
-    OR v_thread.control_version<>p_expected_control_version
+    OR v_outbox.expected_control_version IS DISTINCT FROM p_expected_control_version
+    OR v_thread.control_version IS DISTINCT FROM p_expected_control_version
     OR v_thread.lifecycle<>'open' OR v_thread.mapping_status<>'mapped'
     OR v_thread.supabase_lead_id IS NULL
     OR v_thread.mode<>'ai'
     OR v_outbox.author<>'assistant' OR v_attempt.provider<>v_thread.provider
     OR v_outbox.message_id<>p_message_id
     OR v_outbox.idempotency_key<>p_message_idempotency_key
-    OR v_message.idempotency_key<>p_message_idempotency_key
-    OR v_message.message_fingerprint<>p_payload_hash
+    OR v_message.idempotency_key IS DISTINCT FROM p_message_idempotency_key
+    OR v_message.message_fingerprint IS DISTINCT FROM p_payload_hash
     OR v_message.direction<>'outbound' OR v_message.author<>'assistant'
-    OR v_message.delivery_state<>'queued'
+    OR v_message.provider IS DISTINCT FROM v_thread.provider
+    OR v_message.delivery_state IS DISTINCT FROM 'queued'
   THEN
     IF v_outbox.state='claimed' AND v_outbox.lease_token=p_lease_token THEN
       UPDATE aichm_private.conversation_outbox

@@ -8,7 +8,7 @@ import express from "express";
 import session from "express-session";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq, ne } from "drizzle-orm";
+import { eq, ne, sql } from "drizzle-orm";
 import * as core from "@shared/schema";
 import * as lms from "@shared/lms-schema";
 import * as admissions from "@shared/admissions-schema";
@@ -51,6 +51,10 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
   assert.ok(u.searchParams.get("host")?.includes("/generated-artifacts/follow-up-db-"));
   const pool=new Pool({connectionString:testUrl});
   const database=drizzle(pool,{schema:{...core,...lms,...admissions}});
+  const readConsentEpoch=async(leadId:string)=>{
+    const [row]=await database.select({epoch:preferences.consentEpoch}).from(preferences).where(eq(preferences.leadId,leadId));
+    return Number(row?.epoch??0);
+  };
   const server=createServer();
   let listening=false;
   try {
@@ -65,8 +69,31 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     assert.equal(await followUpSchemaReady(database),true);
     const avniMigration=await readFile("migrations/0009_avni_tracking.sql","utf8");
     await pool.query(avniMigration);await pool.query(avniMigration);
+    await pool.query("CREATE ROLE aichm_app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS");
     const dispatchMigration=await readFile("migrations/0019_avni_dispatch_grants.sql","utf8");
     await pool.query(dispatchMigration);await pool.query(dispatchMigration);
+    const epochCatalog=await pool.query<{data_type:string;is_nullable:string;column_default:string|null}>(`
+      SELECT data_type,is_nullable,column_default FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='admissions_lead_contact_preferences'
+        AND column_name='consent_epoch'
+    `);
+    assert.deepEqual(epochCatalog.rows,[{
+      data_type:"bigint",is_nullable:"NO",column_default:"0",
+    }]);
+    const grantConstraints=await pool.query<{constraint_name:string}>(`
+      SELECT constraint_name FROM information_schema.table_constraints
+      WHERE table_schema='public' AND table_name='admissions_conversation_dispatch_grants'
+      ORDER BY constraint_name
+    `);
+    assert.ok(grantConstraints.rows.some(row=>row.constraint_name==="admissions_dispatch_grant_state_ck"));
+    assert.ok(grantConstraints.rows.some(row=>row.constraint_name==="admissions_dispatch_grant_expiry_ck"));
+    const grantPrivileges=await pool.query<{can_select:boolean;can_insert:boolean;can_update:boolean;can_delete:boolean}>(`
+      SELECT has_table_privilege('aichm_app_runtime','admissions_conversation_dispatch_grants','SELECT') AS can_select,
+        has_table_privilege('aichm_app_runtime','admissions_conversation_dispatch_grants','INSERT') AS can_insert,
+        has_table_privilege('aichm_app_runtime','admissions_conversation_dispatch_grants','UPDATE') AS can_update,
+        has_table_privilege('aichm_app_runtime','admissions_conversation_dispatch_grants','DELETE') AS can_delete
+    `);
+    assert.deepEqual(grantPrivileges.rows[0],{can_select:true,can_insert:true,can_update:true,can_delete:false});
     assert.equal(await admissionsIntegrationSchemaReady(database),true);
     assert.equal((await database.select().from(outbox)).length,0,"no replay/backfill of pre-migration registrations");
 
@@ -90,15 +117,15 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     assert.equal((await database.select().from(core.inquiries)).length,inquiryCount);
     status=(await readLeadFollowUpStatus(lead.id,database))!;
     assert.equal(status.consent.whatsappAdmissions.allowed,true);
-    assert.equal(status.consent.whatsappAdmissions.consentEpoch,1);
+    assert.equal(await readConsentEpoch(lead.id),1);
     const grantAt=status.consent.whatsappAdmissions.recordedAt;
     await registerVslLead(input,new Date(time.getTime()+1000),database);
     assert.equal((await readLeadFollowUpStatus(lead.id,database))!.consent.whatsappAdmissions.recordedAt,grantAt);
 
-    const makeGrantBinding=(attempt:number)=>{
+    const makeGrantBinding=(attempt:number,canonicalLeadId=lead.id)=>{
       const key=(label:string)=>createHash("sha256").update(`${label}:${attempt}`).digest("hex");
       return {
-        canonicalLeadId:lead.id,
+        canonicalLeadId,
         supabaseThreadId:randomUUID(),supabaseOutboxId:randomUUID(),
         supabaseMessageId:randomUUID(),supabaseAttemptId:randomUUID(),
         messageIdempotencyKey:`message:v1:${key("message")}`,
@@ -142,7 +169,7 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     await pool.query("DROP FUNCTION fail_dispatch_grant_revocation()");
     assert.equal((await readLeadFollowUpStatus(lead.id,database))!.consent.whatsappAdmissions.allowed,true,
       "consent write rolls back if same-transaction grant invalidation fails");
-    assert.equal((await readLeadFollowUpStatus(lead.id,database))!.consent.whatsappAdmissions.consentEpoch,1);
+    assert.equal(await readConsentEpoch(lead.id),1);
     assert.ok((await database.select().from(grants).where(eq(grants.state,"issued"))).length>=2);
 
     const answers:core.CounsellingAnswers={
@@ -172,14 +199,84 @@ test("Stage 2 isolated SQL/HTTP: consent, opt-outs, outbox, retries, status auth
     status=(await readLeadFollowUpStatus(lead.id,database))!;
     assert.equal(status.consent.whatsappAdmissions.status,"opted_out");
     assert.equal(status.consent.whatsappAdmissions.allowed,false);
-    assert.equal(status.consent.whatsappAdmissions.consentEpoch,2);
+    assert.equal(await readConsentEpoch(lead.id),2);
     assert.equal((await database.select().from(grants).where(eq(grants.state,"issued"))).length,0);
     assert.ok((await database.select().from(grants).where(eq(grants.state,"revoked"))).length>=2);
     assert.equal((await database.select().from(grants).where(eq(grants.state,"in_flight"))).length,1,
       "opt-out invalidates unused grants but cannot recall an in-flight begin_send");
+    let staleBeginInvoked=false;
+    const staleRedemption=await database.transaction(tx=>beginAvniDispatchInTransaction({
+      tx,grantId:unused[0].grant!.id,binding:unused[0].grant!.binding,now:time,
+      beginSupabaseSend:async()=>{staleBeginInvoked=true;return "begun";},
+    }));
+    assert.equal(staleRedemption.providerCallAllowed,false);
+    assert.equal(staleBeginInvoked,false,"opt-out before redemption prevents Supabase begin_send");
+
+    const barrierLead=await registerVslLead({
+      phone:"9000000008",name:"Synthetic dispatch barrier",entryHost:"test.invalid",entryPath:"/vsl",
+      whatsappAdmissionsConsent:true,
+    },time,database);
+    const barrierBinding=makeGrantBinding(4,barrierLead.id);
+    const barrierGrant=await database.transaction(tx=>issueAvniDispatchGrantInTransaction(tx,{
+      binding:barrierBinding,now:time,
+    }));
+    assert.equal(barrierGrant.code,"grant_issued");
+    let beginPid=0;
+    let optoutPid=0;
+    let beginEntered!:()=>void;
+    let releaseBegin!:()=>void;
+    const beganAtSupabase=new Promise<void>(resolve=>{beginEntered=resolve;});
+    const releaseSupabase=new Promise<void>(resolve=>{releaseBegin=resolve;});
+    const beginPromise=database.transaction(async tx=>{
+      const pid=await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`);
+      beginPid=Number(pid.rows[0].pid);
+      return beginAvniDispatchInTransaction({
+        tx,grantId:barrierGrant.grant!.id,binding:barrierGrant.grant!.binding,now:time,
+        beginSupabaseSend:async()=>{
+          beginEntered();
+          await releaseSupabase;
+          return "begun";
+        },
+      });
+    });
+    await beganAtSupabase;
+    const trackedDatabase=new Proxy(database,{
+      get(target,property){
+        if(property==="transaction") return (callback:Parameters<typeof database.transaction>[0])=>
+          database.transaction(async tx=>{
+            const pid=await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`);
+            optoutPid=Number(pid.rows[0].pid);
+            return callback(tx);
+          });
+        const value=Reflect.get(target,property,target);
+        return typeof value==="function" ? value.bind(target) : value;
+      },
+    }) as typeof database;
+    const optoutPromise=recordWhatsAppOptOut(barrierLead.id,"prospect",trackedDatabase,time);
+    let observedBlock=false;
+    for(let attempt=0;attempt<1_000;attempt+=1) {
+      if(optoutPid) {
+        const blocked=await pool.query<{blocked:boolean}>(
+          "SELECT $2::int=ANY(pg_blocking_pids($1::int)) AS blocked",[optoutPid,beginPid],
+        );
+        if(blocked.rows[0]?.blocked){observedBlock=true;break;}
+      }
+      await new Promise(resolve=>setTimeout(resolve,5));
+    }
+    releaseBegin();
+    const barrierBegin=await beginPromise;
+    assert.equal(observedBlock,true,"opt-out waits on the consent row held across begin_send");
+    assert.equal(barrierBegin.code,"begin_send_started");
+    assert.equal(barrierBegin.providerCallAllowed,false);
+    assert.equal(await optoutPromise,true);
+    assert.equal(await readConsentEpoch(barrierLead.id),2);
+    assert.equal((await database.select().from(grants).where(eq(grants.id,barrierGrant.grant!.id)))[0].state,"in_flight");
     assert.equal(status.consent.counsellingQuestion29.consentToContact,true);
     assert.equal(status.consent.counsellingQuestion29.allowed,false);
     assert.equal(status.consent.whatsappAdmissions.optOutSource,"prospect");
+    await recordWhatsAppOptOut(lead.id,"admin",database,new Date(time.getTime()+3000));
+    assert.equal(await readConsentEpoch(lead.id),2,"repeated opt-out does not increment the effective-consent epoch");
+    assert.equal((await readLeadFollowUpStatus(lead.id,database))!.consent.whatsappAdmissions.optOutSource,"prospect");
     assert.equal(JSON.stringify((await database.select().from(outbox))[0].payload),snapshot);
     // Question-29 consent alone is not a WhatsApp admissions opt-in.
     const independent=await saveLinkedCounsellingInquiry({name:"Synthetic questionnaire only",phone:"9000000002",

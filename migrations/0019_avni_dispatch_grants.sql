@@ -51,6 +51,7 @@ CREATE INDEX IF NOT EXISTS admissions_conversation_dispatch_grants_lead_state_id
 CREATE INDEX IF NOT EXISTS admissions_conversation_dispatch_grants_expiry_idx
   ON admissions_conversation_dispatch_grants(state,expires_at);
 
+REVOKE ALL ON TABLE admissions_conversation_dispatch_grants FROM PUBLIC;
 DO $runtime_grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='aichm_app_runtime') THEN

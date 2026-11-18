@@ -197,9 +197,13 @@ test("forward migration table grants match the reviewed runtime privilege matrix
     .map(([, table, privilegeText]) => [table, privilegeText!.split(/,\s*/) as string[]])
     .sort(([left], [right]) => String(left).localeCompare(String(right)));
   const expected = Object.entries(CRM_RUNTIME_TABLE_PRIVILEGES)
+    .filter(([table]) => table !== "admissions_conversation_dispatch_grants")
     .map(([table, privileges]) => [table, [...privileges]] as [string, string[]])
     .sort(([left], [right]) => left.localeCompare(right));
   assert.deepEqual(actual, expected);
+  const dispatchMigration = await readFile("migrations/0019_avni_dispatch_grants.sql", "utf8");
+  assert.match(dispatchMigration,/GRANT SELECT,INSERT,UPDATE ON TABLE admissions_conversation_dispatch_grants TO aichm_app_runtime/);
+  assert.match(dispatchMigration,/REVOKE ALL ON TABLE admissions_conversation_dispatch_grants FROM PUBLIC/);
 });
 
 test("runtime role postconditions fail closed if the app can mutate assignment history", async () => {
