@@ -170,7 +170,10 @@ const RUNTIME_EXECUTABLE_RPCS = new Set([
   "begin_human_pilot_send",
   "record_human_pilot_send_result",
 ]);
-const READER_EXECUTABLE_RPCS = new Set(["read_human_pilot_thread"]);
+const READER_EXECUTABLE_RPCS = new Set([
+  "read_human_pilot_thread",
+  "find_human_pilot_outbound",
+]);
 
 function fail(code: string): never {
   const error = new Error(code) as Error & { code: string };

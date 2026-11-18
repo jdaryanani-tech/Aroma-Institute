@@ -414,7 +414,8 @@ REVOKE ALL ON FUNCTION aichm_private.begin_human_pilot_send(uuid,uuid,uuid,uuid,
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
 REVOKE ALL ON FUNCTION aichm_private.record_human_pilot_send_result(uuid,uuid,uuid,text,text[])
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;
-GRANT EXECUTE ON FUNCTION aichm_private.find_human_pilot_outbound(text) TO aichm_conversation_runtime;
+GRANT EXECUTE ON FUNCTION aichm_private.find_human_pilot_outbound(text)
+  TO aichm_conversation_runtime,aichm_crm_reader;
 GRANT EXECUTE ON FUNCTION aichm_private.read_human_pilot_thread(uuid,bigint)
   TO aichm_conversation_runtime,aichm_crm_reader;
 GRANT EXECUTE ON FUNCTION aichm_private.claim_human_pilot_outbound(uuid,integer) TO aichm_conversation_runtime;

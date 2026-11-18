@@ -14,7 +14,10 @@ import {
 } from "../admissions/follow-up";
 import { crmModelSql, inspectCrmSchema, iso } from "../crm/model";
 import { requireLmsRole, requireLmsUser } from "../lms/auth";
-import { isSupabaseAvniReadConfigured } from "../db/supabase-avni-readonly";
+import {
+  isSupabaseAvniReadConfigured,
+  readSupabasePilotOutboundStatus,
+} from "../db/supabase-avni-readonly";
 import { createAvniDiagnosticsHandler } from "./avni-diagnostics";
 import { registerAvniProductionDiagnosticsRoute } from "./avni-production-diagnostics";
 import { registerAvniCrmFollowUpRoutes } from "../crm/avni-follow-up-routes";
@@ -23,6 +26,7 @@ import {
   AVNI_PILOT_RECIPIENT_ENV,
   registerAvniPilotDispatchRoute,
 } from "./avni-pilot-dispatch-route";
+import { createAvniPilotStatusReader } from "./avni-single-recipient-pilot";
 import {
   AVNI_FOLLOWUP_READ_SECRET_ENV,
   avniReadCredentialIsDedicated,
@@ -96,6 +100,11 @@ export function registerAvniIntegrationRoutes(app: Express) {
     // in this source tree. Keep the feature fail-closed until those adapters
     // are separately reviewed and injected.
     dispatch: null,
+    // The existing read-only pool can inspect persisted status after the
+    // reviewed RPC migration is present. It never queries Evolution or retries.
+    readStatus: createAvniPilotStatusReader({
+      readStatus: readSupabasePilotOutboundStatus,
+    }),
   });
   registerAvniCrmFollowUpRoutes(
     app,
@@ -176,6 +185,8 @@ export function registerAvniIntegrationRoutes(app: Express) {
         routeRegistered: true,
         featureGateRequested: process.env[AVNI_PILOT_DISPATCH_GATE_ENV] === "true",
         dispatcherWired: false,
+        statusReaderWired: true,
+        statusReaderRequiresV3Migration: true,
         providerClientWired: false,
         hmacKeyProviderWired: false,
         supabaseWriterPoolWired: false,

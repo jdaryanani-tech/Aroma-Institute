@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import type { Request } from "express";
 import type { AvniHmacKeyProvider } from "./avni-provider-reference-hmac";
 import {
+  createAvniPilotStatusReader,
   createAvniSingleRecipientPilotDispatcher,
+  pilotMessageIdempotencyKey,
   type PilotGrantEngine,
 } from "./avni-single-recipient-pilot";
 import type { AvniPilotSupabaseWriterContract } from "./avni-pilot-supabase-writer";
@@ -76,8 +79,15 @@ function syntheticPool(options: {
 function createFakeWriter(
   state: { current: string | null },
   beginOutcome: "begun" | "denied" = "begun",
+  options: { singleClaim?: boolean; rendezvousInitialLookups?: boolean } = {},
 ) {
   const calls: string[] = [];
+  let claimIssued = false;
+  let initialLookupCount = 0;
+  let releaseInitialLookups!: () => void;
+  const initialLookupBarrier = new Promise<void>(resolve => {
+    releaseInitialLookups = resolve;
+  });
   const writer: AvniPilotSupabaseWriterContract = {
     async preflight() {
       calls.push("preflight");
@@ -92,6 +102,11 @@ function createFakeWriter(
     },
     async findByIdempotencyKey() {
       calls.push("lookup");
+      if (options.rendezvousInitialLookups && state.current === null && initialLookupCount < 2) {
+        initialLookupCount++;
+        if (initialLookupCount === 2) releaseInitialLookups();
+        await initialLookupBarrier;
+      }
       if (!state.current) return null;
       return {
         outboxId, messageId, threadId,
@@ -104,11 +119,15 @@ function createFakeWriter(
       calls.push("enqueue");
       assert.equal(input.actorRef, "replit_lms_user:7");
       assert.equal(input.text, AVNI_PILOT_MESSAGE);
+      if (state.current) return { outcome: "duplicate", outboxId, messageId, threadId };
       state.current = "pending";
       return { outcome: "queued", outboxId, messageId, threadId };
     },
     async claimHumanOutbox() {
       calls.push("claim");
+      if (options.singleClaim && claimIssued) return null;
+      claimIssued = true;
+      state.current = "claimed";
       return {
         outboxId, messageId, threadId, attemptId, leaseToken,
         controlVersion: 2, attemptNumber: 1, leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
@@ -128,17 +147,24 @@ function createFakeWriter(
   return { writer, calls };
 }
 
-function createGrantEngine() {
+function createGrantEngine(options: {
+  issueCode?: string;
+  beginDenyCode?: string;
+} = {}) {
   const calls: string[] = [];
   const engine: PilotGrantEngine = {
     async issue(_request, binding) {
       calls.push("issue");
       assert.equal(binding.canonicalLeadId, leadId);
       assert.equal(binding.controlVersion, 2);
+      if (options.issueCode) return { code: options.issueCode, grant: null };
       return { code: "grant_issued", grant: { id: "90000000-0000-4000-8000-000000000001", state: "issued" } };
     },
     async begin(_request, _grantId, beginSupabaseSend) {
       calls.push("begin");
+      if (options.beginDenyCode) {
+        return { code: options.beginDenyCode, providerCallAllowed: false };
+      }
       const outcome = await beginSupabaseSend();
       return {
         code: outcome === "begun" ? "begin_send_started" : "supabase_begin_denied",
@@ -164,6 +190,10 @@ function createDispatcher(options: {
   providerOutcome?: "accepted" | "unknown" | "failed";
   beginOutcome?: "begun" | "denied";
   state?: { current: string | null };
+  singleClaim?: boolean;
+  rendezvousInitialLookups?: boolean;
+  grantIssueCode?: string;
+  grantBeginDenyCode?: string;
 }) {
   const { pool, queries } = syntheticPool({
     consent: options.consent,
@@ -175,8 +205,14 @@ function createDispatcher(options: {
     preferenceCount: options.preferenceCount,
   });
   const state = options.state ?? { current: null };
-  const { writer, calls: writerCalls } = createFakeWriter(state, options.beginOutcome ?? "begun");
-  const grant = createGrantEngine();
+  const { writer, calls: writerCalls } = createFakeWriter(state, options.beginOutcome ?? "begun", {
+    singleClaim: options.singleClaim,
+    rendezvousInitialLookups: options.rendezvousInitialLookups,
+  });
+  const grant = createGrantEngine({
+    issueCode: options.grantIssueCode,
+    beginDenyCode: options.grantBeginDenyCode,
+  });
   let providerCalls = 0;
   const transport = createEvolutionPilotTransport({
     async sendText() {
@@ -293,6 +329,28 @@ test("unknown provider outcomes are persisted as terminal and replay never calls
   assert.equal(runtime.providerCalls, 1);
 });
 
+test("a new client idempotency key cannot create a second outbound message for this one-recipient pilot", async () => {
+  const runtime = createDispatcher({ providerOutcome: "accepted" });
+  const input = {
+    canonicalLeadId: leadId,
+    recipientE164: recipient,
+    expectedControlVersion: 2,
+    idempotencyKey,
+  };
+  assert.deepEqual(await runtime.dispatch(request, input), {
+    status: "accepted",
+    safeCode: "provider_accepted",
+  });
+  assert.deepEqual(await runtime.dispatch(request, {
+    ...input,
+    idempotencyKey: "81000000-0000-4000-8000-000000000002",
+  }), {
+    status: "accepted",
+    safeCode: "already_processed",
+  });
+  assert.equal(runtime.providerCalls, 1);
+});
+
 test("approved recipient mismatch and missing HMAC/writer/transport prerequisites fail closed", async () => {
   const base = createDispatcher({});
   assert.deepEqual(await base.dispatch(request, {
@@ -340,6 +398,79 @@ test("canonical phone mismatch and a denied begin-send fence never reach the pro
     idempotencyKey,
   }), { status: "failed", safeCode: "supabase_begin_denied" });
   assert.equal(fenced.providerCalls, 0);
+});
+
+test("final grant recheck blocks revoked consent, expiry, reassignment, and actor-role changes", async () => {
+  const revoked = createDispatcher({ grantIssueCode: "grant_revoked" });
+  assert.deepEqual(await revoked.dispatch(request, {
+    canonicalLeadId: leadId,
+    recipientE164: recipient,
+    expectedControlVersion: 2,
+    idempotencyKey,
+  }), { status: "failed", safeCode: "grant_revoked" });
+  assert.equal(revoked.providerCalls, 0);
+
+  for (const code of ["grant_expired", "assignment_changed", "actor_role_changed"]) {
+    const runtime = createDispatcher({ grantBeginDenyCode: code });
+    assert.deepEqual(await runtime.dispatch(request, {
+      canonicalLeadId: leadId,
+      recipientE164: recipient,
+      expectedControlVersion: 2,
+      idempotencyKey,
+    }), { status: "failed", safeCode: code });
+    assert.equal(runtime.providerCalls, 0);
+    assert.ok(!runtime.writerCalls.includes("begin"));
+  }
+});
+
+test("concurrent duplicate dispatch requests claim once and invoke the fake provider at most once", async () => {
+  const runtime = createDispatcher({
+    singleClaim: true,
+    rendezvousInitialLookups: true,
+    providerOutcome: "accepted",
+  });
+  const input = {
+    canonicalLeadId: leadId,
+    recipientE164: recipient,
+    expectedControlVersion: 2,
+    idempotencyKey,
+  };
+  const [first, second] = await Promise.all([
+    runtime.dispatch(request, input),
+    runtime.dispatch(request, input),
+  ]);
+  assert.ok([first.status, second.status].every(status =>
+    status === "accepted" || status === "in_progress"));
+  assert.equal(runtime.providerCalls, 1);
+  assert.equal(runtime.writerCalls.filter(call => call === "claim").length, 2);
+});
+
+test("unknown status reconciliation is read-only, stable-keyed, and returns no internal identifiers", async () => {
+  const { writer, calls } = createFakeWriter({ current: "unknown" });
+  const readStatus = createAvniPilotStatusReader({
+    readStatus: async key => {
+      const result = await writer.findByIdempotencyKey(key);
+      return result && { state: result.state, attemptNumber: result.attemptNumber };
+    },
+  });
+  const result = await readStatus(request, { canonicalLeadId: leadId, idempotencyKey });
+  assert.deepEqual(result, {
+    state: "unknown",
+    attemptNumber: 1,
+    safeCode: "manual_provider_reconciliation_required",
+  });
+  const expectedDigest = createHash("sha256")
+    .update(`avni-single-recipient-pilot-v1:${leadId}`, "utf8")
+    .digest("hex");
+  assert.equal(pilotMessageIdempotencyKey(leadId, idempotencyKey), `message:v1:${expectedDigest}`);
+  assert.equal(
+    pilotMessageIdempotencyKey(leadId.toUpperCase(), idempotencyKey.toUpperCase()),
+    `message:v1:${expectedDigest}`,
+  );
+  assert.equal(pilotMessageIdempotencyKey(leadId, "81000000-0000-4000-8000-000000000002"),
+    `message:v1:${expectedDigest}`);
+  assert.deepEqual(calls, ["lookup"]);
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(`${leadId}|${threadId}|${outboxId}|${messageId}`));
 });
 
 test("definite provider failure is terminal and is never retried on idempotent replay", async () => {

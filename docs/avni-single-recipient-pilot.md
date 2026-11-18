@@ -15,6 +15,19 @@ recipient, current conversation control version, and a stable UUID
 cannot choose it. The recipient must match the explicit server-side pilot
 allowlist and the lead's normalized canonical phone. Responses contain only a
 status, fixed code and correlation ID.
+The durable outbox key is fixed to this pilot and canonical lead, so a second
+client idempotency key cannot create a second message for the same lead.
+
+The admin-only, read-only reconciliation route is
+`POST /api/admin/integrations/avni/pilot-dispatch/status` with
+`{ canonicalLeadId }` and the same `Idempotency-Key` header. It requires the
+same admin session and same-origin protection, returns only the persisted
+state, attempt number, fixed safe code and correlation ID, and sets no-store.
+An `unknown` result is surfaced as `manual_provider_reconciliation_required`;
+this route never queries Evolution, changes state or retries. It uses the
+existing server-side read-only Supabase pool and the narrowly scoped
+`find_human_pilot_outbound` RPC; it remains unavailable until the v3 migration
+and reader grant are reviewed and present.
 
 ## Implemented server-side boundaries (not wired)
 
@@ -31,9 +44,10 @@ status, fixed code and correlation ID.
   request already authorized at that boundary.
 - Supabase draft migration
   `supabase/migrations/20261118_avni_human_pilot_dispatch_v3.sql` adds
-  server-only pilot RPCs and control-version cancellation of stale queued
-  messages. It is ordered after runtime v1 and read preflight v2. None of the
-  Supabase migrations is applied by this work.
+  server-only pilot RPCs, a read-only pilot status grant for the existing
+  reader, and control-version cancellation of stale queued messages. It is
+  ordered after runtime v1 and read preflight v2. None of the Supabase
+  migrations is applied by this work.
 - The Evolution adapter accepts an injected transport only. Its production
   HTTP client is intentionally absent because this repository does not define
   the deployed Evolution endpoint, authentication/header format, request body,

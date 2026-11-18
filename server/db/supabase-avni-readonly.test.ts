@@ -166,6 +166,33 @@ test("booking confirmation verification sends stable lead UUID and external Supa
   ]);
 });
 
+test("pilot status reader uses the narrow RPC and projects only state and attempt count", async () => {
+  const seen: Array<{ text: string; values?: unknown[] }> = [];
+  const reader = createSupabaseAvniReader({
+    async query(text, values) {
+      seen.push({ text, values });
+      return { rows: [{
+        outbox_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        message_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        thread_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        state: "unknown",
+        control_version: "4",
+        attempt_number: "1",
+        body: "must not be returned",
+        recipient: "+919999999999",
+      }] };
+    },
+  });
+  const status = await reader.readPilotOutboundStatus(`message:v1:${"a".repeat(64)}`);
+  assert.deepEqual(seen, [{
+    text: "SELECT * FROM aichm_private.find_human_pilot_outbound($1::text)",
+    values: [`message:v1:${"a".repeat(64)}`],
+  }]);
+  assert.deepEqual(status, { state: "unknown", attemptNumber: 1 });
+  assert.doesNotMatch(JSON.stringify(status), /must not be returned|919999999999|outbox_id|thread_id/);
+  await assert.rejects(reader.readPilotOutboundStatus("not-a-hmac-key"), /invalid_pilot_status_key/);
+});
+
 test("invalid history cursors are rejected", () => {
   assert.throws(() => decodeConversationCursor("not-a-cursor"), /invalid_conversation_cursor/);
   assert.throws(() => decodeConversationCursor(Buffer.from(JSON.stringify({

@@ -16,11 +16,58 @@ import {
   type PilotHumanClaim,
   type PilotOutboxSnapshot,
 } from "./avni-pilot-supabase-writer";
-import type { AvniPilotDispatchHandler } from "./avni-pilot-dispatch-route";
+import type {
+  AvniPilotDispatchHandler,
+  AvniPilotStatusHandler,
+} from "./avni-pilot-dispatch-route";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const e164Pattern = /^\+[1-9][0-9]{7,14}$/;
 const digest = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+
+export function pilotMessageIdempotencyKey(canonicalLeadId: string, requestKey: string): string {
+  if (!uuidPattern.test(canonicalLeadId) || !uuidPattern.test(requestKey)) {
+    throw new Error("AVNI_PILOT_IDEMPOTENCY_INPUT_INVALID");
+  }
+  return `message:v1:${digest(
+    `avni-single-recipient-pilot-v1:${canonicalLeadId.toLowerCase()}`,
+  )}`;
+}
+
+export function createAvniPilotStatusReader(
+  store: {
+    readStatus(idempotencyKey: string): Promise<{
+      state: PilotOutboxSnapshot["state"];
+      attemptNumber: number;
+    } | null>;
+  } | null,
+): AvniPilotStatusHandler {
+  return async (_request, input) => {
+    if (!store) {
+      return { state: "unavailable", attemptNumber: 0, safeCode: "status_reader_unavailable" };
+    }
+    try {
+      const snapshot = await store.readStatus(
+        pilotMessageIdempotencyKey(input.canonicalLeadId, input.idempotencyKey),
+      );
+      if (!snapshot) return { state: "not_found", attemptNumber: 0, safeCode: "pilot_not_found" };
+      const safeCode = snapshot.state === "unknown" || snapshot.state === "sending"
+        ? "manual_provider_reconciliation_required"
+        : snapshot.state === "failed" || snapshot.state === "cancelled"
+          ? "terminal_no_retry"
+          : snapshot.state === "accepted" || snapshot.state === "delivered"
+            ? "provider_accepted"
+            : "dispatch_in_progress";
+      return {
+        state: snapshot.state,
+        attemptNumber: snapshot.attemptNumber,
+        safeCode,
+      };
+    } catch {
+      return { state: "unavailable", attemptNumber: 0, safeCode: "status_reader_unavailable" };
+    }
+  };
+}
 
 type PilotAuthorization = {
   actorUserId: number;
@@ -217,9 +264,10 @@ export function createAvniSingleRecipientPilotDispatcher(dependencies: {
     );
     if (!authorization.ok) return { status: "failed", safeCode: authorization.code };
 
-    const messageIdempotencyKey = `message:v1:${digest(
-      `avni-single-recipient-pilot-v1:${input.canonicalLeadId}:${input.idempotencyKey}`,
-    )}`;
+    const messageIdempotencyKey = pilotMessageIdempotencyKey(
+      input.canonicalLeadId,
+      input.idempotencyKey,
+    );
 
     let snapshot: PilotOutboxSnapshot | null;
     try {

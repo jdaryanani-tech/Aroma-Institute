@@ -74,6 +74,11 @@ export type SupabaseConversationPreflight = {
   lifecycle: "open" | "closed" | null;
   controlVersion: number | null;
 };
+export type SupabasePilotOutboundStatus = {
+  state: "pending" | "claimed" | "sending" | "accepted" | "delivered" |
+    "failed" | "unknown" | "cancelled";
+  attemptNumber: number;
+};
 
 const cursorSchema = z.object({
   at: z.string().datetime({ offset: true }),
@@ -105,6 +110,14 @@ const conversationPreflightSchema = z.object({
     });
   }
 });
+const pilotOutboundStatusKeySchema = z.string().regex(/^message:v1:[0-9a-f]{64}$/);
+const pilotOutboundStatusRowSchema = z.object({
+  state: z.enum(["pending", "claimed", "sending", "accepted", "delivered", "failed", "unknown", "cancelled"]),
+  attempt_number: z.union([
+    z.number().int().min(0).max(8),
+    z.string().regex(/^(?:[0-8])$/).transform(Number),
+  ]),
+}).passthrough();
 
 function required(value: string | undefined, key: string) {
   const result = value?.trim();
@@ -435,6 +448,22 @@ export function createSupabaseAvniReader(queryable: ReadonlyQueryable) {
       );
       return rows[0]?.verified === true;
     },
+    async readPilotOutboundStatus(idempotencyKey: string): Promise<SupabasePilotOutboundStatus | null> {
+      if (!pilotOutboundStatusKeySchema.safeParse(idempotencyKey).success) {
+        throw new Error("invalid_pilot_status_key");
+      }
+      const { rows } = await queryable.query(
+        "SELECT * FROM aichm_private.find_human_pilot_outbound($1::text)",
+        [idempotencyKey],
+      );
+      if (rows.length === 0) return null;
+      if (rows.length !== 1) throw new Error("ambiguous_pilot_status_result");
+      const parsed = pilotOutboundStatusRowSchema.parse(rows[0]);
+      return {
+        state: parsed.state,
+        attemptNumber: Number(parsed.attempt_number),
+      };
+    },
   };
 }
 
@@ -462,4 +491,8 @@ export async function verifySupabaseAvniConfirmation(
   expectedType: "booking_confirmation" | "booking_cancellation",
 ) {
   return createSupabaseAvniReader(getPool()).verifyConfirmation(replitLeadId, conversationId, expectedType);
+}
+
+export async function readSupabasePilotOutboundStatus(idempotencyKey: string) {
+  return createSupabaseAvniReader(getPool()).readPilotOutboundStatus(idempotencyKey);
 }
