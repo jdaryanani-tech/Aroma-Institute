@@ -110,11 +110,13 @@ export function applicationPreMigrationFailureDiagnosticFromError(
 }
 
 const APPLICATION_RUNTIME_FAILURE_CODES = new Set([
+  "APP_DATABASE_URL_REQUIRED",
   "APP_DATABASE_URL_INVALID",
   "APP_DATABASE_PLATFORM_REFERENCE_REQUIRED",
   "APP_DATABASE_PLATFORM_REFERENCE_INVALID",
   "APP_DATABASE_ENDPOINT_NOT_INTERNAL",
   "APP_DATABASE_ENDPOINT_MISMATCH",
+  "APP_DATABASE_LOGIN_NOT_DISTINCT",
   "APP_DATABASE_RUNTIME_IDENTITY_UNAVAILABLE",
   "APP_DATABASE_RUNTIME_IDENTITY_REJECTED",
   "APP_DATABASE_RUNTIME_PRIVILEGES_NOT_READY",
@@ -220,13 +222,29 @@ export function resolveApplicationRuntimeMode(
   environment: Record<string, string | undefined>,
   runtimeEnvironment = environment.NODE_ENV,
 ): ApplicationRuntimeMode {
-  // Production intentionally remains on the platform-managed DATABASE_URL.
-  // Do not activate the restricted Development connection because a
-  // Production-scoped or inherited AICHM_APP_DATABASE_URL happens to exist.
+  // Production must never fall back to the platform/migration connection.
+  // Require an explicit application login and prove it targets the same
+  // internal database endpoint before constructing the runtime pool.
   if (runtimeEnvironment === "production") {
-    const legacy = environment[PLATFORM_DATABASE_URL_ENV];
-    if (!legacy?.trim()) reject("DATABASE_URL_REQUIRED");
-    return { kind: "legacy", connectionString: legacy };
+    const explicit = environment[APP_DATABASE_URL_ENV];
+    if (!explicit?.trim()) reject("APP_DATABASE_URL_REQUIRED");
+    const app = endpointFrom(explicit, "app");
+    const platform = endpointFrom(environment[PLATFORM_DATABASE_URL_ENV], "platform");
+    if (!isPrivateDatabaseHost(app.host) || !isPrivateDatabaseHost(platform.host)) {
+      reject("APP_DATABASE_ENDPOINT_NOT_INTERNAL");
+    }
+    if (
+      app.host !== platform.host ||
+      app.port !== platform.port ||
+      app.database !== platform.database ||
+      JSON.stringify(app.queryPolicy) !== JSON.stringify(platform.queryPolicy)
+    ) reject("APP_DATABASE_ENDPOINT_MISMATCH");
+    if (app.user === platform.user) reject("APP_DATABASE_LOGIN_NOT_DISTINCT");
+    return {
+      kind: "least_privilege",
+      connectionString: explicit,
+      expectedDatabase: app.database,
+    };
   }
 
   const explicit = environment[APP_DATABASE_URL_ENV];
@@ -636,9 +654,21 @@ export async function verifyApplicationRuntimePool(
     can_createrole: boolean;
     inherits: boolean;
     bypass_rls: boolean;
+    in_recovery: boolean;
+    transaction_read_only: boolean;
     other_group_member: boolean;
     database_owner_member: boolean;
     app_group_member: boolean;
+    app_group_exists: boolean;
+    app_group_can_login: boolean | null;
+    app_group_is_superuser: boolean | null;
+    app_group_can_createdb: boolean | null;
+    app_group_can_createrole: boolean | null;
+    app_group_inherits: boolean | null;
+    app_group_bypasses_rls: boolean | null;
+    app_group_has_parent_membership: boolean;
+    app_group_member_count: number;
+    app_group_membership_admin_option: boolean;
     owner_group_member: boolean;
     migrator_group_member: boolean;
     core_privileges_ok: boolean;
@@ -655,6 +685,8 @@ export async function verifyApplicationRuntimePool(
         r.rolcreaterole AS can_createrole,
         r.rolinherit AS inherits,
         r.rolbypassrls AS bypass_rls,
+        pg_is_in_recovery() AS in_recovery,
+        current_setting('transaction_read_only')::boolean AS transaction_read_only,
         EXISTS (
           SELECT 1 FROM pg_auth_members membership
           JOIN pg_roles granted ON granted.oid=membership.roleid
@@ -666,6 +698,25 @@ export async function verifyApplicationRuntimePool(
           SELECT pg_has_role(current_user, candidate.oid, 'MEMBER')
           FROM pg_roles candidate WHERE candidate.rolname='aichm_app_runtime'
         ), false) AS app_group_member,
+        app_group.oid IS NOT NULL AS app_group_exists,
+        app_group.rolcanlogin AS app_group_can_login,
+        app_group.rolsuper AS app_group_is_superuser,
+        app_group.rolcreatedb AS app_group_can_createdb,
+        app_group.rolcreaterole AS app_group_can_createrole,
+        app_group.rolinherit AS app_group_inherits,
+        app_group.rolbypassrls AS app_group_bypasses_rls,
+        EXISTS (
+          SELECT 1 FROM pg_auth_members parent_membership
+          WHERE parent_membership.member=app_group.oid
+        ) AS app_group_has_parent_membership,
+        (SELECT count(*)::integer FROM pg_auth_members group_member
+          WHERE group_member.roleid=app_group.oid) AS app_group_member_count,
+        COALESCE(EXISTS (
+          SELECT 1 FROM pg_auth_members membership
+          WHERE membership.member=r.oid
+            AND membership.roleid=app_group.oid
+            AND membership.admin_option
+        ), false) AS app_group_membership_admin_option,
         COALESCE((
           SELECT pg_has_role(current_user, candidate.oid, 'MEMBER')
           FROM pg_roles candidate WHERE candidate.rolname='aichm_crm_owner'
@@ -734,6 +785,7 @@ export async function verifyApplicationRuntimePool(
         ), false) AS assignment_function_execute,
         has_schema_privilege(current_user,'public','CREATE') AS schema_create
       FROM pg_database d JOIN pg_roles r ON r.rolname=current_user
+      LEFT JOIN pg_roles app_group ON app_group.rolname='aichm_app_runtime'
       WHERE d.datname=current_database()
     `));
   } catch {
@@ -753,9 +805,21 @@ export async function verifyApplicationRuntimePool(
     identity.can_createrole ||
     !identity.inherits ||
     identity.bypass_rls ||
+    identity.in_recovery ||
+    identity.transaction_read_only ||
     identity.other_group_member ||
     identity.database_owner_member ||
     !identity.app_group_member ||
+    !identity.app_group_exists ||
+    identity.app_group_can_login !== false ||
+    identity.app_group_is_superuser !== false ||
+    identity.app_group_can_createdb !== false ||
+    identity.app_group_can_createrole !== false ||
+    identity.app_group_inherits !== false ||
+    identity.app_group_bypasses_rls !== false ||
+    identity.app_group_has_parent_membership ||
+    identity.app_group_member_count !== 1 ||
+    identity.app_group_membership_admin_option ||
     identity.owner_group_member ||
     identity.migrator_group_member
   ) reject("APP_DATABASE_RUNTIME_IDENTITY_REJECTED");

@@ -55,6 +55,7 @@ test("preview reports an existing leadgen subscription without posting", async (
       body: init?.body instanceof URLSearchParams ? init.body : undefined,
     });
     if (url.includes("/me?")) return jsonResponse({ id: PAGE_ID });
+    if (url.includes("/leadgen_forms")) return jsonResponse({ data: [{ id: "333333333333333", status: "ACTIVE" }] });
     return jsonResponse({ data: [{ id: APP_ID, subscribed_fields: ["feed", "leadgen"] }] });
   };
 
@@ -67,9 +68,13 @@ test("preview reports an existing leadgen subscription without posting", async (
   assert.equal(result.pageIdentityMatches, true);
   assert.equal(result.appInstalled, true);
   assert.equal(result.leadgenSubscribed, true);
+  assert.equal(result.formAccessChecked, true);
+  assert.equal(result.formAccessGranted, true);
+  assert.equal(result.hasAccessibleForm, true);
   assert.equal(result.verified, true);
   assert.equal(result.postAttempted, false);
-  assert.deepEqual(calls.map((call) => call.method), ["GET", "GET"]);
+  assert.deepEqual(calls.map((call) => call.method), ["GET", "GET", "GET"]);
+  assert.equal(calls.every((call) => call.method === "GET"), true);
 });
 
 test("guarded apply subscribes leadgen and verifies it with a follow-up GET", async () => {
@@ -80,6 +85,7 @@ test("guarded apply subscribes leadgen and verifies it with a follow-up GET", as
     const method = init?.method ?? "GET";
     calls.push({ url, method, init });
     if (url.includes("/me?")) return jsonResponse({ id: PAGE_ID });
+    if (url.includes("/leadgen_forms")) return jsonResponse({ data: [] });
     if (method === "POST") return jsonResponse({ success: true });
     subscriptionReads += 1;
     return jsonResponse({
@@ -113,6 +119,7 @@ test("adding leadgen preserves existing app subscriptions", async () => {
   const fetcher: MetaGraphFetch = async (input, init) => {
     const url = requestUrl(input);
     if (url.includes("/me?")) return jsonResponse({ id: PAGE_ID });
+    if (url.includes("/leadgen_forms")) return jsonResponse({ data: [] });
     if (init?.method === "POST") {
       postedFields = (init.body as URLSearchParams).get("subscribed_fields") ?? "";
       return jsonResponse({ success: true });

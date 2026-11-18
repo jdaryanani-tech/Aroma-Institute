@@ -26,13 +26,16 @@ import {
 
 export async function registerRoutes(
   httpServer: Server,
-  app: Express
+  app: Express,
+  options: { runtimeDatabaseVerified?: boolean } = {},
 ): Promise<Server> {
   configureLmsSessions(app);
   registerFirstOwnerRoutes(app);
   registerAdmissionsRoutes(app);
   registerFollowUpStatusRoute(app);
-  registerAvniIntegrationRoutes(app);
+  registerAvniIntegrationRoutes(app, {
+    runtimeDatabaseVerified: options.runtimeDatabaseVerified === true,
+  });
   registerAvniCalendarRoutes(app);
   registerCrmRoutes(app);
   registerCalendarRoutes(app);

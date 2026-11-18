@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Express } from "express";
+import type { Express, RequestHandler } from "express";
 import { pool } from "../db";
 import { requireLmsRole, requireLmsUser } from "../lms/auth";
 import { sameOriginCapture } from "../admissions/routes";
@@ -18,6 +18,41 @@ import type { MetaFetchedLead } from "./webhook-handler";
 import { createMetaLeadgenHandler } from "./webhook-handler";
 import { createMetaGraphHttpError } from "./graph-error";
 import { META_LEADGEN_WEBHOOK_PATH } from "./webhook-diagnostics";
+import { runMetaPageSubscription, type MetaGraphFetch } from "./page-subscription";
+
+export const META_LEAD_ADS_DIAGNOSTICS_PATH = "/api/admin/meta/lead-ads-diagnostics";
+
+export function registerMetaLeadAdsDiagnosticsRoute(
+  app: Express,
+  options: {
+    authenticate?: RequestHandler;
+    authorizeAdmin?: RequestHandler;
+    environment?: () => NodeJS.ProcessEnv;
+    fetcher?: MetaGraphFetch;
+  } = {},
+) {
+  const authenticate = options.authenticate ?? requireLmsUser;
+  const authorizeAdmin = options.authorizeAdmin ?? requireLmsRole("admin");
+  app.get(META_LEAD_ADS_DIAGNOSTICS_PATH, authenticate, authorizeAdmin, async (_req, res) => {
+    res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    const environment = options.environment?.() ?? process.env;
+    const diagnostic = await runMetaPageSubscription({
+      META_PAGE_ID: environment.META_PAGE_ID,
+      META_APP_ID: environment.META_APP_ID,
+      META_PAGE_ACCESS_TOKEN: environment.META_PAGE_ACCESS_TOKEN,
+      META_GRAPH_API_VERSION: environment.META_GRAPH_API_VERSION,
+    }, {
+      apply: false,
+      confirmationMatches: false,
+      fetcher: options.fetcher,
+    });
+    return void res.json({
+      ...diagnostic,
+      requestApplied: false,
+      diagnosticOnly: true,
+    });
+  });
+}
 
 declare module "http" {
   interface IncomingMessage {
@@ -347,4 +382,5 @@ export function registerMetaRoutes(app: Express) {
       });
     }
   });
+  registerMetaLeadAdsDiagnosticsRoute(app);
 }

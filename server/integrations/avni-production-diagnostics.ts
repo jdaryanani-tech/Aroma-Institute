@@ -96,6 +96,7 @@ export function registerAvniProductionDiagnosticsRoute(
     sessionSecret: string | undefined;
     runtimeEnvironment: string | undefined;
     connectionMode: string | undefined;
+    runtimeDatabaseVerified: boolean;
     followUpReadSecretConfigured: boolean;
     followUpReadSecretDistinct: boolean;
     authenticate: RequestHandler;
@@ -142,6 +143,7 @@ export function registerAvniProductionDiagnosticsRoute(
           database: {
             runtimeEnvironment,
             connectionMode,
+            leastPrivilegeVerified: dependencies.runtimeDatabaseVerified,
             fingerprintAlgorithm: "HMAC-SHA-256",
             fingerprint,
           },

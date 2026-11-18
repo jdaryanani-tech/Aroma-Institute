@@ -9,16 +9,10 @@ import { ADMISSIONS_MANUAL_CRM_STAGES } from "@shared/crm";
 import { CrmHttpError, fetchCrmConversationPage, useCrmAssignment, useCrmDetail, useCrmLeads, useCrmMetaCaptureStatus, useCrmRetry, useCrmUpdate } from "@/crm/api";
 import { CRM_STAGE_LABELS, counsellingFieldLabels, formatCounsellingAnswer, formatDate, toLocalInput } from "@/crm/format";
 import { crmUiPermissions } from "@/crm/permissions";
-import MetaSetupStatus from "@/crm/MetaSetupStatus";
 import MetaCaptureStatusPanel from "@/crm/MetaCaptureStatusPanel";
-import AvniProductionDiagnostics from "@/crm/AvniProductionDiagnostics";
+import IntegrationReadinessPanel from "@/crm/IntegrationReadinessPanel";
 
 type Filters = { q: string; stage: string; program: string; source: string; dateFrom: string; dateTo: string; followUp: string; assignee: string; sort: string; page: number; pageSize: number };
-type AvniHealth = {
-  schema: Record<string,boolean> & {ready:boolean};
-  webhook: {urlPresent:boolean;urlValid:boolean;secretPresent:boolean;dispatchRequested:boolean;dispatcherActive:boolean};
-  outbox: Record<string,number> | null;
-};
 const defaultFilters: Filters = { q: "", stage: "", program: "", source: "", dateFrom: "", dateTo: "", followUp: "", assignee: "", sort: "recent", page: 1, pageSize: 12 };
 const stages = Object.keys(CRM_STAGES) as CrmStage[];
 const stageHelp = "Rates describe funnel records; they do not establish that one step caused another.";
@@ -70,17 +64,6 @@ export default function Admin() {
     isAdmin && !accessCheckBlocked,
     crmScope,
   );
-  const avniHealthQuery=useQuery<AvniHealth>({
-    queryKey:["admin-crm","avni-health"],
-    enabled:isAdmin&&!accessCheckBlocked,
-    retry:false,
-    staleTime:15_000,
-    queryFn:async()=>{
-      const response=await fetch("/api/admin/crm/avni-health",{credentials:"same-origin",cache:"no-store"});
-      if(!response.ok) throw new Error("Integration readiness could not be loaded.");
-      return response.json();
-    },
-  });
   const sourceAnalyticsQuery = useQuery<CrmSourceAnalytics>({
     queryKey: ["admin-crm", "source-analytics"],
     enabled: isAdmin && !accessCheckBlocked,
@@ -213,28 +196,14 @@ export default function Admin() {
     <main className="crm-app" data-testid="page-admin-dashboard">
       <header className="crm-topbar"><div className="crm-wrap crm-topbar-inner">
         <div className="crm-brand"><span className="crm-brand-mark" aria-hidden="true">A.</span><div className="crm-brand-copy"><strong>AICHM Admissions</strong><span>Prospect desk · Aroma Institute</span></div></div>
-        <div className="crm-top-actions">{isAdmin && <a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a>}<span className="crm-connection-tag">{caps?.chatHistory ? <MessageCircle size={13} /> : <MessageCircleOff size={13} />}{caps?.chatHistory ? " WhatsApp history configured" : " Supabase reader setup needed"}</span>
+        <div className="crm-top-actions">{isAdmin && <a className="crm-button crm-button-quiet" href="/admin/calendar"><CalendarClock size={15} /> Calendar</a>}<span className="crm-connection-tag">{caps?.chatHistory ? <MessageCircle size={13} /> : <MessageCircleOff size={13} />}{caps?.chatHistory ? " Conversation reader config present" : " Supabase reader setup needed"}</span>
           <button className="crm-button crm-button-quiet" type="button" onClick={signOut} disabled={logout.isPending} data-testid="admin-button-logout"><LogOut size={16} />{logout.isPending ? "Signing out" : "Sign out"}</button>
         </div>
       </div></header>
       <div className="crm-wrap crm-main">
         <section className="crm-heading-row"><div><p className="crm-eyebrow">{isAdmin ? "Admissions workspace" : "Assigned admissions workspace"}</p><h1 className="crm-heading">People, not just enquiries.</h1><p className="crm-subheading">{isAdmin ? "Keep the next conversation clear, grounded, and easy to pick up. Counts cover all records, independent of filters." : "Work only with leads assigned to your account. Counts and search results are limited to those assignments."}</p></div>{isAdmin && <a className="crm-connection-tag" href="/admin/calendar"><CalendarClock size={13} /> Open internal calendar</a>}</section>
         {logout.isError && <div className="crm-error" role="alert">Sign out did not complete. Your administrator session may still be active; try again before leaving this device.</div>}
-        {isAdmin && <section className="crm-counts" aria-labelledby="avni-health-title" data-testid="avni-integration-health">
-          <div className="crm-count" style={{gridColumn:"1 / -1"}}>
-            <span className="crm-count-label">AVNI integration</span>
-            <strong id="avni-health-title" className="crm-count-value" style={{fontSize:"1.25rem"}}>
-              {avniHealthQuery.isLoading?"Checking readiness":avniHealthQuery.isError?"Status unavailable":avniHealthQuery.data?.schema.ready&&avniHealthQuery.data?.webhook.dispatcherActive?"Ready to dispatch":"Needs setup"}
-            </strong>
-            {avniHealthQuery.data&&<span className="crm-count-note">
-              Schema {avniHealthQuery.data.schema.ready?"ready":"needs migration"} · n8n URL {avniHealthQuery.data.webhook.urlValid?"valid":"missing or invalid"} · shared secret {avniHealthQuery.data.webhook.secretPresent?"present":"missing"} · dispatcher {avniHealthQuery.data.webhook.dispatcherActive?"enabled":"disabled"}
-              {avniHealthQuery.data.outbox&&` · Queue: ${avniHealthQuery.data.outbox.pending??0} pending, ${avniHealthQuery.data.outbox.failed??0} failed, ${avniHealthQuery.data.outbox.acknowledged??0} acknowledged`}
-            </span>}
-            {avniHealthQuery.isError&&<span className="crm-count-note">Refresh the dashboard or check the production integration settings. No secret values are displayed here.</span>}
-          </div>
-        </section>}
-        {isAdmin && <AvniProductionDiagnostics />}
-        {isAdmin && <MetaSetupStatus />}
+        {isAdmin && <IntegrationReadinessPanel />}
         {leadsQuery.isError && <div className="crm-error" role="alert"><strong>Admissions records did not load.</strong> {errorText(leadsQuery.error, "Check your connection and administrator access.")}<button className="crm-text-button" type="button" onClick={() => void leadsQuery.refetch()}>Try again</button></div>}
         {overview && <section className="crm-counts" aria-label={isAdmin ? "Global admissions overview" : "Assigned leads overview"}>
           <div className="crm-count"><span className="crm-count-label">Identified people</span><strong className="crm-count-value">{overview.identifiedPeople.toLocaleString()}</strong><span className="crm-count-note">{overview.unresolvedRecords.toLocaleString()} ambiguous or unmatchable records excluded</span></div>

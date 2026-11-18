@@ -70,6 +70,7 @@ async function requestDiagnostic(options: AppOptions, body: unknown = {}) {
     sessionSecret: SESSION_SECRET,
     runtimeEnvironment: "production",
     connectionMode: "legacy",
+    runtimeDatabaseVerified: false,
     followUpReadSecretConfigured: options.secretConfigured === true,
     followUpReadSecretDistinct: options.credentialDistinct ?? options.secretConfigured === true,
     authenticate,
@@ -131,8 +132,10 @@ test("AVNI diagnostics return only database fingerprint and read-scope readiness
     "connectionMode",
     "fingerprint",
     "fingerprintAlgorithm",
+    "leastPrivilegeVerified",
     "runtimeEnvironment",
   ]);
+  assert.equal(response.body.database.leastPrivilegeVerified, false);
   const serialized = JSON.stringify(response.body);
   for (const marker of [...DATABASE_MARKERS, SESSION_SECRET, "phone", "lms_users", "leadId"]) {
     assert.equal(serialized.includes(marker), false);

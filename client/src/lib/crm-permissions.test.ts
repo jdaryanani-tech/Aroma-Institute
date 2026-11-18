@@ -17,7 +17,7 @@ test("CRM UI gives administrators full controls and admissions scoped controls o
   assert.equal(admissions.canSeeGlobalDiagnostics, false);
   assert.equal(admissions.canRetryDelivery, false);
   assert.equal(admissions.canSeeAssigneeControls, false);
-  assert.deepEqual(admissions.manualStages, ["contacted", "qualified", "vsl_shared", "counselling_pending", "nurture", "lost"]);
+  assert.deepEqual(admissions.manualStages, ["contacted", "qualified", "vsl_shared", "counselling_pending", "counselling_attended", "nurture", "lost"]);
 });
 
 test("CRM UI denies every non-CRM staff/student role and treats administrators as privileged", () => {

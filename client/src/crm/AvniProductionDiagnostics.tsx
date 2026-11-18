@@ -5,6 +5,7 @@ type AvniDiagnosticsResult = {
   database: {
     runtimeEnvironment: "production" | "development" | "test" | "other";
     connectionMode: "legacy" | "least_privilege" | "unknown";
+    leastPrivilegeVerified: boolean;
     fingerprintAlgorithm: "HMAC-SHA-256";
     fingerprint: string;
   };
@@ -80,6 +81,7 @@ export default function AvniProductionDiagnostics() {
             <dl>
               <div><dt>Runtime</dt><dd>{result.database.runtimeEnvironment}</dd></div>
               <div><dt>Connection mode</dt><dd>{result.database.connectionMode}</dd></div>
+              <div><dt>Least-privilege role verified</dt><dd>{result.database.leastPrivilegeVerified ? "Yes" : "No"}</dd></div>
               <div><dt>Identity fingerprint</dt><dd className="avni-diagnostics-fingerprint">{result.database.fingerprint}</dd></div>
             </dl>
           </section>

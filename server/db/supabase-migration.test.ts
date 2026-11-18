@@ -6,6 +6,7 @@ import { checkServerIdentity } from "node:tls";
 import test from "node:test";
 import type { PoolConfig } from "pg";
 import { buildSupabaseMigrationPoolConfig } from "./supabase-migration";
+import { APP_DATABASE_URL_ENV, buildApplicationPoolConfig, resolveApplicationRuntimeMode } from "./application-runtime-connection";
 
 const TEST_CA = `-----BEGIN CERTIFICATE-----
 MIIDJTCCAg2gAwIBAgIUFfudmdrK9wmI/y55NQlEzt4nbN4wDQYJKoZIhvcNAQEL
@@ -144,9 +145,18 @@ test("the pg config keeps strict CA and hostname verification while stripping on
   assert.equal(actualPgParameters.ssl.rejectUnauthorized, true);
 });
 
-test("the existing app runtime still creates its default pool from DATABASE_URL only", () => {
+test("Production app runtime selects the explicit least-privilege URL rather than DATABASE_URL", () => {
   const sourcePath = fileURLToPath(new URL("../db.ts", import.meta.url));
   const source = readFileSync(sourcePath, "utf8");
-  assert.match(source, /connectionString:\s*process\.env\.DATABASE_URL/);
+  assert.match(source, /resolveApplicationRuntimeMode/);
+  assert.match(source, /buildApplicationPoolConfig\(applicationRuntimeMode\)/);
+  assert.doesNotMatch(source, /connectionString:\s*process\.env\.DATABASE_URL/);
   assert.doesNotMatch(source, /SUPABASE_DATABASE_URL|SUPABASE_DB_SSL_CA/);
+  const mode = resolveApplicationRuntimeMode({
+    NODE_ENV: "production",
+    DATABASE_URL: "postgresql://platform:secret@db.replit.internal/heliumdb?sslmode=disable",
+    [APP_DATABASE_URL_ENV]: "postgresql://app:secret@db.replit.internal/heliumdb?sslmode=disable",
+  });
+  assert.equal(mode.kind, "least_privilege");
+  assert.equal(buildApplicationPoolConfig(mode).user, "app");
 });

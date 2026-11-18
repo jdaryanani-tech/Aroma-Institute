@@ -59,6 +59,9 @@ export type MetaPageSubscriptionResult = {
   subscriptionChecked: boolean;
   appInstalled: boolean;
   leadgenSubscribed: boolean;
+  formAccessChecked: boolean;
+  formAccessGranted: boolean;
+  hasAccessibleForm: boolean;
   postAttempted: boolean;
   postSucceeded: boolean;
   verificationChecked: boolean;
@@ -205,6 +208,9 @@ function readConfig(environment: SubscriptionEnvironment): {
       subscriptionChecked: false,
       appInstalled: false,
       leadgenSubscribed: false,
+      formAccessChecked: false,
+      formAccessGranted: false,
+      hasAccessibleForm: false,
       postAttempted: false,
       postSucceeded: false,
       verificationChecked: false,
@@ -305,6 +311,29 @@ async function readExistingSubscription(
   return { appInstalled: true, fields: uniqueFields };
 }
 
+async function checkLeadgenFormAccess(
+  config: Config,
+  fetcher: MetaGraphFetch,
+): Promise<boolean> {
+  const url = graphUrl(config.graphVersion, `${config.pageId}/leadgen_forms`);
+  url.searchParams.set("fields", "id,status");
+  url.searchParams.set("limit", "1");
+  const body = await graphGet(url, config.accessToken, fetcher);
+  if (!body || typeof body !== "object" || !Array.isArray((body as { data?: unknown }).data)) {
+    throwSafe("invalid_response");
+  }
+  const forms = (body as { data: unknown[] }).data;
+  if (forms.length > 1 || forms.some((form) =>
+    !form || typeof form !== "object" ||
+    typeof (form as { id?: unknown }).id !== "string" ||
+    !/^[0-9]{1,40}$/.test((form as { id: string }).id) ||
+    typeof (form as { status?: unknown }).status !== "string"
+  )) throwSafe("invalid_response");
+  // Expose only whether at least one form is accessible; never return form
+  // IDs, names, lead counts, or question answers.
+  return forms.length === 1;
+}
+
 async function postSubscription(
   config: Config,
   fields: string[],
@@ -389,6 +418,13 @@ export async function runMetaPageSubscription(
       appInstalled: existing.appInstalled,
       leadgenSubscribed,
       verified: leadgenSubscribed,
+    };
+    result = { ...result, formAccessChecked: true };
+    const hasAccessibleForm = await checkLeadgenFormAccess(config, fetcher);
+    result = {
+      ...result,
+      formAccessGranted: true,
+      hasAccessibleForm,
     };
     if (leadgenSubscribed || !options.apply) return result;
 

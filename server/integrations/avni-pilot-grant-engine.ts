@@ -12,8 +12,9 @@ import type { PilotDispatchBinding, PilotGrantEngine } from "./avni-single-recip
 
 /**
  * Binds the pilot orchestrator to the existing Replit one-use grant ledger.
- * This factory is intentionally not wired into the application until the
- * approved Supabase writer and Evolution contract are provided.
+ * The application may construct this adapter for readiness reporting, but
+ * the dispatcher remains code-level disabled until the Supabase writer,
+ * migration identity, key ring, and provider contract are approved.
  */
 export function createDatabasePilotGrantEngine(): PilotGrantEngine {
   return {

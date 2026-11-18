@@ -12,14 +12,27 @@ import {
   readLeadFollowUpStatus,
   recordWhatsAppOptOut,
 } from "../admissions/follow-up";
+import {
+  VSL_DISPATCH_ENABLED_ENV,
+  VSL_WEBHOOK_URL_ENV,
+  isTrustedVslWebhookUrl,
+  isVslDispatchEnabled,
+} from "../admissions/outbox-dispatcher";
 import { crmModelSql, inspectCrmSchema, iso } from "../crm/model";
 import { requireLmsRole, requireLmsUser } from "../lms/auth";
 import {
   isSupabaseAvniReadConfigured,
   readSupabasePilotOutboundStatus,
+  runSupabaseAvniReadDiagnostics,
 } from "../db/supabase-avni-readonly";
 import { createAvniDiagnosticsHandler } from "./avni-diagnostics";
 import { registerAvniProductionDiagnosticsRoute } from "./avni-production-diagnostics";
+import { registerAdminIntegrationReadinessRoute } from "./admin-integration-readiness";
+import { createDatabasePilotGrantEngine } from "./avni-pilot-grant-engine";
+import {
+  AVNI_PROVIDER_REFERENCE_HMAC_KEYRING_ENV,
+  readAvniHmacKeyringConfig,
+} from "./avni-provider-reference-hmac-config";
 import { registerAvniCrmFollowUpRoutes } from "../crm/avni-follow-up-routes";
 import {
   AVNI_PILOT_DISPATCH_GATE_ENV,
@@ -44,6 +57,7 @@ import {
 import {
   N8N_INTEGRATION_SECRET_ENV, N8N_INTEGRATION_SECRET_HEADER, verifyN8nIntegrationSecret,
 } from "./n8n-auth";
+import { getMetaReadiness } from "../meta/config";
 
 export const N8N_VSL_SECRET_ENV = N8N_INTEGRATION_SECRET_ENV;
 export const N8N_VSL_SECRET_HEADER = N8N_INTEGRATION_SECRET_HEADER;
@@ -94,9 +108,14 @@ export const avniIntegrationAuth: RequestHandler = async (req, res, next) => {
   }
 };
 
-export function registerAvniIntegrationRoutes(app: Express) {
+export function registerAvniIntegrationRoutes(
+  app: Express,
+  options: { runtimeDatabaseVerified?: boolean } = {},
+) {
+  const runtimeDatabaseVerified = options.runtimeDatabaseVerified === true;
 
   const schemaReady = () => admissionsIntegrationSchemaReady(db);
+  const hmacKeyring = readAvniHmacKeyringConfig();
   const evolutionPilotTransport = createEvolutionPilotTransport(
     createEvolutionPilotHttpClient({
       apiKey: process.env[EVOLUTION_API_KEY_ENV],
@@ -104,14 +123,14 @@ export function registerAvniIntegrationRoutes(app: Express) {
     }),
   );
   // Keep a second, code-level off switch in addition to the environment gate.
-  // No Replit HMAC provider or least-privilege Supabase writer pool is
-  // configured, so this dispatcher must remain unable to begin a send.
+  // The runtime Supabase login/migrations are not approved or verified; no
+  // writer is attached, and the one-recipient route cannot begin a send.
   const pilotDispatch = createAvniSingleRecipientPilotDispatcher({
     pool,
     supabaseWriter: null,
-    hmacKeyProvider: null,
+    hmacKeyProvider: hmacKeyring.provider,
     transport: evolutionPilotTransport,
-    grantEngine: null,
+    grantEngine: createDatabasePilotGrantEngine(),
     enabled: false,
     approvedRecipientE164: process.env[AVNI_PILOT_RECIPIENT_ENV] ?? null,
   });
@@ -138,6 +157,7 @@ export function registerAvniIntegrationRoutes(app: Express) {
     sessionSecret: process.env.SESSION_SECRET,
     runtimeEnvironment: process.env.NODE_ENV,
     connectionMode: applicationRuntimeMode.kind,
+    runtimeDatabaseVerified,
     followUpReadSecretConfigured: Boolean(process.env.N8N_AVNI_FOLLOWUP_READ_SECRET?.trim()),
     followUpReadSecretDistinct: Boolean(
       process.env.N8N_AVNI_FOLLOWUP_READ_SECRET?.trim()
@@ -169,6 +189,7 @@ export function registerAvniIntegrationRoutes(app: Express) {
   };
 
   app.get("/api/admin/integrations/avni/status", requireLmsUser, requireLmsRole("admin"), async (_req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
     const names = [
       "N8N_VSL_REGISTRATION_WEBHOOK_SECRET",
       "N8N_VSL_REGISTRATION_WEBHOOK_URL",
@@ -178,6 +199,7 @@ export function registerAvniIntegrationRoutes(app: Express) {
       "SUPABASE_AVNI_READONLY_DATABASE_URL",
       "SUPABASE_AVNI_RUNTIME_DATABASE_URL",
       "SUPABASE_DB_SSL_CA",
+      AVNI_PROVIDER_REFERENCE_HMAC_KEYRING_ENV,
       EVOLUTION_API_KEY_ENV,
       EVOLUTION_API_INSTANCE_ENV,
       AVNI_PILOT_DISPATCH_GATE_ENV,
@@ -195,6 +217,10 @@ export function registerAvniIntegrationRoutes(app: Express) {
     } catch { /* report unavailable, never expose driver details */ }
     return void res.json({
       sourceOfTruth: "replit_postgresql",
+      applicationDatabase: {
+        connectionMode: applicationRuntimeMode.kind,
+        leastPrivilegeVerified: runtimeDatabaseVerified,
+      },
       configured,
       missing: names.filter((name) => !configured[name]),
       avniSchemaReady: schemaReady,
@@ -213,13 +239,95 @@ export function registerAvniIntegrationRoutes(app: Express) {
         statusReaderWired: true,
         statusReaderRequiresV3Migration: true,
         providerClientWired: evolutionPilotTransport.configured,
-        hmacKeyProviderWired: false,
+        hmacKeyProviderWired: hmacKeyring.provider !== null,
+        hmacKeyringState: hmacKeyring.state,
         supabaseWriterPoolWired: false,
+        grantEngineWired: true,
         runtimeMigrationRequired: true,
         productionSendingAvailable: false,
-        safeCode: "writer_hmac_and_live_provider_contract_prerequisites_missing",
+        safeCode: "supabase_runtime_login_and_migrations_unverified_dispatch_disabled",
       },
     });
+  });
+
+  app.get("/api/admin/integrations/avni/supabase-readiness", requireLmsUser, requireLmsRole("admin"), async (_req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const checks = await runSupabaseAvniReadDiagnostics();
+    return void res.json({
+      checkedAt: new Date().toISOString(),
+      checks,
+      safeCode: Object.values(checks).every(Boolean)
+        ? "supabase_reader_preflight_passed"
+        : "supabase_reader_preflight_incomplete",
+    });
+  });
+
+  registerAdminIntegrationReadinessRoute(app, {
+    authenticate: requireLmsUser,
+    authorizeAdmin: requireLmsRole("admin"),
+    load: async () => {
+      const meta = getMetaReadiness();
+      const crm = await inspectCrmSchema(pool);
+      const avniSchemaReady = await admissionsIntegrationSchemaReady(db);
+      const registrationUrl = process.env[VSL_WEBHOOK_URL_ENV] ?? "";
+      const crmReady = crm.crmPersistence && crm.identityTracking && crm.canonicalAssignments;
+      return {
+        checkedAt: new Date().toISOString(),
+        database: {
+          connectionMode: applicationRuntimeMode.kind,
+          leastPrivilegeVerified: runtimeDatabaseVerified,
+          safeCode: applicationRuntimeMode.kind === "least_privilege"
+            ? "runtime_role_verified_at_startup"
+            : "least_privilege_application_url_required",
+        },
+        crm: {
+          persistenceReady: crm.crmPersistence,
+          identityTrackingReady: crm.identityTracking,
+          canonicalAssignmentsReady: crm.canonicalAssignments,
+          safeCode: crmReady ? "crm_schema_ready" : "crm_schema_or_assignment_migration_required",
+        },
+        avni: {
+          operationalSchemaReady: avniSchemaReady,
+          registrationWebhook: {
+            urlPresent: Boolean(registrationUrl.trim()),
+            urlValid: Boolean(registrationUrl.trim()) && isTrustedVslWebhookUrl(registrationUrl),
+            secretPresent: Boolean(process.env[N8N_INTEGRATION_SECRET_ENV]?.trim()),
+            dispatchRequested: process.env[VSL_DISPATCH_ENABLED_ENV] === "true",
+            dispatcherActive: isVslDispatchEnabled(),
+          },
+          conversationHistory: {
+            readerConfigurationValid: isSupabaseAvniReadConfigured(),
+            liveSchemaVerified: false,
+            writerAvailable: false,
+            safeCode: "supabase_runtime_login_and_migration_identity_unverified",
+          },
+          followUpRead: {
+            dedicatedSecretPresent: Boolean(process.env[AVNI_FOLLOWUP_READ_SECRET_ENV]?.trim()),
+            candidateEndpointReadOnly: true,
+          },
+          pilotDispatch: {
+            hardDisabled: true,
+            hmacKeyringState: hmacKeyring.state,
+            runtimeWriterConfigured: false,
+            grantEngineConfigured: true,
+            providerTransportConfigured: evolutionPilotTransport.configured,
+            safeCode: "dispatch_disabled_until_schema_role_and_provider_contract_are_verified",
+          },
+        },
+        meta: {
+          pixelConfigured: meta.pixel.configured,
+          leadAdsConfigured: meta.leadAds.configured,
+          leadAdsMissingConfigurationNames: meta.leadAds.missing,
+          graphApiVersionFormatValid: /^v\d+\.\d+$/.test(process.env.META_GRAPH_API_VERSION?.trim() ?? ""),
+          pageIdentity: "not_checked",
+          pageSubscription: "not_checked",
+          formAccess: "not_checked",
+          diagnosticPath: "/api/admin/meta/lead-ads-diagnostics",
+          capiConfigured: meta.capi.configured,
+          capiEnabled: meta.capi.enabled,
+        },
+      };
+    },
   });
 
   app.get(

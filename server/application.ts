@@ -63,11 +63,19 @@ export async function startApplication(): Promise<void> {
       pool,
       applicationRuntimeMode,
     );
+    if (process.env.NODE_ENV === "production"
+      && databaseReadiness.status !== "least_privilege_verified") {
+      const error = new Error("APP_DATABASE_RUNTIME_PRIVILEGES_NOT_READY") as Error & { code: string };
+      error.code = "APP_DATABASE_RUNTIME_PRIVILEGES_NOT_READY";
+      throw error;
+    }
     if (databaseReadiness.status === "least_privilege_not_enabled") {
-      log("Least-privilege application database role is not enabled; using the existing DATABASE_URL connection.");
+      log("Development runtime is using the legacy database mode; Production startup requires the least-privilege application role.");
     }
 
-    await registerRoutes(httpServer, app);
+    await registerRoutes(httpServer, app, {
+      runtimeDatabaseVerified: databaseReadiness.status === "least_privilege_verified",
+    });
 
     app.use((err: any, req: Request, res: Response, next: NextFunction) => {
       const status = err.status || err.statusCode || 500;
