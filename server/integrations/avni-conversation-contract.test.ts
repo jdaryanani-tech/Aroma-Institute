@@ -3,13 +3,16 @@ import test from "node:test";
 import {
   advanceDeliveryState,
   classifyConversationEvent,
+  conversationEventFingerprint,
   conversationEventIdempotencyKey,
+  conversationMessageFingerprint,
   conversationMessageIdempotencyKey,
   evaluateAiQueueItem,
   evaluateAiReplyEligibility,
   transitionConversationControl,
   validateConversationControlState,
   validateAvniConversationEvent,
+  providerReferenceTokenSchema,
   type AvniConversationEvent,
   type ConversationControlState,
 } from "./avni-conversation-contract";
@@ -135,6 +138,12 @@ test("event validation rejects unknown versions, extra provider payload, and uns
     text: undefined,
     mediaRef: "https://provider.example/private-media",
   }).success, false);
+  assert.equal(validateAvniConversationEvent({
+    ...inboundFixture,
+    messageType: "image",
+    text: undefined,
+    mediaRef: "provider-media-id-must-not-be-persisted",
+  }).success, false);
   assert.equal(validateConversationControlState({
     version: -1,
     mode: "ai",
@@ -152,19 +161,37 @@ test("event validation rejects unknown versions, extra provider payload, and uns
   }).success, false);
 });
 
-test("event and message idempotency keys are stable, scoped, and contain no source references", () => {
-  const first = parseFixture();
-  const retry = parseFixture({ ...inboundFixture });
-  const sameMessageNewEvent = parseFixture({ ...inboundFixture, providerEventRef: "event-retry-wrapper" });
-
-  assert.equal(conversationEventIdempotencyKey(first), conversationEventIdempotencyKey(retry));
-  assert.notEqual(conversationEventIdempotencyKey(first), conversationEventIdempotencyKey(sameMessageNewEvent));
-  assert.equal(conversationMessageIdempotencyKey(first), conversationMessageIdempotencyKey(sameMessageNewEvent));
-  assert.notEqual(
-    conversationMessageIdempotencyKey(first),
-    conversationMessageIdempotencyKey(parseFixture({ ...inboundFixture, provider: "other-provider" })),
+test("keyed-token validation rejects raw and unkeyed provider-reference digests", () => {
+  assert.equal(providerReferenceTokenSchema.safeParse("event-001").success, false);
+  assert.equal(providerReferenceTokenSchema.safeParse("a".repeat(64)).success, false);
+  assert.equal(
+    providerReferenceTokenSchema.safeParse(`hmac-sha256:v1:${"a".repeat(64)}`).success,
+    true,
   );
-  assert.doesNotMatch(conversationEventIdempotencyKey(first), /event-001|whatsapp/);
+});
+
+test("idempotency keys consume keyed tokens and content fingerprints exclude provider references", () => {
+  // Opaque format fixtures only. No HMAC key or production adapter exists in this phase.
+  const eventToken = `hmac-sha256:v1:${"a".repeat(64)}`;
+  const messageToken = `hmac-sha256:v1:${"b".repeat(64)}`;
+  const eventRetryToken = `hmac-sha256:v1:${"c".repeat(64)}`;
+  assert.equal(conversationEventIdempotencyKey(eventToken), `event:v1:${"a".repeat(64)}`);
+  assert.equal(conversationMessageIdempotencyKey(messageToken), `message:v1:${"b".repeat(64)}`);
+  assert.notEqual(conversationEventIdempotencyKey(eventToken), conversationEventIdempotencyKey(eventRetryToken));
+  assert.throws(
+    () => conversationEventIdempotencyKey("a".repeat(64) as `hmac-sha256:v1:${string}`),
+    /INVALID_PROVIDER_REFERENCE_TOKEN/,
+  );
+
+  const first = parseFixture();
+  const changedRefs = parseFixture({
+    ...inboundFixture,
+    providerEventRef: "different-event",
+    providerMessageRef: "different-message",
+    threadRef: "different-thread",
+  });
+  assert.equal(conversationEventFingerprint(first), conversationEventFingerprint(changedRefs));
+  assert.equal(conversationMessageFingerprint(first), conversationMessageFingerprint(changedRefs));
 });
 
 test("unknown and ambiguous thread mappings fail closed before AI eligibility", () => {

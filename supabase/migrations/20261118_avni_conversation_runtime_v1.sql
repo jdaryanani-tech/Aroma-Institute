@@ -7,6 +7,10 @@ BEGIN;
 
 DO $role$
 BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'aichm_conversation_owner') THEN
+    CREATE ROLE aichm_conversation_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
+      NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'aichm_conversation_runtime') THEN
     CREATE ROLE aichm_conversation_runtime NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
       NOCREATEROLE NOBYPASSRLS NOREPLICATION;
@@ -14,6 +18,8 @@ BEGIN
 END
 $role$;
 
+ALTER ROLE aichm_conversation_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
+  NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 ALTER ROLE aichm_conversation_runtime NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
   NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 DO $role_membership$
@@ -22,20 +28,33 @@ BEGIN
     SELECT 1 FROM pg_catalog.pg_auth_members m
     JOIN pg_catalog.pg_roles r ON r.oid=m.roleid
     JOIN pg_catalog.pg_roles u ON u.oid=m.member
-    WHERE r.rolname='aichm_conversation_runtime'
-       OR u.rolname='aichm_conversation_runtime'
+    WHERE r.rolname IN ('aichm_conversation_owner','aichm_conversation_runtime')
+       OR u.rolname IN ('aichm_conversation_owner','aichm_conversation_runtime')
   ) THEN
-    RAISE EXCEPTION 'AVNI_RUNTIME_ROLE_MEMBERSHIP_PREEXISTS';
+    RAISE EXCEPTION 'AVNI_CONVERSATION_ROLE_MEMBERSHIP_PREEXISTS';
   END IF;
 END
 $role_membership$;
 
+DO $role_attributes$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles
+    WHERE rolname IN ('aichm_conversation_owner','aichm_conversation_runtime')
+      AND (rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls OR rolreplication)
+  ) THEN
+    RAISE EXCEPTION 'AVNI_CONVERSATION_ROLE_ATTRIBUTES_UNSAFE';
+  END IF;
+END
+$role_attributes$;
+
+GRANT CREATE,USAGE ON SCHEMA aichm_private TO aichm_conversation_owner;
 GRANT USAGE ON SCHEMA aichm_private TO aichm_conversation_runtime;
 
 CREATE TABLE aichm_private.conversation_threads (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   provider text NOT NULL,
-  provider_thread_hash text NOT NULL,
+  provider_thread_key text NOT NULL,
   supabase_lead_id uuid REFERENCES public.leads(id) ON DELETE RESTRICT,
   mapping_status text NOT NULL DEFAULT 'unmapped',
   mode text NOT NULL DEFAULT 'human',
@@ -46,7 +65,7 @@ CREATE TABLE aichm_private.conversation_threads (
   CONSTRAINT avni_conversation_threads_provider_ck
     CHECK (provider ~ '^[a-z][a-z0-9_-]{0,39}$'),
   CONSTRAINT avni_conversation_threads_thread_hash_ck
-    CHECK (provider_thread_hash ~ '^[0-9a-f]{64}$'),
+    CHECK (provider_thread_key ~ '^hmac-sha256:v1:[0-9a-f]{64}$'),
   CONSTRAINT avni_conversation_threads_mapping_ck
     CHECK (
       mapping_status IN ('unmapped','mapped','ambiguous','held')
@@ -55,7 +74,7 @@ CREATE TABLE aichm_private.conversation_threads (
   CONSTRAINT avni_conversation_threads_mode_ck CHECK (mode IN ('ai','human')),
   CONSTRAINT avni_conversation_threads_lifecycle_ck CHECK (lifecycle IN ('open','closed')),
   CONSTRAINT avni_conversation_threads_version_ck CHECK (control_version >= 0),
-  CONSTRAINT avni_conversation_threads_provider_thread_uq UNIQUE (provider,provider_thread_hash)
+  CONSTRAINT avni_conversation_threads_provider_thread_uq UNIQUE (provider,provider_thread_key)
 );
 
 CREATE UNIQUE INDEX avni_conversation_threads_mapped_lead_uq
@@ -69,7 +88,7 @@ CREATE TABLE aichm_private.conversation_messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE RESTRICT,
   provider text NOT NULL,
-  provider_message_ref text,
+  provider_message_key text,
   idempotency_key text NOT NULL,
   message_fingerprint text NOT NULL,
   direction text NOT NULL,
@@ -85,7 +104,7 @@ CREATE TABLE aichm_private.conversation_messages (
   CONSTRAINT avni_conversation_messages_provider_ck
     CHECK (provider ~ '^[a-z][a-z0-9_-]{0,39}$'),
   CONSTRAINT avni_conversation_messages_provider_ref_ck
-    CHECK (provider_message_ref IS NULL OR length(provider_message_ref) BETWEEN 1 AND 200),
+    CHECK (provider_message_key IS NULL OR provider_message_key ~ '^hmac-sha256:v1:[0-9a-f]{64}$'),
   CONSTRAINT avni_conversation_messages_idempotency_ck
     CHECK (idempotency_key ~ '^message:v1:[0-9a-f]{64}$'),
   CONSTRAINT avni_conversation_messages_fingerprint_ck
@@ -101,7 +120,7 @@ CREATE TABLE aichm_private.conversation_messages (
     CHECK (body IS NULL OR length(body)<=12000),
   CONSTRAINT avni_conversation_messages_media_ref_ck
     CHECK (media_ref IS NULL OR (
-      length(media_ref) BETWEEN 1 AND 200 AND media_ref !~* '^https?://'
+      media_ref ~ '^media:v1:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
     )),
   CONSTRAINT avni_conversation_messages_content_ck
     CHECK (
@@ -116,8 +135,8 @@ CREATE TABLE aichm_private.conversation_messages (
 );
 
 CREATE UNIQUE INDEX avni_conversation_messages_provider_ref_uq
-  ON aichm_private.conversation_messages(provider,provider_message_ref)
-  WHERE provider_message_ref IS NOT NULL;
+  ON aichm_private.conversation_messages(provider,provider_message_key)
+  WHERE provider_message_key IS NOT NULL;
 CREATE UNIQUE INDEX avni_conversation_messages_idempotency_uq
   ON aichm_private.conversation_messages(idempotency_key);
 CREATE INDEX avni_conversation_messages_thread_time_idx
@@ -130,7 +149,7 @@ CREATE TABLE aichm_private.conversation_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE RESTRICT,
   provider text NOT NULL,
-  provider_event_ref text NOT NULL,
+  provider_event_key text NOT NULL,
   idempotency_key text NOT NULL,
   event_fingerprint text NOT NULL,
   event_kind text NOT NULL,
@@ -140,13 +159,16 @@ CREATE TABLE aichm_private.conversation_events (
   CONSTRAINT avni_conversation_events_provider_ck
     CHECK (provider ~ '^[a-z][a-z0-9_-]{0,39}$'),
   CONSTRAINT avni_conversation_events_provider_ref_ck
-    CHECK (length(provider_event_ref) BETWEEN 1 AND 200),
+    CHECK (provider_event_key ~ '^hmac-sha256:v1:[0-9a-f]{64}$'),
   CONSTRAINT avni_conversation_events_idempotency_ck
-    CHECK (idempotency_key ~ '^event:v1:[0-9a-f]{64}$'),
+    CHECK (
+      idempotency_key ~ '^event:v1:[0-9a-f]{64}$'
+      AND idempotency_key='event:v1:'||split_part(provider_event_key,':',3)
+    ),
   CONSTRAINT avni_conversation_events_fingerprint_ck
     CHECK (event_fingerprint ~ '^[0-9a-f]{64}$'),
   CONSTRAINT avni_conversation_events_kind_ck CHECK (event_kind IN ('message','delivery')),
-  CONSTRAINT avni_conversation_events_provider_event_uq UNIQUE (provider,provider_event_ref),
+  CONSTRAINT avni_conversation_events_provider_event_uq UNIQUE (provider,provider_event_key),
   CONSTRAINT avni_conversation_events_idempotency_uq UNIQUE (idempotency_key)
 );
 
@@ -204,7 +226,7 @@ CREATE TABLE aichm_private.conversation_outbox_attempts (
   outbox_id uuid NOT NULL REFERENCES aichm_private.conversation_outbox(id) ON DELETE RESTRICT,
   attempt_number smallint NOT NULL,
   provider text NOT NULL,
-  provider_message_ref text,
+  provider_message_key text,
   state text NOT NULL DEFAULT 'claimed',
   delivery_state text NOT NULL DEFAULT 'queued',
   lease_token uuid NOT NULL,
@@ -216,7 +238,7 @@ CREATE TABLE aichm_private.conversation_outbox_attempts (
   CONSTRAINT avni_conversation_attempts_provider_ck
     CHECK (provider ~ '^[a-z][a-z0-9_-]{0,39}$'),
   CONSTRAINT avni_conversation_attempts_provider_ref_ck
-    CHECK (provider_message_ref IS NULL OR length(provider_message_ref) BETWEEN 1 AND 200),
+    CHECK (provider_message_key IS NULL OR provider_message_key ~ '^hmac-sha256:v1:[0-9a-f]{64}$'),
   CONSTRAINT avni_conversation_attempts_state_ck
     CHECK (state IN ('claimed','sending','sent','delivered','read','failed','unknown','cancelled')),
   CONSTRAINT avni_conversation_attempts_delivery_ck
@@ -225,8 +247,8 @@ CREATE TABLE aichm_private.conversation_outbox_attempts (
 );
 
 CREATE UNIQUE INDEX avni_conversation_attempts_provider_message_uq
-  ON aichm_private.conversation_outbox_attempts(provider,provider_message_ref)
-  WHERE provider_message_ref IS NOT NULL;
+  ON aichm_private.conversation_outbox_attempts(provider,provider_message_key)
+  WHERE provider_message_key IS NOT NULL;
 CREATE INDEX avni_conversation_attempts_expiry_idx
   ON aichm_private.conversation_outbox_attempts(lease_expires_at,id)
   WHERE state IN ('claimed','sending');
@@ -236,7 +258,7 @@ CREATE TABLE aichm_private.conversation_delivery_receipts (
   event_id uuid NOT NULL UNIQUE REFERENCES aichm_private.conversation_events(id) ON DELETE RESTRICT,
   attempt_id uuid NOT NULL REFERENCES aichm_private.conversation_outbox_attempts(id) ON DELETE RESTRICT,
   provider text NOT NULL,
-  provider_receipt_ref text NOT NULL,
+  provider_receipt_key text NOT NULL,
   raw_provider_state text NOT NULL,
   normalized_state text NOT NULL,
   occurred_at timestamptz NOT NULL,
@@ -244,12 +266,12 @@ CREATE TABLE aichm_private.conversation_delivery_receipts (
   CONSTRAINT avni_conversation_receipts_provider_ck
     CHECK (provider ~ '^[a-z][a-z0-9_-]{0,39}$'),
   CONSTRAINT avni_conversation_receipts_ref_ck
-    CHECK (length(provider_receipt_ref) BETWEEN 1 AND 200),
+    CHECK (provider_receipt_key ~ '^hmac-sha256:v1:[0-9a-f]{64}$'),
   CONSTRAINT avni_conversation_receipts_raw_state_ck
     CHECK (raw_provider_state ~ '^[A-Za-z0-9_.:-]{1,100}$'),
   CONSTRAINT avni_conversation_receipts_state_ck
     CHECK (normalized_state IN ('queued','sent','delivered','read','failed','unknown')),
-  CONSTRAINT avni_conversation_receipts_provider_ref_uq UNIQUE (provider,provider_receipt_ref)
+  CONSTRAINT avni_conversation_receipts_provider_ref_uq UNIQUE (provider,provider_receipt_key)
 );
 
 CREATE INDEX avni_conversation_receipts_attempt_time_idx
@@ -264,6 +286,8 @@ CREATE TABLE aichm_private.conversation_control_events (
   reason text,
   prior_version bigint NOT NULL,
   resulting_version bigint NOT NULL,
+  whatsapp_consent_granted boolean,
+  whatsapp_opted_out boolean,
   occurred_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT avni_conversation_control_action_ck CHECK (action IN ('lead_linked','takeover','resume')),
   CONSTRAINT avni_conversation_control_actor_ck
@@ -272,6 +296,10 @@ CREATE TABLE aichm_private.conversation_control_events (
     CHECK (reason IS NULL OR length(btrim(reason)) BETWEEN 3 AND 500),
   CONSTRAINT avni_conversation_control_versions_ck
     CHECK (prior_version>=0 AND resulting_version=prior_version+1),
+  CONSTRAINT avni_conversation_control_resume_evidence_ck CHECK (
+    (action='resume' AND whatsapp_consent_granted IS NOT NULL AND whatsapp_opted_out IS NOT NULL)
+    OR (action<>'resume' AND whatsapp_consent_granted IS NULL AND whatsapp_opted_out IS NULL)
+  ),
   CONSTRAINT avni_conversation_control_thread_version_uq UNIQUE (thread_id,resulting_version)
 );
 
@@ -286,6 +314,37 @@ ALTER TABLE aichm_private.conversation_outbox_attempts ENABLE ROW LEVEL SECURITY
 ALTER TABLE aichm_private.conversation_delivery_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE aichm_private.conversation_control_events ENABLE ROW LEVEL SECURITY;
 
+ALTER TABLE aichm_private.conversation_threads FORCE ROW LEVEL SECURITY;
+ALTER TABLE aichm_private.conversation_messages FORCE ROW LEVEL SECURITY;
+ALTER TABLE aichm_private.conversation_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE aichm_private.conversation_outbox FORCE ROW LEVEL SECURITY;
+ALTER TABLE aichm_private.conversation_outbox_attempts FORCE ROW LEVEL SECURITY;
+ALTER TABLE aichm_private.conversation_delivery_receipts FORCE ROW LEVEL SECURITY;
+ALTER TABLE aichm_private.conversation_control_events FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY avni_rpc_owner_threads ON aichm_private.conversation_threads
+  TO aichm_conversation_owner USING (true) WITH CHECK (true);
+CREATE POLICY avni_rpc_owner_messages ON aichm_private.conversation_messages
+  TO aichm_conversation_owner USING (true) WITH CHECK (true);
+CREATE POLICY avni_rpc_owner_events ON aichm_private.conversation_events
+  TO aichm_conversation_owner USING (true) WITH CHECK (true);
+CREATE POLICY avni_rpc_owner_outbox ON aichm_private.conversation_outbox
+  TO aichm_conversation_owner USING (true) WITH CHECK (true);
+CREATE POLICY avni_rpc_owner_attempts ON aichm_private.conversation_outbox_attempts
+  TO aichm_conversation_owner USING (true) WITH CHECK (true);
+CREATE POLICY avni_rpc_owner_receipts ON aichm_private.conversation_delivery_receipts
+  TO aichm_conversation_owner USING (true) WITH CHECK (true);
+CREATE POLICY avni_rpc_owner_controls ON aichm_private.conversation_control_events
+  TO aichm_conversation_owner USING (true) WITH CHECK (true);
+
+ALTER TABLE aichm_private.conversation_threads OWNER TO aichm_conversation_owner;
+ALTER TABLE aichm_private.conversation_messages OWNER TO aichm_conversation_owner;
+ALTER TABLE aichm_private.conversation_events OWNER TO aichm_conversation_owner;
+ALTER TABLE aichm_private.conversation_outbox OWNER TO aichm_conversation_owner;
+ALTER TABLE aichm_private.conversation_outbox_attempts OWNER TO aichm_conversation_owner;
+ALTER TABLE aichm_private.conversation_delivery_receipts OWNER TO aichm_conversation_owner;
+ALTER TABLE aichm_private.conversation_control_events OWNER TO aichm_conversation_owner;
+
 REVOKE ALL ON TABLE
   aichm_private.conversation_threads,
   aichm_private.conversation_messages,
@@ -296,7 +355,8 @@ REVOKE ALL ON TABLE
   aichm_private.conversation_control_events
 FROM PUBLIC, anon, authenticated, service_role, aichm_crm_reader, aichm_conversation_runtime;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA aichm_private
-FROM PUBLIC, anon, authenticated, service_role, aichm_crm_reader, aichm_conversation_runtime;
+FROM PUBLIC, anon, authenticated, service_role, aichm_crm_reader,
+  aichm_conversation_runtime, aichm_conversation_owner;
 
 CREATE OR REPLACE FUNCTION aichm_private.delivery_transition_allowed(
   p_current text,
@@ -317,13 +377,13 @@ $function$;
 
 CREATE OR REPLACE FUNCTION aichm_private.accept_provider_event(
   p_provider text,
-  p_provider_event_ref text,
-  p_provider_thread_hash text,
+  p_provider_event_key text,
+  p_provider_thread_key text,
   p_event_idempotency_key text,
   p_event_fingerprint text,
   p_occurred_at timestamptz,
   p_kind text,
-  p_provider_message_ref text,
+  p_provider_message_key text,
   p_message_idempotency_key text,
   p_message_fingerprint text,
   p_direction text,
@@ -335,7 +395,7 @@ CREATE OR REPLACE FUNCTION aichm_private.accept_provider_event(
   p_raw_provider_state text
 ) RETURNS TABLE(outcome text,thread_id uuid,event_id uuid,message_id uuid)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private
+SET search_path = pg_catalog, aichm_private, pg_temp
 AS $function$
 DECLARE
   v_thread_id uuid;
@@ -343,6 +403,7 @@ DECLARE
   v_message_id uuid;
   v_existing_fingerprint text;
   v_existing_thread_id uuid;
+  v_existing_message_thread_id uuid;
   v_attempt_id uuid;
   v_outbox_id uuid;
   v_candidate_thread_id uuid;
@@ -353,42 +414,53 @@ DECLARE
   v_receipt_id uuid;
   v_current_state text;
 BEGIN
-  IF p_provider !~ '^[a-z][a-z0-9_-]{0,39}$'
-    OR p_provider_event_ref IS NULL OR length(p_provider_event_ref) NOT BETWEEN 1 AND 200
-    OR p_provider_thread_hash !~ '^[0-9a-f]{64}$'
+  IF p_provider IS NULL OR p_provider !~ '^[a-z][a-z0-9_-]{0,39}$'
+    OR p_provider_event_key IS NULL
+    OR p_provider_event_key !~ '^hmac-sha256:v1:[0-9a-f]{64}$'
+    OR p_provider_thread_key IS NULL
+    OR p_provider_thread_key !~ '^hmac-sha256:v1:[0-9a-f]{64}$'
+    OR p_event_idempotency_key IS NULL
     OR p_event_idempotency_key !~ '^event:v1:[0-9a-f]{64}$'
+    OR p_event_idempotency_key<>'event:v1:'||split_part(p_provider_event_key,':',3)
+    OR p_event_fingerprint IS NULL
     OR p_event_fingerprint !~ '^[0-9a-f]{64}$'
     OR p_occurred_at IS NULL
+    OR p_kind IS NULL
   THEN
     RAISE EXCEPTION 'invalid_conversation_event' USING ERRCODE='22023';
   END IF;
 
-  INSERT INTO aichm_private.conversation_threads(provider,provider_thread_hash)
-  VALUES (p_provider,p_provider_thread_hash)
-  ON CONFLICT (provider,provider_thread_hash) DO UPDATE
+  INSERT INTO aichm_private.conversation_threads(provider,provider_thread_key)
+  VALUES (p_provider,p_provider_thread_key)
+  ON CONFLICT (provider,provider_thread_key) DO UPDATE
     SET updated_at=aichm_private.conversation_threads.updated_at
   RETURNING id INTO v_thread_id;
 
   IF p_kind='message' THEN
-    IF p_provider_message_ref IS NULL OR length(p_provider_message_ref) NOT BETWEEN 1 AND 200
+    IF p_provider_message_key IS NULL OR p_provider_message_key !~ '^hmac-sha256:v1:[0-9a-f]{64}$'
+      OR p_message_idempotency_key IS NULL
       OR p_message_idempotency_key !~ '^message:v1:[0-9a-f]{64}$'
+      OR p_message_idempotency_key<>'message:v1:'||split_part(p_provider_message_key,':',3)
+      OR p_message_fingerprint IS NULL
       OR p_message_fingerprint !~ '^[0-9a-f]{64}$'
       OR p_delivery_state IS NOT NULL OR p_raw_provider_state IS NOT NULL
       OR NOT (
         (p_direction='inbound' AND p_author IN ('prospect','unknown'))
         OR (p_direction='outbound' AND p_author IN ('assistant','human_staff','system','unknown'))
       )
+      OR p_direction IS NULL OR p_author IS NULL OR p_message_type IS NULL
       OR p_message_type NOT IN ('text','image','audio','video','document','interactive','location','unknown')
       OR (p_message_type='text' AND nullif(btrim(p_body),'') IS NULL)
       OR (p_body IS NOT NULL AND length(p_body)>12000)
-      OR (p_media_ref IS NOT NULL AND (length(p_media_ref) NOT BETWEEN 1 AND 200 OR p_media_ref ~* '^https?://'))
+      OR (p_media_ref IS NOT NULL AND p_media_ref !~ '^media:v1:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
     THEN
       RAISE EXCEPTION 'invalid_conversation_message' USING ERRCODE='22023';
     END IF;
   ELSIF p_kind='delivery' THEN
-    IF p_provider_message_ref IS NULL OR length(p_provider_message_ref) NOT BETWEEN 1 AND 200
+    IF p_provider_message_key IS NULL OR p_provider_message_key !~ '^hmac-sha256:v1:[0-9a-f]{64}$'
+      OR p_delivery_state IS NULL
       OR p_delivery_state NOT IN ('queued','sent','delivered','read','failed','unknown')
-      OR p_raw_provider_state IS NULL OR length(p_raw_provider_state) NOT BETWEEN 1 AND 100
+      OR p_raw_provider_state IS NULL OR p_raw_provider_state !~ '^[A-Za-z0-9_.:-]{1,100}$'
       OR p_message_idempotency_key IS NOT NULL OR p_message_fingerprint IS NOT NULL
       OR p_direction IS NOT NULL OR p_author IS NOT NULL OR p_message_type IS NOT NULL
       OR p_body IS NOT NULL OR p_media_ref IS NOT NULL
@@ -400,18 +472,18 @@ BEGIN
   END IF;
 
   INSERT INTO aichm_private.conversation_events(
-    thread_id,provider,provider_event_ref,idempotency_key,event_fingerprint,event_kind,occurred_at
+    thread_id,provider,provider_event_key,idempotency_key,event_fingerprint,event_kind,occurred_at
   ) VALUES (
-    v_thread_id,p_provider,p_provider_event_ref,p_event_idempotency_key,p_event_fingerprint,p_kind,p_occurred_at
+    v_thread_id,p_provider,p_provider_event_key,p_event_idempotency_key,p_event_fingerprint,p_kind,p_occurred_at
   )
-  ON CONFLICT (provider,provider_event_ref) DO NOTHING
+  ON CONFLICT (provider,provider_event_key) DO NOTHING
   RETURNING id INTO v_event_id;
 
   IF v_event_id IS NULL THEN
     SELECT e.id,e.event_fingerprint,e.message_id,e.thread_id
       INTO v_event_id,v_existing_fingerprint,v_message_id,v_existing_thread_id
     FROM aichm_private.conversation_events e
-    WHERE e.provider=p_provider AND e.provider_event_ref=p_provider_event_ref;
+    WHERE e.provider=p_provider AND e.provider_event_key=p_provider_event_key;
     IF v_existing_fingerprint<>p_event_fingerprint OR v_existing_thread_id<>v_thread_id THEN
       RAISE EXCEPTION 'conversation_event_idempotency_conflict' USING ERRCODE='P0001';
     END IF;
@@ -421,21 +493,23 @@ BEGIN
 
   IF p_kind='message' THEN
     INSERT INTO aichm_private.conversation_messages(
-      thread_id,provider,provider_message_ref,idempotency_key,message_fingerprint,
+      thread_id,provider,provider_message_key,idempotency_key,message_fingerprint,
       direction,author,message_type,body,media_ref,delivery_state,occurred_at
     ) VALUES (
-      v_thread_id,p_provider,p_provider_message_ref,p_message_idempotency_key,p_message_fingerprint,
+      v_thread_id,p_provider,p_provider_message_key,p_message_idempotency_key,p_message_fingerprint,
       p_direction,p_author,p_message_type,p_body,p_media_ref,
-      CASE WHEN p_direction='outbound' THEN 'queued' ELSE NULL END,p_occurred_at
+      CASE WHEN p_direction='outbound' THEN 'unknown' ELSE NULL END,p_occurred_at
     )
-    ON CONFLICT (provider,provider_message_ref) WHERE provider_message_ref IS NOT NULL DO NOTHING
+    ON CONFLICT (provider,provider_message_key) WHERE provider_message_key IS NOT NULL DO NOTHING
     RETURNING id INTO v_message_id;
 
     IF v_message_id IS NULL THEN
-      SELECT m.id,m.message_fingerprint INTO v_message_id,v_existing_fingerprint
+      SELECT m.id,m.message_fingerprint,m.thread_id
+        INTO v_message_id,v_existing_fingerprint,v_existing_message_thread_id
       FROM aichm_private.conversation_messages m
-      WHERE m.provider=p_provider AND m.provider_message_ref=p_provider_message_ref;
-      IF v_existing_fingerprint<>p_message_fingerprint THEN
+      WHERE m.provider=p_provider AND m.provider_message_key=p_provider_message_key;
+      IF v_existing_fingerprint<>p_message_fingerprint
+        OR v_existing_message_thread_id<>v_thread_id THEN
         RAISE EXCEPTION 'conversation_message_idempotency_conflict' USING ERRCODE='P0001';
       END IF;
     END IF;
@@ -448,7 +522,7 @@ BEGIN
     INTO v_attempt_id,v_outbox_id,v_candidate_thread_id
   FROM aichm_private.conversation_outbox_attempts a
   JOIN aichm_private.conversation_outbox o ON o.id=a.outbox_id
-  WHERE a.provider=p_provider AND a.provider_message_ref=p_provider_message_ref
+  WHERE a.provider=p_provider AND a.provider_message_key=p_provider_message_key
   ORDER BY a.attempt_number DESC
   LIMIT 1;
 
@@ -474,11 +548,11 @@ BEGIN
   END IF;
 
   INSERT INTO aichm_private.conversation_delivery_receipts(
-    event_id,attempt_id,provider,provider_receipt_ref,raw_provider_state,normalized_state,occurred_at
+    event_id,attempt_id,provider,provider_receipt_key,raw_provider_state,normalized_state,occurred_at
   ) VALUES (
-    v_event_id,v_attempt_id,p_provider,p_provider_event_ref,p_raw_provider_state,p_delivery_state,p_occurred_at
+    v_event_id,v_attempt_id,p_provider,p_provider_event_key,p_raw_provider_state,p_delivery_state,p_occurred_at
   )
-  ON CONFLICT (provider,provider_receipt_ref) DO NOTHING
+  ON CONFLICT (provider,provider_receipt_key) DO NOTHING
   RETURNING id INTO v_receipt_id;
 
   v_is_current_attempt:=v_attempt_number=v_outbox_attempt_count;
@@ -518,7 +592,7 @@ BEGIN
 
   SELECT m.id INTO v_message_id
   FROM aichm_private.conversation_messages m
-  WHERE m.provider=p_provider AND m.provider_message_ref=p_provider_message_ref;
+  WHERE m.provider=p_provider AND m.provider_message_key=p_provider_message_key;
   RETURN QUERY SELECT CASE WHEN v_receipt_id IS NULL THEN 'duplicate_receipt'::text
                            ELSE 'receipt_recorded'::text END,
     v_thread_id,v_event_id,v_message_id;
@@ -534,19 +608,34 @@ CREATE OR REPLACE FUNCTION aichm_private.link_conversation_thread(
   p_reason text
 ) RETURNS TABLE(outcome text,control_version bigint)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private
+SET search_path = pg_catalog, aichm_private, pg_temp
 AS $function$
 DECLARE
   v_thread aichm_private.conversation_threads%ROWTYPE;
+  v_control aichm_private.conversation_control_events%ROWTYPE;
   v_next_version bigint;
 BEGIN
-  IF p_actor_ref !~ '^replit_lms_user:[1-9][0-9]{0,9}$'
+  IF p_thread_id IS NULL OR p_supabase_lead_id IS NULL OR p_expected_control_version IS NULL
+    OR p_actor_ref IS NULL OR p_actor_ref !~ '^replit_lms_user:[1-9][0-9]{0,9}$'
     OR p_reason IS NULL OR length(btrim(p_reason)) NOT BETWEEN 3 AND 500
     OR p_request_id IS NULL
   THEN RAISE EXCEPTION 'invalid_conversation_link_request' USING ERRCODE='22023'; END IF;
-  PERFORM 1 FROM public.leads l
-  WHERE l.id=p_supabase_lead_id AND l.replit_lead_id IS NOT NULL;
-  IF NOT FOUND THEN RETURN QUERY SELECT 'canonical_lead_unavailable'::text,NULL::bigint; RETURN; END IF;
+  -- The trusted Replit caller must verify the exact CRM/Supabase crosswalk and
+  -- staff assignment before invoking this RPC. The FK remains the DB existence check.
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(p_request_id::text,0));
+  SELECT * INTO v_control FROM aichm_private.conversation_control_events
+  WHERE request_id=p_request_id;
+  IF FOUND THEN
+    SELECT * INTO v_thread FROM aichm_private.conversation_threads WHERE id=p_thread_id;
+    IF v_control.thread_id=p_thread_id AND v_control.action='lead_linked'
+      AND v_control.actor_ref=p_actor_ref AND v_control.reason=p_reason
+      AND v_control.prior_version=p_expected_control_version
+      AND v_thread.mapping_status='mapped' AND v_thread.supabase_lead_id=p_supabase_lead_id
+    THEN
+      RETURN QUERY SELECT 'duplicate'::text,v_control.resulting_version; RETURN;
+    END IF;
+    RETURN QUERY SELECT 'request_id_conflict'::text,NULL::bigint; RETURN;
+  END IF;
 
   SELECT * INTO v_thread FROM aichm_private.conversation_threads
   WHERE id=p_thread_id FOR UPDATE;
@@ -571,9 +660,10 @@ BEGIN
       control_version=v_next_version,updated_at=now()
   WHERE id=p_thread_id;
   INSERT INTO aichm_private.conversation_control_events(
-    thread_id,request_id,action,actor_ref,reason,prior_version,resulting_version
+    thread_id,request_id,action,actor_ref,reason,prior_version,resulting_version,
+    whatsapp_consent_granted,whatsapp_opted_out
   ) VALUES (p_thread_id,p_request_id,'lead_linked',p_actor_ref,p_reason,
-    v_thread.control_version,v_next_version);
+    v_thread.control_version,v_next_version,NULL,NULL);
   RETURN QUERY SELECT 'linked'::text,v_next_version;
 END
 $function$;
@@ -591,7 +681,7 @@ CREATE OR REPLACE FUNCTION aichm_private.enqueue_conversation_message(
   p_whatsapp_send_allowed boolean DEFAULT false
 ) RETURNS TABLE(outcome text,outbox_id uuid,message_id uuid,control_version bigint)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private
+SET search_path = pg_catalog, aichm_private, pg_temp
 AS $function$
 DECLARE
   v_thread aichm_private.conversation_threads%ROWTYPE;
@@ -600,14 +690,19 @@ DECLARE
   v_existing_fingerprint text;
   v_mode text;
 BEGIN
-  IF p_author NOT IN ('assistant','human_staff')
+  IF p_thread_id IS NULL OR p_expected_control_version IS NULL
+    OR p_author IS NULL OR p_author NOT IN ('assistant','human_staff')
+    OR p_idempotency_key IS NULL
     OR p_idempotency_key !~ '^message:v1:[0-9a-f]{64}$'
+    OR p_message_fingerprint IS NULL
     OR p_message_fingerprint !~ '^[0-9a-f]{64}$'
+    OR p_message_type IS NULL
     OR p_message_type NOT IN ('text','image','audio','video','document','interactive','location','unknown')
     OR (p_body IS NOT NULL AND length(p_body)>12000)
     OR (p_message_type='text' AND nullif(btrim(p_body),'') IS NULL)
-    OR (p_media_ref IS NOT NULL AND (length(p_media_ref) NOT BETWEEN 1 AND 200 OR p_media_ref ~* '^https?://'))
+    OR (p_media_ref IS NOT NULL AND p_media_ref !~ '^media:v1:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
     OR (p_author='assistant' AND p_actor_ref IS NOT NULL)
+    OR (p_author='human_staff' AND p_actor_ref IS NULL)
     OR (p_author='human_staff' AND p_actor_ref !~ '^replit_lms_user:[1-9][0-9]{0,9}$')
     OR p_whatsapp_send_allowed IS NULL
   THEN RAISE EXCEPTION 'invalid_conversation_outbound_request' USING ERRCODE='22023'; END IF;
@@ -672,7 +767,7 @@ CREATE OR REPLACE FUNCTION aichm_private.claim_next_conversation_outbound(
   expected_control_version bigint,lease_token uuid,lease_expires_at timestamptz
 )
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private
+SET search_path = pg_catalog, aichm_private, pg_temp
 AS $function$
 DECLARE
   v_outbox aichm_private.conversation_outbox%ROWTYPE;
@@ -784,7 +879,7 @@ CREATE OR REPLACE FUNCTION aichm_private.authorize_conversation_outbound_attempt
   p_whatsapp_send_allowed boolean
 ) RETURNS boolean
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private
+SET search_path = pg_catalog, aichm_private, pg_temp
 AS $function$
 DECLARE
   v_outbox aichm_private.conversation_outbox%ROWTYPE;
@@ -839,10 +934,10 @@ CREATE OR REPLACE FUNCTION aichm_private.record_conversation_send_result(
   p_attempt_id uuid,
   p_lease_token uuid,
   p_result text,
-  p_provider_message_ref text
+  p_provider_message_key text
 ) RETURNS text
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private
+SET search_path = pg_catalog, aichm_private, pg_temp
 AS $function$
 DECLARE
   v_attempt aichm_private.conversation_outbox_attempts%ROWTYPE;
@@ -851,9 +946,10 @@ DECLARE
   v_thread aichm_private.conversation_threads%ROWTYPE;
   v_state text;
 BEGIN
-  IF p_result NOT IN ('sent','failed','unknown')
-    OR (p_provider_message_ref IS NOT NULL AND length(p_provider_message_ref) NOT BETWEEN 1 AND 200)
-    OR (p_result='sent' AND p_provider_message_ref IS NULL)
+  IF p_outbox_id IS NULL OR p_attempt_id IS NULL OR p_lease_token IS NULL
+    OR p_result IS NULL OR p_result NOT IN ('sent','failed','unknown')
+    OR (p_provider_message_key IS NOT NULL AND p_provider_message_key !~ '^hmac-sha256:v1:[0-9a-f]{64}$')
+    OR (p_result='sent' AND p_provider_message_key IS NULL)
   THEN RAISE EXCEPTION 'invalid_conversation_send_result' USING ERRCODE='22023'; END IF;
   SELECT o.thread_id INTO v_thread_id
   FROM aichm_private.conversation_outbox o
@@ -871,11 +967,11 @@ BEGIN
   END IF;
   v_state:=CASE p_result WHEN 'sent' THEN 'sent' WHEN 'failed' THEN 'failed' ELSE 'unknown' END;
   UPDATE aichm_private.conversation_outbox_attempts
-  SET provider_message_ref=p_provider_message_ref,state=v_state,delivery_state=v_state,
+  SET provider_message_key=p_provider_message_key,state=v_state,delivery_state=v_state,
       finished_at=now()
   WHERE id=p_attempt_id;
   UPDATE aichm_private.conversation_messages m
-  SET provider_message_ref=p_provider_message_ref,delivery_state=v_state
+  SET provider_message_key=p_provider_message_key,delivery_state=v_state
   FROM aichm_private.conversation_outbox o
   WHERE o.id=p_outbox_id AND m.id=o.message_id;
   UPDATE aichm_private.conversation_outbox
@@ -897,18 +993,37 @@ CREATE OR REPLACE FUNCTION aichm_private.transition_conversation_control(
   p_whatsapp_opted_out boolean DEFAULT true
 ) RETURNS TABLE(outcome text,control_version bigint)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private
+SET search_path = pg_catalog, aichm_private, pg_temp
 AS $function$
 DECLARE
   v_thread aichm_private.conversation_threads%ROWTYPE;
+  v_control aichm_private.conversation_control_events%ROWTYPE;
   v_new_mode text;
   v_version bigint;
 BEGIN
-  IF p_action NOT IN ('takeover','resume')
-    OR p_actor_ref !~ '^replit_lms_user:[1-9][0-9]{0,9}$'
+  IF p_thread_id IS NULL OR p_expected_control_version IS NULL
+    OR p_action IS NULL OR p_action NOT IN ('takeover','resume')
+    OR p_actor_ref IS NULL OR p_actor_ref !~ '^replit_lms_user:[1-9][0-9]{0,9}$'
     OR p_request_id IS NULL
     OR (p_reason IS NOT NULL AND length(btrim(p_reason)) NOT BETWEEN 3 AND 500)
+    OR (p_action='resume' AND (p_whatsapp_consent_granted IS NULL OR p_whatsapp_opted_out IS NULL))
   THEN RAISE EXCEPTION 'invalid_conversation_control_request' USING ERRCODE='22023'; END IF;
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(p_request_id::text,0));
+  SELECT * INTO v_control FROM aichm_private.conversation_control_events
+  WHERE request_id=p_request_id;
+  IF FOUND THEN
+    IF v_control.thread_id=p_thread_id AND v_control.action=p_action
+      AND v_control.actor_ref=p_actor_ref AND v_control.reason IS NOT DISTINCT FROM p_reason
+      AND v_control.prior_version=p_expected_control_version
+      AND v_control.whatsapp_consent_granted IS NOT DISTINCT FROM
+        CASE WHEN p_action='resume' THEN p_whatsapp_consent_granted ELSE NULL END
+      AND v_control.whatsapp_opted_out IS NOT DISTINCT FROM
+        CASE WHEN p_action='resume' THEN p_whatsapp_opted_out ELSE NULL END
+    THEN
+      RETURN QUERY SELECT 'duplicate'::text,v_control.resulting_version; RETURN;
+    END IF;
+    RETURN QUERY SELECT 'request_id_conflict'::text,NULL::bigint; RETURN;
+  END IF;
   SELECT * INTO v_thread FROM aichm_private.conversation_threads
   WHERE id=p_thread_id FOR UPDATE;
   IF NOT FOUND THEN RETURN QUERY SELECT 'thread_not_found'::text,NULL::bigint; RETURN; END IF;
@@ -937,9 +1052,12 @@ BEGIN
   SET mode=v_new_mode,control_version=v_version,updated_at=now()
   WHERE id=p_thread_id;
   INSERT INTO aichm_private.conversation_control_events(
-    thread_id,request_id,action,actor_ref,reason,prior_version,resulting_version
+    thread_id,request_id,action,actor_ref,reason,prior_version,resulting_version,
+    whatsapp_consent_granted,whatsapp_opted_out
   ) VALUES (p_thread_id,p_request_id,p_action,p_actor_ref,p_reason,
-    v_thread.control_version,v_version);
+    v_thread.control_version,v_version,
+    CASE WHEN p_action='resume' THEN p_whatsapp_consent_granted ELSE NULL END,
+    CASE WHEN p_action='resume' THEN p_whatsapp_opted_out ELSE NULL END);
 
   IF p_action='takeover' THEN
     UPDATE aichm_private.conversation_outbox_attempts a
@@ -954,6 +1072,23 @@ BEGIN
   RETURN QUERY SELECT 'changed'::text,v_version;
 END
 $function$;
+
+ALTER FUNCTION aichm_private.delivery_transition_allowed(text,text) OWNER TO aichm_conversation_owner;
+ALTER FUNCTION aichm_private.accept_provider_event(text,text,text,text,text,timestamptz,text,text,text,text,text,text,text,text,text,text,text)
+  OWNER TO aichm_conversation_owner;
+ALTER FUNCTION aichm_private.link_conversation_thread(uuid,uuid,bigint,text,uuid,text)
+  OWNER TO aichm_conversation_owner;
+ALTER FUNCTION aichm_private.enqueue_conversation_message(uuid,bigint,text,text,text,text,text,text,text,boolean)
+  OWNER TO aichm_conversation_owner;
+ALTER FUNCTION aichm_private.claim_next_conversation_outbound(boolean,integer)
+  OWNER TO aichm_conversation_owner;
+ALTER FUNCTION aichm_private.authorize_conversation_outbound_attempt(uuid,uuid,uuid,boolean)
+  OWNER TO aichm_conversation_owner;
+ALTER FUNCTION aichm_private.record_conversation_send_result(uuid,uuid,uuid,text,text)
+  OWNER TO aichm_conversation_owner;
+ALTER FUNCTION aichm_private.transition_conversation_control(uuid,bigint,text,text,uuid,text,boolean,boolean)
+  OWNER TO aichm_conversation_owner;
+REVOKE CREATE ON SCHEMA aichm_private FROM aichm_conversation_owner;
 
 REVOKE ALL ON FUNCTION aichm_private.delivery_transition_allowed(text,text)
   FROM PUBLIC,anon,authenticated,service_role,aichm_crm_reader,aichm_conversation_runtime;

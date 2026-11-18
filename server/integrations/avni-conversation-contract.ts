@@ -5,6 +5,8 @@ const opaqueReference = z.string().trim().min(1).max(200)
   .regex(/^[A-Za-z0-9._:-]+$/, "Reference must be an opaque identifier.");
 const providerName = z.string().trim().min(1).max(40)
   .regex(/^[a-z][a-z0-9_-]*$/, "Provider must be a stable lowercase name.");
+const appMediaReference = z.string()
+  .regex(/^media:v1:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 const messageType = z.enum([
   "text",
   "image",
@@ -24,6 +26,9 @@ export const AVNI_DELIVERY_STATES = [
   "unknown",
 ] as const;
 export type AvniDeliveryState = typeof AVNI_DELIVERY_STATES[number];
+export const providerReferenceTokenSchema = z.string()
+  .regex(/^hmac-sha256:v1:[0-9a-f]{64}$/, "Provider references must be HMAC-tokenized by the server.");
+export type ProviderReferenceToken = z.infer<typeof providerReferenceTokenSchema>;
 
 const messageEventSchema = z.object({
   contractVersion: z.literal(1),
@@ -37,7 +42,7 @@ const messageEventSchema = z.object({
   author: z.enum(["prospect", "assistant", "human_staff", "system", "unknown"]),
   messageType,
   text: z.string().max(12_000).optional(),
-  mediaRef: opaqueReference.optional(),
+  mediaRef: appMediaReference.optional(),
 }).strict().superRefine((event, context) => {
   if (event.messageType === "text" && !event.text?.trim()) {
     context.addIssue({ code: "custom", path: ["text"], message: "Text messages require non-empty text." });
@@ -47,9 +52,6 @@ const messageEventSchema = z.object({
     (event.direction === "outbound" && event.author === "prospect")
   ) {
     context.addIssue({ code: "custom", path: ["author"], message: "Author and direction are inconsistent." });
-  }
-  if (event.mediaRef && /^https?:\/\//i.test(event.mediaRef)) {
-    context.addIssue({ code: "custom", path: ["mediaRef"], message: "Media references must not be URLs." });
   }
 });
 
@@ -124,46 +126,43 @@ export function classifyConversationEvent(event: AvniConversationEvent): Convers
   return "other_message";
 }
 
-function stableKey(namespace: string, provider: string, reference: string): string {
-  const digest = createHash("sha256")
-    .update(`avni-conversation:v1\0${namespace}\0${provider}\0${reference}`)
-    .digest("hex");
-  return `${namespace}:v1:${digest}`;
+function tokenDigest(token: ProviderReferenceToken): string {
+  const parsed = providerReferenceTokenSchema.safeParse(token);
+  if (!parsed.success) throw new Error("INVALID_PROVIDER_REFERENCE_TOKEN");
+  return token.slice("hmac-sha256:v1:".length);
 }
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-/** Uses opaque provider references only; message text, phone, and payload are never key material. */
-export function conversationEventIdempotencyKey(event: AvniConversationEvent): string {
-  return stableKey("event", event.provider, `${event.kind}:${event.providerEventRef}`);
+/** Consumes a server-HMACed, domain-separated event reference; it never hashes raw provider input. */
+export function conversationEventIdempotencyKey(token: ProviderReferenceToken): string {
+  return `event:v1:${tokenDigest(token)}`;
 }
 
-/** Collapses duplicate message deliveries even if the provider wraps them in different events. */
-export function conversationMessageIdempotencyKey(event: AvniConversationEvent): string {
-  return stableKey("message", event.provider, event.providerMessageRef);
+/** Consumes a server-HMACed, domain-separated message reference. */
+export function conversationMessageIdempotencyKey(token: ProviderReferenceToken): string {
+  return `message:v1:${tokenDigest(token)}`;
 }
 
 export function conversationEventFingerprint(event: AvniConversationEvent): string {
   if (event.kind === "delivery") {
     return sha256(JSON.stringify([
-      event.contractVersion, event.provider, event.providerEventRef, event.threadRef,
-      event.occurredAt, event.kind, event.providerMessageRef, event.deliveryState,
+      event.contractVersion, event.provider, event.occurredAt, event.kind, event.deliveryState,
       event.rawProviderReceiptValue ?? null,
     ]));
   }
   return sha256(JSON.stringify([
-    event.contractVersion, event.provider, event.providerEventRef, event.threadRef,
-    event.occurredAt, event.kind, event.providerMessageRef, event.direction,
+    event.contractVersion, event.provider, event.occurredAt, event.kind, event.direction,
     event.author, event.messageType, event.text ?? null, event.mediaRef ?? null,
   ]));
 }
 
 export function conversationMessageFingerprint(event: Extract<AvniConversationEvent, { kind: "message" }>): string {
   return sha256(JSON.stringify([
-    event.provider, event.providerMessageRef, event.threadRef, event.occurredAt,
-    event.direction, event.author, event.messageType, event.text ?? null, event.mediaRef ?? null,
+    event.provider, event.occurredAt, event.direction, event.author,
+    event.messageType, event.text ?? null, event.mediaRef ?? null,
   ]));
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test, { after, before } from "node:test";
@@ -12,7 +12,10 @@ import {
   validateAvniConversationEvent,
   type AvniConversationEvent,
 } from "../integrations/avni-conversation-contract";
-import { assertAvniConversationRuntimePostconditions } from "./supabase-avni-conversation-runtime-postconditions";
+import {
+  assertAvniConversationRuntimePostconditions,
+  assertAvniConversationRuntimeReadiness,
+} from "./supabase-avni-conversation-runtime-postconditions";
 
 type ScratchProof = {
   version: 1;
@@ -31,9 +34,18 @@ const enabled = process.env.NODE_ENV === "test" &&
   Boolean(databaseUrl && process.env.CRM_TEST_EPHEMERAL_PROOF);
 let pool: Pool | undefined;
 let legacyHistoryAfter: unknown[] = [];
+let migrationRollbackVerified = false;
 
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
+// Synthetic opaque token-format fixtures only. These are random strings, not an
+// HMAC implementation; the production adapter remains a hard prerequisite.
+const syntheticProviderTokens = new Map<string, string>();
+function syntheticToken(reference: string): `hmac-sha256:v1:${string}` {
+  let token = syntheticProviderTokens.get(reference);
+  if (!token) {
+    token = `hmac-sha256:v1:${randomUUID().replaceAll("-", "")}${randomUUID().replaceAll("-", "")}`;
+    syntheticProviderTokens.set(reference, token);
+  }
+  return token as `hmac-sha256:v1:${string}`;
 }
 
 function requireHarness(): asserts pool {
@@ -44,6 +56,19 @@ async function queryRows<T extends Record<string, unknown>>(sql: string, values:
   requireHarness();
   const result = await pool!.query<T>(sql, values);
   return result.rows;
+}
+
+async function waitUntilBlockedBy(waitingPid: number, blockingPid: number): Promise<void> {
+  requireHarness();
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const result = await pool!.query<{ blocked: boolean }>(
+      "SELECT $2::int=ANY(pg_blocking_pids($1::int)) AS blocked",
+      [waitingPid, blockingPid],
+    );
+    if (result.rows[0]?.blocked) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error("AVNI_TEST_EXPECTED_LOCK_WAIT_NOT_OBSERVED");
 }
 
 async function asRuntime<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -148,6 +173,43 @@ async function installSyntheticPrerequisitesAndMigration(): Promise<void> {
   );
 
   const migration = await readFile("supabase/migrations/20261118_avni_conversation_runtime_v1.sql", "utf8");
+  const failingMigration = migration.replace(
+    /\nCOMMIT;\s*$/,
+    "\nDO $injected_failure$ BEGIN RAISE EXCEPTION 'AVNI_TEST_INJECTED_MIGRATION_FAILURE'; END; $injected_failure$;\nCOMMIT;\n",
+  );
+  assert.notEqual(failingMigration, migration, "the test must inject a failure before the migration COMMIT");
+  const rollbackClient = await pool!.connect();
+  try {
+    const injectedFailure = await rollbackClient.query(failingMigration).then(
+      () => null,
+      error => error as Error & { position?: string },
+    );
+    assert.ok(injectedFailure, "migration must fail at the injected statement");
+    if (!injectedFailure.message.includes("AVNI_TEST_INJECTED_MIGRATION_FAILURE")) {
+      throw new Error(`AVNI_TEST_MIGRATION_PARSE_FAILED_AT_${injectedFailure.position ?? "UNKNOWN"}`);
+    }
+    await rollbackClient.query("ROLLBACK");
+    const state = await rollbackClient.query<{
+      role_count: string;
+      table_count: string;
+    }>(`
+      SELECT
+        (SELECT count(*)::text FROM pg_roles
+         WHERE rolname IN ('aichm_conversation_owner','aichm_conversation_runtime')) AS role_count,
+        (SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+         WHERE n.nspname='aichm_private' AND c.relname=ANY($1::text[])) AS table_count
+    `, [[
+      "conversation_threads", "conversation_messages", "conversation_events",
+      "conversation_outbox", "conversation_outbox_attempts", "conversation_delivery_receipts",
+      "conversation_control_events",
+    ]]);
+    assert.equal(state.rows[0].role_count, "0");
+    assert.equal(state.rows[0].table_count, "0");
+    migrationRollbackVerified = true;
+  } finally {
+    rollbackClient.release();
+  }
+
   await pool!.query(migration);
   const afterMigration = await pool!.query(
     `SELECT * FROM aichm_private.aichm_crm_conversations_for_replit_lead($1::uuid)`,
@@ -190,6 +252,12 @@ after(async () => {
   await pool?.end();
 });
 
+test("injected migration failure rolls back role and table creation atomically", {
+  skip: !enabled,
+}, () => {
+  assert.equal(migrationRollbackVerified, true);
+});
+
 function makeMessageEvent(overrides: Partial<Extract<AvniConversationEvent, { kind: "message" }>> = {}) {
   const event = {
     contractVersion: 1,
@@ -213,12 +281,14 @@ function makeMessageEvent(overrides: Partial<Extract<AvniConversationEvent, { ki
 }
 
 async function acceptMessage(event: Extract<AvniConversationEvent, { kind: "message" }>) {
-  const threadHash = sha256(event.threadRef);
+  const threadKey = syntheticToken(event.threadRef);
+  const eventKey = syntheticToken(event.providerEventRef);
+  const messageKey = syntheticToken(event.providerMessageRef);
   const params = [
-    event.provider, event.providerEventRef, threadHash,
-    conversationEventIdempotencyKey(event), conversationEventFingerprint(event),
-    event.occurredAt, "message", event.providerMessageRef,
-    conversationMessageIdempotencyKey(event), conversationMessageFingerprint(event),
+    event.provider, eventKey, threadKey,
+    conversationEventIdempotencyKey(eventKey), conversationEventFingerprint(event),
+    event.occurredAt, "message", messageKey,
+    conversationMessageIdempotencyKey(messageKey), conversationMessageFingerprint(event),
     event.direction, event.author, event.messageType, event.text ?? null,
     event.mediaRef ?? null, null, null,
   ];
@@ -229,7 +299,7 @@ async function acceptMessage(event: Extract<AvniConversationEvent, { kind: "mess
       )`,
       params,
     );
-    return { ...rows[0], threadHash, event };
+    return { ...rows[0], threadKey, event };
   });
 }
 
@@ -240,11 +310,12 @@ async function createReadyThread() {
     "INSERT INTO public.leads(id,replit_lead_id) VALUES ($1,$2)",
     [supabaseLeadId, randomUUID()],
   );
-  const mapped = await asRuntime(client => client.query(
+  const linkRequestId = randomUUID();
+  const link = await asRuntime(client => client.query(
     `SELECT * FROM aichm_private.link_conversation_thread($1,$2,0,'replit_lms_user:42',$3,'synthetic identity review')`,
-    [accepted.thread_id, supabaseLeadId, randomUUID()],
+    [accepted.thread_id, supabaseLeadId, linkRequestId],
   ));
-  assert.equal(mapped.rows[0].outcome, "linked");
+  assert.equal(link.rows[0].outcome, "linked");
   const resumed = await asRuntime(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
       $1,1,'resume','replit_lms_user:42',$2,'synthetic approved resume',true,false
@@ -254,29 +325,31 @@ async function createReadyThread() {
   assert.equal(resumed.rows[0].outcome, "changed");
   return {
     threadId: accepted.thread_id as string,
-    threadHash: accepted.threadHash as string,
+    supabaseLeadId,
+    linkRequestId,
+    threadKey: accepted.threadKey as string,
     threadRef: accepted.event.threadRef,
   };
 }
 
 async function enqueueAssistant(threadId: string, version = 2) {
   const messageRef = `queued-${randomUUID()}`;
+  const messageKey = syntheticToken(messageRef);
   const event = makeMessageEvent({
     providerMessageRef: messageRef,
     direction: "outbound",
     author: "assistant",
     text: "synthetic assistant reply",
   });
-  const idempotencyKey = conversationMessageIdempotencyKey(event);
-  const fingerprint = sha256(JSON.stringify([
-    event.provider, event.threadRef, event.occurredAt, "assistant", "text", event.text,
-  ]));
-  return asRuntime(client => client.query(
+  const idempotencyKey = conversationMessageIdempotencyKey(messageKey);
+  const fingerprint = conversationMessageFingerprint(event);
+  const result = await asRuntime(client => client.query(
     `SELECT * FROM aichm_private.enqueue_conversation_message(
       $1,$2,'assistant',NULL,$3,$4,'text',$5,NULL,true
     )`,
     [threadId, version, idempotencyKey, fingerprint, event.text],
   ));
+  return { ...result, idempotencyKey, fingerprint };
 }
 
 async function claimAndAuthorize(outboxId: string) {
@@ -313,13 +386,45 @@ test("ephemeral PostgreSQL preparation proves private RPC boundary and legacy hi
     await assert.rejects(directRead.query("SELECT * FROM aichm_private.conversation_threads"));
     await directRead.query("ROLLBACK TO SAVEPOINT privilege_check");
     await assert.rejects(directRead.query(
-      `INSERT INTO aichm_private.conversation_threads(provider,provider_thread_hash)
-       VALUES ('whatsapp',$1)`, [sha256("direct-write-denied")],
+      `INSERT INTO aichm_private.conversation_threads(provider,provider_thread_key)
+       VALUES ('whatsapp',$1)`, [syntheticToken("direct-write-denied")],
     ));
     await directRead.query("ROLLBACK TO SAVEPOINT privilege_check");
     await directRead.query("ROLLBACK");
   } finally {
     directRead.release();
+  }
+});
+
+test("runtime readiness is separate, read-only, and accepts only one constrained approved login", {
+  skip: !enabled,
+}, async () => {
+  requireHarness();
+  const client = await pool!.connect();
+  const login = "avni_runtime_test_login";
+  const broadRole = "avni_runtime_test_broad";
+  try {
+    await assert.rejects(
+      assertAvniConversationRuntimeReadiness(client, "avni_runtime_missing_login"),
+      /AVNI_CONVERSATION_RUNTIME_LOGIN_NOT_APPROVED/,
+    );
+    await client.query(`
+      CREATE ROLE ${login} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+      CREATE ROLE ${broadRole} NOLOGIN;
+      GRANT aichm_conversation_runtime TO ${login};
+    `);
+    await assertAvniConversationRuntimeReadiness(client, login);
+    await client.query(`GRANT ${broadRole} TO ${login}`);
+    await assert.rejects(
+      assertAvniConversationRuntimeReadiness(client, login),
+      /AVNI_CONVERSATION_RUNTIME_LOGIN_NOT_APPROVED/,
+    );
+  } finally {
+    await client.query(`REVOKE ${broadRole} FROM ${login}`).catch(() => undefined);
+    await client.query(`REVOKE aichm_conversation_runtime FROM ${login}`).catch(() => undefined);
+    await client.query(`DROP ROLE IF EXISTS ${login}`).catch(() => undefined);
+    await client.query(`DROP ROLE IF EXISTS ${broadRole}`).catch(() => undefined);
+    client.release();
   }
 });
 
@@ -341,10 +446,25 @@ test("provider events are idempotent, changed replays conflict, and unmapped thr
   const secondWrapper = await acceptMessage(wrapper);
   assert.equal(secondWrapper.outcome, "accepted");
   const messageCount = await queryRows<{ count: string }>(
-    "SELECT count(*)::text AS count FROM aichm_private.conversation_messages WHERE provider_message_ref=$1",
-    [event.providerMessageRef],
+    "SELECT count(*)::text AS count FROM aichm_private.conversation_messages WHERE provider_message_key=$1",
+    [syntheticToken(event.providerMessageRef)],
   );
   assert.equal(Number(messageCount[0].count), 1);
+  assert.match(first.threadKey as string, /^hmac-sha256:v1:[0-9a-f]{64}$/);
+  assert.notEqual(first.threadKey, event.threadRef);
+
+  const plainDigest = "c".repeat(64);
+  await assert.rejects(asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.accept_provider_event(
+      $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+    )`,
+    [
+      "whatsapp", plainDigest, plainDigest, `event:v1:${plainDigest}`, "d".repeat(64),
+      event.occurredAt, "message", syntheticToken("raw-rejected-message"),
+      `message:v1:${"e".repeat(64)}`, "f".repeat(64), "inbound", "prospect", "text",
+      "synthetic", null, null, null,
+    ],
+  )), /invalid_conversation_event/);
 
   const conflicting = makeMessageEvent({ ...event, text: "different synthetic body" });
   await assert.rejects(acceptMessage(conflicting), /conversation_event_idempotency_conflict/);
@@ -355,19 +475,82 @@ test("provider events are idempotent, changed replays conflict, and unmapped thr
     [first.thread_id, `message:v1:${"a".repeat(64)}`, "b".repeat(64)],
   ));
   assert.equal(notMapped.rows[0].outcome, "thread_mapping_unavailable");
+
+  const externalOutbound = makeMessageEvent({
+    direction: "outbound",
+    author: "human_staff",
+    text: "observed provider-side outbound",
+  });
+  const outboxBefore = await queryRows<{ count: string }>(
+    "SELECT count(*)::text AS count FROM aichm_private.conversation_outbox",
+  );
+  const observed = await acceptMessage(externalOutbound);
+  assert.equal(observed.outcome, "accepted");
+  const observedMessage = await queryRows<{ delivery_state: string }>(
+    "SELECT delivery_state FROM aichm_private.conversation_messages WHERE id=$1",
+    [observed.message_id],
+  );
+  const outboxAfter = await queryRows<{ count: string }>(
+    "SELECT count(*)::text AS count FROM aichm_private.conversation_outbox",
+  );
+  assert.equal(observedMessage[0].delivery_state, "unknown");
+  assert.equal(outboxAfter[0].count, outboxBefore[0].count);
+
+  const ready = await createReadyThread();
+  const queued = await enqueueAssistant(ready.threadId);
+  const duplicateEnqueue = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.enqueue_conversation_message(
+      $1,2,'assistant',NULL,$2,$3,'text','synthetic assistant reply',NULL,true
+    )`,
+    [ready.threadId, queued.idempotencyKey, queued.fingerprint],
+  ));
+  assert.equal(duplicateEnqueue.rows[0].outcome, "duplicate");
+  assert.equal(duplicateEnqueue.rows[0].outbox_id, queued.rows[0].outbox_id);
+  await assert.rejects(asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.enqueue_conversation_message(
+      $1,2,'assistant',NULL,$2,$3,'text','changed reply',NULL,true
+    )`,
+    [ready.threadId, queued.idempotencyKey, "f".repeat(64)],
+  )), /conversation_outbox_idempotency_conflict/);
+
+  const linkReplay = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.link_conversation_thread($1,$2,0,'replit_lms_user:42',$3,'synthetic identity review')`,
+    [ready.threadId, ready.supabaseLeadId, ready.linkRequestId],
+  ));
+  assert.equal(linkReplay.rows[0].outcome, "duplicate");
+  const conflictingLinkReplay = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.link_conversation_thread($1,$2,0,'replit_lms_user:42',$3,'different reason')`,
+    [ready.threadId, ready.supabaseLeadId, ready.linkRequestId],
+  ));
+  assert.equal(conflictingLinkReplay.rows[0].outcome, "request_id_conflict");
 });
 
 test("resume uses consent and opt-out gates, and only a versioned staff action changes ownership", {
   skip: !enabled,
 }, async () => {
   const { threadId } = await createReadyThread();
+  const takeoverRequestId = randomUUID();
   const takeover = await asRuntime(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
       $1,2,'takeover','replit_lms_user:42',$2,'synthetic takeover',false,true
     )`,
-    [threadId, randomUUID()],
+    [threadId, takeoverRequestId],
   ));
   assert.equal(takeover.rows[0].outcome, "changed");
+  const takeoverReplay = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.transition_conversation_control(
+      $1,2,'takeover','replit_lms_user:42',$2,'synthetic takeover',false,true
+    )`,
+    [threadId, takeoverRequestId],
+  ));
+  assert.equal(takeoverReplay.rows[0].outcome, "duplicate");
+  const changedReplay = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.transition_conversation_control(
+      $1,2,'takeover','replit_lms_user:42',$2,'different request data',false,true
+    )`,
+    [threadId, takeoverRequestId],
+  ));
+  assert.equal(changedReplay.rows[0].outcome, "request_id_conflict");
   const noConsent = await asRuntime(client => client.query(
     `SELECT * FROM aichm_private.transition_conversation_control(
       $1,3,'resume','replit_lms_user:42',$2,'synthetic consent missing',false,false
@@ -410,11 +593,13 @@ test("takeover wins atomically against a claimed AI send and invalidates stale q
   try {
     await claimant.query("BEGIN");
     await claimant.query("SET LOCAL ROLE aichm_conversation_runtime");
+    const claimantPid = (await claimant.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     const claim = await claimant.query("SELECT * FROM aichm_private.claim_next_conversation_outbound(true,60)");
     const item = claim.rows.find(row => row.outbox_id === queued.rows[0].outbox_id);
     assert.ok(item);
 
     await taker.query("SET ROLE aichm_conversation_runtime");
+    const takerPid = (await taker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     let takeoverFinished = false;
     const takeoverPromise = taker.query(
       `SELECT * FROM aichm_private.transition_conversation_control(
@@ -422,7 +607,7 @@ test("takeover wins atomically against a claimed AI send and invalidates stale q
       )`,
       [threadId, randomUUID()],
     ).then(result => { takeoverFinished = true; return result; });
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await waitUntilBlockedBy(takerPid, claimantPid);
     assert.equal(takeoverFinished, false, "takeover waits while claim holds the thread lock");
     await claimant.query("COMMIT");
     const takeover = await takeoverPromise;
@@ -506,6 +691,32 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
   );
   assert.equal(count[0].attempt_count, 2);
 
+  const { threadId: sendingThread } = await createReadyThread();
+  const sendingQueue = await enqueueAssistant(sendingThread);
+  const sending = await claimAndAuthorize(sendingQueue.rows[0].outbox_id);
+  assert.equal(sending.allowed, true);
+  await pool!.query(
+    `UPDATE aichm_private.conversation_outbox SET lease_expires_at=now()-interval '1 second' WHERE id=$1`,
+    [sendingQueue.rows[0].outbox_id],
+  );
+  await pool!.query(
+    `UPDATE aichm_private.conversation_outbox_attempts SET lease_expires_at=now()-interval '1 second' WHERE id=$1`,
+    [sending.attempt_id],
+  );
+  const afterExpiredSend = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_next_conversation_outbound(true,60)",
+  ));
+  assert.equal(afterExpiredSend.rows.some(row => row.outbox_id === sendingQueue.rows[0].outbox_id), false);
+  const unknownState = await queryRows<{ outbox_state: string; attempt_count: number; delivery_state: string }>(`
+    SELECT o.state AS outbox_state,o.attempt_count,a.delivery_state
+    FROM aichm_private.conversation_outbox o
+    JOIN aichm_private.conversation_outbox_attempts a ON a.outbox_id=o.id
+    WHERE o.id=$1 ORDER BY a.attempt_number DESC LIMIT 1
+  `, [sendingQueue.rows[0].outbox_id]);
+  assert.equal(unknownState[0].outbox_state, "unknown");
+  assert.equal(unknownState[0].delivery_state, "unknown");
+  assert.equal(unknownState[0].attempt_count, 1);
+
   const { threadId: ceilingThread } = await createReadyThread();
   const ceilingQueue = await enqueueAssistant(ceilingThread);
   for (let expectedAttempt = 1; expectedAttempt <= 8; expectedAttempt += 1) {
@@ -548,9 +759,10 @@ test("delivery receipts retain raw provider labels and ignore regressions", {
   const send = await claimAndAuthorize(queued.rows[0].outbox_id);
   assert.equal(send.allowed, true);
   const providerMessageRef = `sent-${randomUUID()}`;
+  const providerMessageKey = syntheticToken(providerMessageRef);
   const sent = await asRuntime(client => client.query(
     "SELECT aichm_private.record_conversation_send_result($1,$2,$3,'sent',$4) AS result",
-    [queued.rows[0].outbox_id, send.attempt_id, send.lease_token, providerMessageRef],
+    [queued.rows[0].outbox_id, send.attempt_id, send.lease_token, providerMessageKey],
   ));
   assert.equal(sent.rows[0].result, "sent");
   const attempt = await queryRows<{ id: string }>(
@@ -579,9 +791,9 @@ test("delivery receipts retain raw provider labels and ignore regressions", {
         $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,NULL,NULL,NULL,NULL,NULL,NULL,NULL,$9,$10
       )`,
       [
-        event.provider, event.providerEventRef, sha256(event.threadRef),
-        conversationEventIdempotencyKey(event), conversationEventFingerprint(event),
-        event.occurredAt, event.kind, event.providerMessageRef, event.deliveryState,
+        event.provider, syntheticToken(event.providerEventRef), syntheticToken(event.threadRef),
+        conversationEventIdempotencyKey(syntheticToken(event.providerEventRef)), conversationEventFingerprint(event),
+        event.occurredAt, event.kind, syntheticToken(event.providerMessageRef), event.deliveryState,
         event.rawProviderReceiptValue,
       ],
     ));
@@ -612,6 +824,79 @@ test("delivery receipts retain raw provider labels and ignore regressions", {
   assert.equal(message[0].delivery_state, "read");
 });
 
+test("a late receipt for a prior attempt is retained without mutating the current attempt", {
+  skip: !enabled,
+}, async () => {
+  const { threadId, threadRef } = await createReadyThread();
+  const queued = await enqueueAssistant(threadId);
+
+  const firstSend = await claimAndAuthorize(queued.rows[0].outbox_id);
+  const priorProviderMessageRef = `prior-attempt-${randomUUID()}`;
+  const priorProviderMessageKey = syntheticToken(priorProviderMessageRef);
+  await asRuntime(client => client.query(
+    "SELECT aichm_private.record_conversation_send_result($1,$2,$3,'sent',$4)",
+    [queued.rows[0].outbox_id, firstSend.attempt_id, firstSend.lease_token, priorProviderMessageKey],
+  ));
+
+  // Isolated fixture simulates a separately reviewed retry operation. No
+  // production retry path or sender is installed by this migration.
+  await pool!.query(`
+    UPDATE aichm_private.conversation_outbox
+    SET state='pending',attempt_count=1,lease_token=NULL,lease_expires_at=NULL
+    WHERE id=$1
+  `, [queued.rows[0].outbox_id]);
+  const secondSend = await claimAndAuthorize(queued.rows[0].outbox_id);
+  const currentProviderMessageKey = syntheticToken(`current-attempt-${randomUUID()}`);
+  await asRuntime(client => client.query(
+    "SELECT aichm_private.record_conversation_send_result($1,$2,$3,'sent',$4)",
+    [queued.rows[0].outbox_id, secondSend.attempt_id, secondSend.lease_token, currentProviderMessageKey],
+  ));
+
+  const receipt = {
+    contractVersion: 1,
+    provider: "whatsapp",
+    providerEventRef: `late-receipt-${randomUUID()}`,
+    threadRef,
+    occurredAt: new Date().toISOString(),
+    kind: "delivery",
+    providerMessageRef: priorProviderMessageRef,
+    deliveryState: "delivered",
+    rawProviderReceiptValue: "ProviderDelivered",
+  };
+  const parsed = validateAvniConversationEvent(receipt);
+  if (!parsed.success || parsed.event.kind !== "delivery") {
+    throw new Error("AVNI_TEST_LATE_RECEIPT_INVALID");
+  }
+  const event = parsed.event;
+  const recorded = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.accept_provider_event(
+      $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,NULL,NULL,NULL,NULL,NULL,NULL,NULL,$9,$10
+    )`,
+    [
+      event.provider, syntheticToken(event.providerEventRef), syntheticToken(event.threadRef),
+      conversationEventIdempotencyKey(syntheticToken(event.providerEventRef)),
+      conversationEventFingerprint(event), event.occurredAt, event.kind,
+      syntheticToken(event.providerMessageRef), event.deliveryState, event.rawProviderReceiptValue,
+    ],
+  ));
+  assert.equal(recorded.rows[0].outcome, "receipt_recorded");
+
+  const result = await queryRows<{ attempt_number: number; delivery_state: string; provider_message_key: string }>(`
+    SELECT attempt_number,delivery_state,provider_message_key
+    FROM aichm_private.conversation_outbox_attempts
+    WHERE outbox_id=$1 ORDER BY attempt_number
+  `, [queued.rows[0].outbox_id]);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].delivery_state, "sent");
+  assert.equal(result[1].delivery_state, "sent");
+  assert.equal(result[1].provider_message_key, currentProviderMessageKey);
+  const outbox = await queryRows<{ state: string }>(
+    "SELECT state FROM aichm_private.conversation_outbox WHERE id=$1",
+    [queued.rows[0].outbox_id],
+  );
+  assert.equal(outbox[0].state, "accepted");
+});
+
 test("provider acceptance is recorded as sent, not delivered, and takeover cannot recall it", {
   skip: !enabled,
 }, async () => {
@@ -619,9 +904,10 @@ test("provider acceptance is recorded as sent, not delivered, and takeover canno
   const queued = await enqueueAssistant(threadId);
   const send = await claimAndAuthorize(queued.rows[0].outbox_id);
   const providerAcceptedRef = `accepted-${randomUUID()}`;
+  const providerAcceptedKey = syntheticToken(providerAcceptedRef);
   await asRuntime(client => client.query(
     "SELECT aichm_private.record_conversation_send_result($1,$2,$3,'sent',$4)",
-    [queued.rows[0].outbox_id, send.attempt_id, send.lease_token, providerAcceptedRef],
+    [queued.rows[0].outbox_id, send.attempt_id, send.lease_token, providerAcceptedKey],
   ));
   const state = await queryRows<{ outbox_state: string; delivery_state: string }>(`
     SELECT o.state AS outbox_state,m.delivery_state

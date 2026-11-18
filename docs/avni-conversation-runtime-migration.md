@@ -14,8 +14,14 @@ loopback PostgreSQL cluster created by the explicit
   delivery receipts, and control audit events.
 - Admissions identity and WhatsApp consent/opt-out remain authoritative in
   Replit PostgreSQL. Supabase stores only the nullable exact `public.leads.id`
-  cross-link. New provider thread keys must be a server-computed keyed hash;
-  raw WhatsApp remote JIDs/phone numbers are not stored in the thread index.
+  cross-link. Provider event/thread/message/receipt references are accepted by
+  the SQL draft only as `hmac-sha256:v1:<hex>` tokens. The SQL checks token
+  shape; it cannot prove a caller actually computed an HMAC. No HMAC adapter or
+  key has been added because there is no approved server-only key boundary for
+  it. A keyed, domain-separated server HMAC adapter is a hard prerequisite
+  before any event can be persisted. Raw provider IDs, remote JIDs, phone
+  numbers, and provider media IDs must never be passed to persistent columns.
+  Media pointers are restricted to app-owned `media:v1:<uuid>` references.
 - Foreign keys do not cascade transcript deletion; mapped lead/thread deletion
   is restricted until a separately reviewed retention/deletion policy exists.
 - New threads start unmapped and human-owned. Mapping uses an exact existing
@@ -41,8 +47,11 @@ The claim and final authorization RPCs compare the queue's control version,
 thread mode, open lifecycle, mapping, lease, and a caller-supplied
 `p_whatsapp_send_allowed` assertion. The assertion must come from a fresh,
 server-side Replit consent/opt-out check, never from a client or provider
-payload. The SQL cannot independently query Replit PostgreSQL; no live sender,
-transport route, or credential is installed by this migration. Until a trusted
+  payload. Provider-observed outbound messages are recorded as `unknown`, never
+  `queued`, and that ingress path creates no outbox item. An expired `claimed`
+  lease is retryable; an expired `sending` lease becomes `unknown` and is not
+  blindly retried. The SQL cannot independently query Replit PostgreSQL; no live sender,
+  transport route, or credential is installed by this migration. Until a trusted
 Replit authorization layer and least-privilege database login are separately
 provisioned, no runtime can execute the RPCs.
 
@@ -55,17 +64,24 @@ provider sender or enable any messaging.
 
 ## Access and rollout prerequisites
 
-- The migration creates only the `NOLOGIN` role
-  `aichm_conversation_runtime`; it creates no password, login, secret, or
-  service credential. It grants that role `USAGE` on the private schema and
-  `EXECUTE` on the narrowly scoped RPCs, not direct table/sequence DML.
+- The migration creates two `NOLOGIN`, `NOINHERIT`, non-superuser,
+  non-`BYPASSRLS` roles: `aichm_conversation_owner` and
+  `aichm_conversation_runtime`. The owner owns only these seven private tables
+  and their RPCs; forced RLS has a policy only for that non-login owner. The
+  owner has no memberships or schema `CREATE` after migration. The runtime role
+  receives schema `USAGE` and narrowly scoped `EXECUTE`, not table or sequence
+  privileges. No password, login, secret, service credential, or role
+  membership is created.
 - `anon`, `authenticated`, `service_role`, and `aichm_crm_reader` receive no
   direct privilege on the seven new tables and no execute privilege on the
   write RPCs. RLS is enabled with no client policies. `service_role` is not
   granted the new runtime functions.
-- A future DBA-reviewed setup must decide which authenticated Replit server
-  login, if any, receives membership in the `NOLOGIN` runtime role. Do not
-  reuse the broad Supabase `service_role` or give n8n a database credential.
+- A separate runtime-readiness check accepts only one explicitly approved
+  `LOGIN` role as a direct member of the runtime capability, with no other
+  memberships and no superuser, `BYPASSRLS`, create, replication, or inherit
+  attributes. It does not grant membership or create a login. No runtime login
+  has been provisioned. Do not reuse the broad Supabase `service_role` or give
+  n8n a database credential.
 - Before any live application, independently verify the existing 20261107
   contract and `public.leads.replit_lead_id` unique mapping on the intended
   Supabase primary. This draft does not infer that the old preparation SQL is
@@ -73,6 +89,12 @@ provider sender or enable any messaging.
 - Apply only after a separate reviewed schema diff, role review, backup/
   recovery plan, and explicit owner approval. Do not backfill or dual-write
   legacy `public.conversations` as part of this draft.
+- The RPC layer is not the CRM authorization layer. Before invoking it, the
+  trusted Replit server must re-check the authenticated staff actor, current
+  assignment/ownership scope, canonical CRM-to-Supabase lead crosswalk,
+  WhatsApp consent, opt-out, and any required rate limits. Client fields and
+  provider webhook claims about actor, assignment, consent, or opt-out are
+  never authoritative. These checks are not implemented by the SQL draft.
 
 ## Objects in the draft
 
@@ -87,5 +109,15 @@ eight; claimed leases are recoverable, while an expired in-flight send is
 marked unknown rather than blindly resent.
 
 `assertAvniConversationRuntimePostconditions` checks table/column inventory,
-RLS and absence of policies, indexes, the `NOLOGIN` role, no direct DML, and
-the fixed-search-path `SECURITY DEFINER` function/execute boundary.
+forced RLS and the single owner-only policy per table, indexes, safe role
+attributes/ownership, no role memberships, no direct runtime/client DML, no
+sequences, and the fixed-search-path `SECURITY DEFINER` owner/execute boundary.
+`assertAvniConversationRuntimeReadiness` is a separate, read-only check for a
+future explicitly approved runtime login; it rejects missing, duplicate, or
+broad memberships and performs no provisioning.
+
+Control request IDs are serialized with transaction advisory locks. Exact
+replays return `duplicate`; reuse with different control data returns
+`request_id_conflict`. Provider and outbound idempotency keys must match their
+HMAC token suffix. Injected failure tests verify the draft migration rolls back
+its created roles and objects atomically in the disposable database.
