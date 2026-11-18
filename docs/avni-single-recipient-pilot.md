@@ -2,11 +2,13 @@
 
 ## Safety status
 
-The admin route is registered at `POST /api/admin/integrations/avni/pilot-dispatch`,
-but it is deliberately not wired to a dispatcher. Its default feature gate is
-off. Even if the gate and allowlisted recipient are configured, the registered
-route returns `dispatch_runtime_unavailable` while the server-only adapters are
-unconfigured. No message is sent by the current application.
+The admin route is registered at `POST /api/admin/integrations/avni/pilot-dispatch`.
+The dispatcher object is constructed, but registration passes `enabled: false`
+and `supabaseWriter: null`; after session/admin/origin checks and request-shape
+validation, the route returns `dispatch_disabled` before database or provider
+dispatch work. No message is
+sent by the current application. Setting the environment gate alone cannot
+override this source-level off switch.
 
 The request is an authenticated CRM admin session, passes the existing same-
 origin/CSRF guard, supplies a canonical Replit lead UUID, the approved E.164
@@ -48,9 +50,9 @@ and reader grant are reviewed and present.
   reader, and control-version cancellation of stale queued messages. It is
   ordered after runtime v1 and read preflight v2. None of the Supabase
   migrations is applied by this work.
-- The Evolution adapter accepts an injected transport only. Its production
-  HTTP client now targets the supplied host using the current upstream
-  Evolution API shape: `POST /message/sendText/{instance}`, `apikey` header,
+- The Evolution adapter accepts an injected transport only. Its server-side
+  HTTP client targets the fixed host `https://evo.aromacafeinstitute.in` using
+  the source-defined API shape: `POST /message/sendText/{instance}`, `apikey` header,
   JSON `{ number, text }`, and a response `key.id`. E.164 is validated before
   converting the recipient to digits for the request. Redirects are not
   followed, response bodies are size-bounded and never logged, and only
@@ -65,8 +67,13 @@ and reader grant are reviewed and present.
 - The Supabase writer accepts injected pools and uses fixed RPCs. No writable
   runtime pool or credential is connected. The existing CRM reader is not
   promoted to a writer.
-- HMAC provider-reference signing requires an injected key ring. Synthetic
-  keys are used only by tests; no real key is generated, configured or stored.
+- HMAC provider-reference signing has a server-only key-ring adapter at
+  `server/integrations/avni-provider-reference-hmac-config.ts`. It reads
+  `AVNI_PROVIDER_REFERENCE_HMAC_KEYRING_JSON`, validates strict JSON and
+  key-material shape, and keeps retained keys available for alias lookup.
+  Synthetic keys are used only by tests; no real key is generated, configured,
+  or stored. Secure key custody, rotation approval, and Production presence
+  remain unverified.
 
 ## Configuration names introduced in source
 
@@ -81,20 +88,20 @@ and reader grant are reviewed and present.
   `SUPABASE_DB_SSL_CA`; those are presence-only readiness names, not proof of
   a correctly scoped login, reachable primary, or valid TLS configuration.
   No writer pool is created and no values are read or changed here.
-- A secure server-only HMAC key-provider integration and key-ID rotation policy
-  remain prerequisites. No key name or value is invented here; the owner must
-  approve a workspace-managed secret contract before a provider key source is
-  wired.
-- The implementation-time Production and Development presence-only checks report
-  `EVOLUTION_API_KEY`, `EVOLUTION_API_INSTANCE`, the dispatch gate, and the
-  recipient allowlist as unconfigured. The Supabase writer URL is also absent;
-  the read-only Supabase URL and CA names are present, but their values and
-  connection validity were not inspected.
+- `AVNI_PROVIDER_REFERENCE_HMAC_KEYRING_JSON` is the source-defined key-ring
+  name. No value or key is supplied here. Configure it only through the
+  workspace secret manager after owner approval; never place it in browser or
+  n8n configuration.
+- Admin readiness reports presence/shape only where the server can safely
+  parse configuration. It does not establish Production secret validity,
+  database identity, Meta permissions, Evolution reachability, or workflow
+  state.
 - The app cannot consume an n8n Header Auth credential by reference. The
   dedicated Replit secret above is required; the n8n secret was not accessed.
 - The dispatcher is hard-disabled in server registration as well as gated by
-  `AVNI_SINGLE_RECIPIENT_DISPATCH_ENABLED`. Even if the HTTP transport is
-  configured, missing writer/HMAC dependencies prevent queueing or sending.
+  `AVNI_SINGLE_RECIPIENT_DISPATCH_ENABLED`. The server also passes no
+  `supabaseWriter`. Even if the HTTP transport, gate, recipient allowlist, and
+  HMAC configuration are present, queueing and sending remain unavailable.
 
 ## Required before a controlled send can be considered
 

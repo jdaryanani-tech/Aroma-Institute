@@ -171,12 +171,13 @@ username is intentionally allowed to differ from the platform URL's username;
 otherwise a dedicated non-superuser could not replace the historical
 `postgres` login. Host, effective port, database name, and query/TLS policy
 must still match.
-Startup then checks current database, login role, non-superuser
-status, safe group memberships, required core privileges, read-only assignment
-table ACLs, assignment-function EXECUTE, and absence of schema CREATE before
-opening the HTTP listener. If the app URL is absent, existing behavior is
-retained and startup warns that least privilege is not enabled. If it is
-present but invalid or not fully provisioned, startup fails closed.
+Startup then checks current database, login role, primary/read-write status,
+non-superuser status, safe group memberships, required core privileges,
+read-only assignment table ACLs, assignment-function EXECUTE, and absence of
+schema CREATE before opening the HTTP listener. Development may retain legacy
+`DATABASE_URL` behavior when the explicit app URL is absent. Production does
+not: `AICHM_APP_DATABASE_URL` is mandatory and startup fails closed if it is
+absent, mismatched, or not fully provisioned.
 
 Replit's current database documentation describes using the Development
 Database SQL console for PostgreSQL role statements, including `CREATE ROLE`
@@ -193,14 +194,14 @@ not allowed; it must stop before ledger creation or migration SQL. The explicit
 `--preflight-app-role` mode checks the candidate login, pinned database, and
 role memberships without requiring any CRM assignment/history tables or
 functions. The migration path does not switch application credentials. The
-application still uses legacy `DATABASE_URL` behavior with a warning when
-`AICHM_APP_DATABASE_URL` is absent. When that secret is present, app startup
-uses it and performs the full post-migration readiness check. If making the
-secret available to the runner restarts the app before migrations are applied,
-startup may fail closed because CRM objects are not ready. Confirm whether the
-secret can be scoped to the runner workflow; if not, schedule a separately
-approved maintenance window or other safe sequencing. Do not restart the
-current app as part of this code-only preparation.
+application uses `AICHM_APP_DATABASE_URL` in Production and performs the full
+runtime role and CRM readiness checks before opening its listener. The
+platform `DATABASE_URL` is comparison-only in Production; it is never a
+fallback. Development can continue using legacy behavior only when the
+explicit app URL is absent. If the Production app secret is made available
+before required CRM objects and grants exist, startup intentionally fails
+closed. Confirm safe secret scoping and migration sequencing with the owner;
+do not restart Production as part of preparation.
 
 ### Pre-apply app-role requirements
 
@@ -287,14 +288,16 @@ Production role provisioning require separate approval.
    runtime grants. Restart the Development app only with separate approval;
    test authentication, admissions, LMS, CRM list/detail, assignment, and
    history-read routes on a controlled Development preview.
-9. Keep the prior runtime configuration available through the approved secret
-   workflow for rollback. If `AICHM_APP_DATABASE_URL` is removed, current code
-   falls back to legacy `DATABASE_URL` with a warning; that is emergency
-   rollback, not a least-privilege state.
-10. Treat Production as a separate future operation. Replit's Publish database
-   migration does not carry custom roles, function bodies, triggers or grants;
-   each must be separately provisioned, reviewed, and approved before a
-   Production application credential or deployment is changed.
+9. Keep the prior Development runtime configuration available through the
+   approved secret workflow for rollback. In Development only, removing
+   `AICHM_APP_DATABASE_URL` can restore legacy `DATABASE_URL` behavior; that
+   is not a least-privilege state. Production fails closed when its explicit
+   URL is absent.
+10. Treat Production role provisioning and deployment as separately approved
+    operations. Replit's Publish database migration does not carry custom
+    roles, function bodies, triggers or grants; each must be independently
+    provisioned, reviewed, and approved before changing a Production app
+    credential or deployment.
 
 No live Development role provisioning, secret rotation, connection test,
 migration, or deployment was performed during this code-only preparation.

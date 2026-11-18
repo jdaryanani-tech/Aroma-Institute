@@ -2,9 +2,9 @@
 
 ## Safety state
 
-Stage 1 of the target migration has been applied as empty-schema DDL only. No application records were copied, and no source schema/data, runtime routing, secrets, or deployment was changed. `server/db.ts` continues to use `DATABASE_URL`.
+**Historical audit note:** Stage 1 was recorded as empty-schema DDL only, with no application records copied and no routing, secret, or deployment change at that time. This is not current live verification. Current Production app startup requires `AICHM_APP_DATABASE_URL` and does not fall back to `DATABASE_URL`.
 
-The existing Supabase target now has the private `aichm` schema, its migration-control tables, and the 34 empty application tables from `aichm-app-schema-v1`. The existing `public` n8n/Avni tables are preserved. The data-copy engine remains a separate stage and has not been run.
+The 2026-11-06/07 evidence recorded a private `aichm` schema, migration-control tables, and 34 empty application tables from `aichm-app-schema-v1`; it also recorded the existing `public` n8n/Avni tables as preserved. Reconfirm all of these facts against the current target before relying on them. The data-copy engine was not run in that recorded stage.
 
 ## Runner behavior
 
@@ -41,7 +41,7 @@ Manifest files are supplied as CLI paths and are not emitted by the runner. The 
 
 ## Applied Stage 1 schema
 
-The versioned files `supabase/migrations/20261106_aichm_migration_control_v1.sql` and `supabase/migrations/20261106_aichm_app_schema_v1.sql` were applied through `script/apply-aichm-stage1-schema.ts`. Verification confirmed 34 empty application tables matching the current production-primary catalog, with RLS enabled and no browser policies or grants. `supabase-migration-control-schema.sql` is reference-only; do not execute it directly.
+The recorded 2026-11-06/07 run applied `supabase/migrations/20261106_aichm_migration_control_v1.sql` and `supabase/migrations/20261106_aichm_app_schema_v1.sql` through `script/apply-aichm-stage1-schema.ts`. That historical verification reported 34 empty application tables, RLS enabled, and no browser policies or grants. It does not prove current catalog state. `supabase-migration-control-schema.sql` is reference-only; do not execute it directly.
 
 No Calendar or payment tables were created. `aichm` was not added to database-level PostgREST schema settings; confirm the project-level Data API exposed-schema list in the Supabase Dashboard before any future API access.
 
@@ -58,4 +58,4 @@ npx tsx --test server/db/aichm-migration-engine.test.ts \
 
 They cover prerequisite refusal, signatures, backup/restore manifest validation, identity/TLS checks, FK order, protected tables, review gates, conflicts, secret-safe logging, stable IDs/auth hashes, transactional rollback, checkpoint resume, rerun skips, and transform restrictions.
 
-Do not run data-copy modes until a fresh production-primary backup is independently restored, reconciliation and schema manifests are reviewed, and all separate owner approval gates are satisfied. The data-copy engine does not create backups or run schema DDL; Stage 1 schema creation is a separate completed operation.
+Do not run data-copy modes until a fresh production-primary backup is independently restored, reconciliation and schema manifests are reviewed, and all separate owner approval gates are satisfied. The data-copy engine does not create backups or run schema DDL; the recorded Stage 1 schema creation is a historical operation that must be reverified before further work.

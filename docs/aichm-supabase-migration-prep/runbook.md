@@ -4,7 +4,7 @@
 
 ## 0. Hard safety rules
 
-- Keep `DATABASE_URL` as the active app database until a separate owner-approved cutover.
+- Production CRM runtime uses `AICHM_APP_DATABASE_URL`; `DATABASE_URL` is not a Production fallback. Do not switch either connection or route data without a separate owner-approved cutover.
 - Keep the existing Supabase public AICHM/n8n tables untouched.
 - Never run historical migrations `0000`–`0011` as a batch against either Supabase or production Replit.
 - `script/aichm-supabase-migration-prep.ts` remains snapshot-only. The separate `script/aichm-migrate.ts` has snapshot-only default mode, explicit read-only live dry-run, and a guarded apply path. It was not run against live databases in this task.
@@ -20,7 +20,7 @@ Before a future dry-run against live databases:
 3. Reject same-source/target identity, unexpected database/project identity, wrong environment, schema drift, missing required secrets, or any existing target object that is not on the reviewed allowlist.
 4. Record exact counts, schema fingerprint, and sizes with a UTC timestamp. No primary-key or applicant values are printed.
 
-Current required server-only connection settings are `SUPABASE_DATABASE_URL` and `SUPABASE_DB_SSL_CA`. The application still uses `DATABASE_URL`. A later least-privilege runtime role and target URI are a separate security decision.
+The migration-preparation connection uses `SUPABASE_DATABASE_URL` and `SUPABASE_DB_SSL_CA`. Production CRM runtime uses the distinct least-privilege `AICHM_APP_DATABASE_URL` and fails closed if it is absent or fails role/schema checks. `DATABASE_URL` must never silently substitute for that Production login.
 
 ## 2. Backup and restore rehearsal — required before any copy
 
@@ -33,7 +33,7 @@ No source or target backup was created in this preparation task. Before a migrat
 5. Restore development and production exports into **separate**, isolated, disposable PostgreSQL 16-compatible databases, then run count, schema, sequence, FK, and checksum reconciliation for each. Restore rehearsal must succeed before any target copy.
 6. Retain all source and target backups through the agreed rollback window. Do not delete or overwrite either original database.
 
-**Current blocker:** Stage 1 created only empty target tables. Before any data copy, refresh the production-primary backup and independently restore-test it because the existing source backup is older than current source counts. The existing Supabase public backup remains independently verified.
+**Historical evidence, not a fresh verification:** Earlier preparation notes recorded empty target tables and an older production-primary backup. Reconfirm the live target inventory, backup freshness, and restore evidence through approved read-only evidence before any migration decision. Missing fresh evidence remains a blocker; do not infer that the prior state is still current.
 
 ## 3. Dry-run reconciliation
 
@@ -58,7 +58,7 @@ The checksum of an encrypted backup file is a separate artifact-integrity check,
 
 ## 4. Staged schema and data preparation
 
-1. Stage 1 is complete: the additive, versioned `aichm` control and application schema migrations are applied to the existing Supabase target. The 34 application tables are empty; the source was not changed.
+1. Historical preparation notes recorded additive `aichm` schema setup and 34 empty application tables. This is not a current verification or authorization. Reconfirm the live target catalog and zero-row evidence before any future copy.
 2. Before data copy, refresh and independently restore-test the production-primary backup, then review the source/target dry-run and signed reconciliation/schema manifests.
 3. Make application schema/SQL access explicit for `aichm`; retain `public` only for intentionally accessed Supabase-owned tables. Use a narrowly privileged server role, no browser database client, and no broad `anon`/`authenticated` grants.
 4. Copy in dependency order with bounded transactions/batches. Persist an append-only checkpoint per table/batch and source-key digest so a rerun skips identical rows. Use insert-only/no-overwrite semantics; conflicts stop the batch and require review.
@@ -72,7 +72,7 @@ Before requesting cutover approval, verify:
 
 - Exact per-table counts and HMAC batch checksums; zero unexplained differences.
 - PK/unique constraints, validated FKs, enum/default/index/sequence state, timezone fidelity, and no migration-table replay.
-- Existing `public.leads` (31), `public.conversations` (300), `public.course_knowledge` (54), their policies, and n8n/Avni use remain unchanged.
+- Existing public AICHM/AVNI tables and policies must be compared with the latest approved baseline; historical row counts in saved reports are not current verification.
 - Custom owner login with the existing scrypt hash, role, cookie/session semantics and unchanged `SESSION_SECRET`; admin authorization; LMS student/trainer access; counselling records and webhook retry metadata; VSL registration/playback tracking; Calendar schema/API; notification isolation.
 - RLS tests prove private AICHM tables are inaccessible to browser roles; app server role can perform only approved operations.
 - All copied media references resolve and playback is verified without deleting source objects.
@@ -86,7 +86,7 @@ No production cutover until the owner separately approves the exact source/targe
 At a future, separately approved cutover:
 
 1. Freeze source writes briefly, capture a final delta and repeat count/checksum verification.
-2. Switch runtime routing only after explicit approval; keep `DATABASE_URL` unchanged until this point.
+2. Change runtime routing only after explicit approval and a tested migration/cutover plan. Production CRM connection selection is controlled by `AICHM_APP_DATABASE_URL`, not by silently replacing `DATABASE_URL`.
 3. Monitor login, CRM, admissions, counselling, LMS, attendance, Calendar and notification checks.
 4. Keep the source production database intact and read-only during the agreed rollback period.
 5. If rollback is needed before target writes, route back to the untouched source. If target writes have occurred, do not simply switch back; first reconcile the target delta into the source through an approved, conflict-aware procedure.

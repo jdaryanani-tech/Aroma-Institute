@@ -1,7 +1,9 @@
 # Guarded development schema changes
 
-Application runtime configuration continues to use `DATABASE_URL`. Legacy
-Drizzle schema commands never use that variable. They require both an explicit
+In Development, application runtime may use `DATABASE_URL` when no explicit
+least-privilege app URL is configured. Production requires
+`AICHM_APP_DATABASE_URL` and fails closed; it never falls back to `DATABASE_URL`.
+Legacy Drizzle schema commands never use the application runtime URL. They require both an explicit
 intent and `AICHM_DEVELOPMENT_DATABASE_URL`; only local loopback targets with
 an allowlisted development database name are accepted. Remote development
 databases are intentionally unsupported because a URL alone cannot establish

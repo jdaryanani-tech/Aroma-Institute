@@ -1,6 +1,6 @@
 # AICHM → Supabase migration preparation
 
-**Status:** Stage 1 target schema is applied to the existing Supabase project. This was additive DDL only: no source or target application records were copied, no production runtime routing changed, and the app was not published or cut over. `DATABASE_URL` remains the current application database.
+**Historical status (2026-11-06 snapshot):** Saved preparation evidence recorded Stage 1 target schema as applied using additive DDL only, with no application records copied and no runtime routing change in that audit. This is not current live verification. Production CRM source now requires `AICHM_APP_DATABASE_URL`; it does not fall back to `DATABASE_URL`.
 
 **Applied migration IDs:** `aichm-migration-control-v1` and `aichm-app-schema-v1`.
 
@@ -62,7 +62,7 @@ The separate migration pool connected successfully with the CA normalized in mem
 - Issuer `CN=Supabase Intermediate 2021 CA, O=Supabase Inc, C=US`
 - SHA-256 fingerprint `03:70:9C:A4:4D:1B:06:E4:50:4D:A0:A8:3B:6C:A0:65:76:1E:DC:70:4C:D5:63:4B:CC:38:94:FD:5C:7B:32:48`; validity 2025-03-12 through 2030-03-11
 
-The connection read only database identity, catalogs, and exact table counts. The separate factory is not used by the normal app; `server/db.ts` uses `DATABASE_URL` for application runtime, while `drizzle.config.ts` now requires the guarded development-only connection variables.
+The 2026-11-06 connection read only database identity, catalogs, and exact table counts. At that time the separate factory was not used by the normal app and `server/db.ts` used `DATABASE_URL`. Current Production runtime instead requires `AICHM_APP_DATABASE_URL`; the historical observation must not be treated as current connection state.
 
 ## Preparation files
 
@@ -73,6 +73,6 @@ The connection read only database identity, catalogs, and exact table counts. Th
 - `server/db/aichm-migration-plan.ts`, `server/db/aichm-migration-engine.ts`, and the migration scripts — data-copy planning/apply gates. The data-copy engine was not run in this stage.
 - `runbook.md` and `migration-engine.md` — backup, restore, reconciliation, dry-run and cutover gates.
 
-The source remains `DATABASE_URL`. The migration target factory reads `SUPABASE_DATABASE_URL` and `SUPABASE_DB_SSL_CA`; the production-source factory is separately gated by `AICHM_SOURCE_PROD_DATABASE_URL` and verifies `verify-full` TLS. Data-copy apply mode remains blocked until the production backup is refreshed and independently restore-tested, reconciliation and schema manifests are reviewed/signed, and the separate approval gates are supplied. Do not infer data-migration approval from the Stage 1 DDL authorization.
+At the time of the snapshot, migration tooling used `SUPABASE_DATABASE_URL` and `SUPABASE_DB_SSL_CA`; the production-source factory was separately gated by `AICHM_SOURCE_PROD_DATABASE_URL` and verified `verify-full` TLS. Current app runtime uses `AICHM_APP_DATABASE_URL` in Production. Data-copy apply mode remains blocked until fresh backup/restore, reconciliation, schema manifests, and separate approvals are verified; do not infer current state or data-migration approval from the historical Stage 1 record.
 
-The code-based engine, connection factories, apply gates and synthetic tests are described in [`migration-engine.md`](migration-engine.md). No data-copy run or cutover occurred. The Supabase public backup is verified; the production backup is not current enough for data-copy use and must be refreshed/restored before that stage. Calendar, payments and storage/media transfer remain separate unresolved work.
+The code-based engine, connection factories, apply gates and synthetic tests are described in [`migration-engine.md`](migration-engine.md). The statements about no data-copy/cutover and backup freshness refer to the 2026-11-06/07 audit evidence only; recheck current audit artifacts before relying on them. Calendar, payments and storage/media transfer were separate unresolved work in that snapshot.

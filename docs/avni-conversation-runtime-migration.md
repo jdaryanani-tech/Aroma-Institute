@@ -1,16 +1,18 @@
 # AVNI conversation runtime migration draft
 
-`supabase/migrations/20261118_avni_conversation_runtime_v1.sql`,
-`supabase/migrations/20261118_avni_conversation_runtime_v2_preflight.sql` are unapplied,
-review-only migration drafts. They were not run against Supabase, Development,
-or Production. Their verification suite uses only a disposable
+`supabase/migrations/20261118_avni_conversation_runtime_v1.sql` and
+`supabase/migrations/20261118_avni_conversation_runtime_v2_preflight.sql` are
+review-only source drafts. Existing project records do not show them applied,
+but current live catalog state has not been checked by this source-only work.
+Their verification suite uses only a disposable
 loopback PostgreSQL cluster created by the explicit
 `script/test-crm-persistence.ts --run-isolated-ephemeral-postgres
 --suite=avni-conversation-runtime` command.
 
 `migrations/0019_avni_dispatch_grants.sql` and
-`migrations/0020_avni_dispatch_authorization_fence.sql` are also drafts and
-have not been applied. They add a Replit consent epoch and reference/hash-only
+`migrations/0020_avni_dispatch_authorization_fence.sql` are also source drafts.
+Existing project records do not show them applied; current Production catalog
+state is not verified here. They add a Replit consent epoch and reference/hash-only
 dispatch-grant ledger, then bind grants to an active LMS actor and assignment.
 They are not in the Drizzle journal because the repository's manual post-0012
 migration chain must be reconciled before enabling them through the normal
@@ -190,11 +192,17 @@ this interactive adapter or read the grant ledger.
 
 The local dispatch protocol is separate from that preflight. Its in-transaction
 grant helpers require current consent and epoch, and a supplied fixed
-`begin_send` callback. They return `providerCallAllowed: false` in every case;
-no route or caller wires them to a provider. The `N8N_AVNI_FOLLOWUP_READ_SECRET`
-candidate-read capability is not broadened and cannot access grants or send.
-The server-only keyed HMAC boundary for provider references remains a hard
-prerequisite; no key or adapter is created here.
+`begin_send` callback. They return `providerCallAllowed: false` in every case.
+The admin route is registered but its dispatcher is hard-disabled in server
+registration, and no Supabase writer pool is attached. The
+`N8N_AVNI_FOLLOWUP_READ_SECRET` candidate-read capability is not broadened and
+cannot access grants or send.
+
+The server-only key-ring adapter is implemented in
+`server/integrations/avni-provider-reference-hmac-config.ts` and reads only
+`AVNI_PROVIDER_REFERENCE_HMAC_KEYRING_JSON`. Tests use synthetic keys. No
+Production key is generated, provisioned, or verified; key custody and
+rotation approval remain prerequisites.
 
 The Replit-only migration `0020` also requires the existing
 `aichm_crm_owner`, `aichm_app_runtime`, and `aichm_app_login` roles with their

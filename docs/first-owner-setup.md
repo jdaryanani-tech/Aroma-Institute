@@ -44,8 +44,9 @@ is required if there is no other functioning admin.
 - POST body: `{phone: "<exact approved E.164>", secret: "<private value>", confirmOwner: true}`.
   Phone/secret are typed privately, never prefilled and never accepted via query.
 - Success 201: `{maskedPhone: "***8669", setupUrl: "<private HTTPS URL>", expiresAt: "<ISO timestamp>"}`.
-- The production runtime uses the **same existing db/pool and DATABASE_URL** as
-  the rest of the app, never a new client, caller-supplied database or override URL.
+- The production runtime uses the app's shared database pool backed by
+  `AICHM_APP_DATABASE_URL`, the required least-privilege Production login. It
+  does not accept a caller-supplied database or fall back to `DATABASE_URL`.
 - Requires production mode, valid secret configuration, HTTPS, canonical main host,
   exact same-origin POST, exact owner phone and explicit confirmation.
 - No secret: 404. Wrong secret/origin: 403. Authorized but wrong phone/confirmation:
@@ -108,5 +109,6 @@ two sign-in links). No live bootstrap request was submitted.
   links, disabled workspace and iPhone-sized layout. Never provisions a real account.
 - `npm run check`, `npm run build`, and default `NODE_ENV=test npm test`.
 
-Do not change the normal `DATABASE_URL`, run a provisioning command in the workspace,
-add deployment hooks, or use a development account as evidence of production access.
+Do not change `AICHM_APP_DATABASE_URL` or `DATABASE_URL`, run a provisioning
+command in the workspace, add deployment hooks, or use a Development account as
+evidence of Production access.

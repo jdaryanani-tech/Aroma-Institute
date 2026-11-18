@@ -1,14 +1,16 @@
 # AICHM two-database ownership contract
 
-Status: workspace implementation and migration preparation only. No production
-or Supabase migration has been applied, no records have been copied, and no
-deployment or n8n workflow has been changed.
+This workspace architecture note is not live verification. Historical
+preparation records document an additive empty-schema Supabase stage; current
+Supabase catalog state, data-copy state, deployment, and routing must be
+verified from fresh evidence before any operational decision.
 
 ## Ownership
 
-- Replit PostgreSQL, via the existing `DATABASE_URL`, owns operational AICHM
-  records: admissions leads, enquiries, VSL registration/progress, counselling
-  submissions, LMS and Calendar state.
+- Replit PostgreSQL owns operational AICHM records: admissions leads,
+  enquiries, VSL registration/progress, counselling submissions, LMS and
+  Calendar state. Production runtime uses the least-privilege
+  `AICHM_APP_DATABASE_URL`; it does not fall back to `DATABASE_URL`.
 - Supabase owns AVNI's WhatsApp transcript and provider-delivery records,
   AI-interaction logs, conversation summary/memory, and `course_knowledge`.
   Existing `public.leads` is a conversation identity/index, not a second CRM.

@@ -58,6 +58,7 @@ import {
   N8N_INTEGRATION_SECRET_ENV, N8N_INTEGRATION_SECRET_HEADER, verifyN8nIntegrationSecret,
 } from "./n8n-auth";
 import { getMetaReadiness } from "../meta/config";
+import { buildIntegrationReadinessChecklist } from "@shared/integration-readiness";
 
 export const N8N_VSL_SECRET_ENV = N8N_INTEGRATION_SECRET_ENV;
 export const N8N_VSL_SECRET_HEADER = N8N_INTEGRATION_SECRET_HEADER;
@@ -271,8 +272,39 @@ export function registerAvniIntegrationRoutes(
       const avniSchemaReady = await admissionsIntegrationSchemaReady(db);
       const registrationUrl = process.env[VSL_WEBHOOK_URL_ENV] ?? "";
       const crmReady = crm.crmPersistence && crm.identityTracking && crm.canonicalAssignments;
+      const evolutionMissingConfigurationNames = [
+        ...(!process.env[EVOLUTION_API_KEY_ENV]?.trim() ? [EVOLUTION_API_KEY_ENV] : []),
+        ...(!process.env[EVOLUTION_API_INSTANCE_ENV]?.trim() ? [EVOLUTION_API_INSTANCE_ENV] : []),
+      ];
       return {
         checkedAt: new Date().toISOString(),
+        checklist: buildIntegrationReadinessChecklist({
+          environment: process.env.NODE_ENV ?? "unknown",
+          crm: {
+            runtimeDatabaseVerified,
+            schemaReady: crmReady,
+            schemaSafeCode: crmReady ? "crm_schema_ready" : "crm_schema_or_assignment_migration_required",
+          },
+          avni: {
+            operationalSchemaReady: avniSchemaReady,
+            registrationWebhook: {
+              urlValid: Boolean(registrationUrl.trim()) && isTrustedVslWebhookUrl(registrationUrl),
+              secretPresent: Boolean(process.env[N8N_INTEGRATION_SECRET_ENV]?.trim()),
+              dispatcherActive: isVslDispatchEnabled(),
+            },
+            supabaseReaderConfigured: isSupabaseAvniReadConfigured(),
+            supabaseWriterAvailable: false,
+            evolutionTransportConfigured: evolutionPilotTransport.configured,
+            evolutionMissingConfigurationNames,
+            hmacKeyringState: hmacKeyring.state,
+            followUpReadSecretPresent: Boolean(process.env[AVNI_FOLLOWUP_READ_SECRET_ENV]?.trim()),
+            pilotHardDisabled: true,
+          },
+          meta: {
+            missingConfigurationNames: meta.leadAds.missing,
+            graphApiVersionValid: /^v\d+\.\d+$/.test(process.env.META_GRAPH_API_VERSION?.trim() ?? ""),
+          },
+        }),
         database: {
           connectionMode: applicationRuntimeMode.kind,
           leastPrivilegeVerified: runtimeDatabaseVerified,

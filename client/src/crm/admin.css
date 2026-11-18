@@ -82,13 +82,116 @@
   line-height: 1.35;
 }
 
-.integration-state.is-ready {
+.integration-state.is-pass {
   color: #17643a;
+}
+
+.integration-state.is-blocked,
+.integration-area-status.is-blocked {
+  color: #a03f2f;
+}
+
+.integration-state.is-not-checked,
+.integration-area-status.is-not-checked {
+  color: #79500d;
 }
 
 .integration-state svg {
   flex: 0 0 auto;
   margin-top: 1px;
+}
+
+.integration-readiness-area {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.integration-area-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.integration-area-heading h3 {
+  margin: 0;
+}
+
+.integration-area-status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f2f0e8;
+  font: 700 .68rem 'DM Mono', monospace;
+  letter-spacing: .04em;
+}
+
+.integration-check-list,
+.integration-prerequisites {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.integration-check {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+}
+
+.integration-check-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: .79rem;
+}
+
+.integration-check-heading > strong:last-child {
+  line-height: 1.35;
+}
+
+.integration-check p {
+  margin: 0 0 0 2px;
+  color: var(--crm-muted, #58635e);
+  font-size: .75rem;
+  line-height: 1.4;
+}
+
+.integration-prerequisites {
+  gap: 4px;
+  margin: 0 0 2px 14px;
+  list-style: disc;
+  padding-left: 14px;
+  color: #75480c;
+  font-size: .72rem;
+  line-height: 1.4;
+}
+
+.integration-readiness-actions {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--crm-border, #d9dfdc);
+}
+
+.integration-readiness-actions h4 {
+  margin: 0 0 6px;
+  font-size: .88rem;
+}
+
+.integration-readiness-actions p {
+  margin: 0 0 10px;
+  color: var(--crm-muted, #58635e);
+  font-size: .78rem;
+  line-height: 1.45;
+}
+
+.integration-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .integration-readiness-grid small,

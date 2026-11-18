@@ -1,73 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { AlertTriangle, Check, RefreshCw, ShieldCheck } from "lucide-react";
+import {
+  applyMetaDiagnosticToChecklist,
+  applySupabaseReaderDiagnosticToChecklist,
+  type IntegrationReadinessChecklist,
+  type MetaDiagnosticSummary,
+  type ReadinessArea,
+  type ReadinessCheck,
+  type ReadinessStatus,
+} from "@shared/integration-readiness";
 import AvniProductionDiagnostics from "./AvniProductionDiagnostics";
 
 type IntegratedReadiness = {
   checkedAt: string;
-  database: {
-    connectionMode: string;
-    leastPrivilegeVerified: boolean;
-    safeCode: string;
-  };
-  crm: {
-    persistenceReady: boolean;
-    identityTrackingReady: boolean;
-    canonicalAssignmentsReady: boolean;
-    safeCode: string;
-  };
-  avni: {
-    operationalSchemaReady: boolean;
-    registrationWebhook: {
-      urlPresent: boolean;
-      urlValid: boolean;
-      secretPresent: boolean;
-      dispatchRequested: boolean;
-      dispatcherActive: boolean;
-    };
-    conversationHistory: {
-      readerConfigurationValid: boolean;
-      liveSchemaVerified: boolean;
-      writerAvailable: boolean;
-      safeCode: string;
-    };
-    followUpRead: {
-      dedicatedSecretPresent: boolean;
-      candidateEndpointReadOnly: boolean;
-    };
-    pilotDispatch: {
-      hardDisabled: boolean;
-      hmacKeyringState: "missing" | "invalid" | "ready";
-      runtimeWriterConfigured: boolean;
-      grantEngineConfigured: boolean;
-      providerTransportConfigured: boolean;
-      safeCode: string;
-    };
-  };
-  meta: {
-    pixelConfigured: boolean;
-    leadAdsConfigured: boolean;
-    leadAdsMissingConfigurationNames: string[];
-    graphApiVersionFormatValid: boolean;
-    pageIdentity: string;
-    pageSubscription: string;
-    formAccess: string;
-    diagnosticPath: string;
-    capiConfigured: boolean;
-    capiEnabled: boolean;
-  };
+  checklist: IntegrationReadinessChecklist;
 };
 
-type MetaDiagnostic = {
-  pageIdentityChecked: boolean;
-  pageIdentityMatches: boolean;
-  subscriptionChecked: boolean;
-  appInstalled: boolean;
-  leadgenSubscribed: boolean;
-  formAccessChecked: boolean;
-  formAccessGranted: boolean;
-  hasAccessibleForm: boolean;
-  errorCategory?: string;
+type MetaDiagnostic = MetaDiagnosticSummary & {
   graphHttpStatus?: number | null;
   graphErrorType?: string | null;
   graphErrorCode?: number | null;
@@ -86,11 +36,39 @@ async function fetchReadiness(): Promise<IntegratedReadiness> {
   return response.json();
 }
 
-function State({ ready, label }: { ready: boolean; label: string }) {
-  return <span className={`integration-state ${ready ? "is-ready" : "is-blocked"}`}>
-    {ready ? <Check size={14} aria-hidden="true" /> : <AlertTriangle size={14} aria-hidden="true" />}
-    {label}
-  </span>;
+function statusIcon(status: ReadinessStatus) {
+  if (status === "PASS") return <Check size={14} aria-hidden="true" />;
+  return <AlertTriangle size={14} aria-hidden="true" />;
+}
+
+function CheckRow({ item }: { item: ReadinessCheck }) {
+  return <li className="integration-check">
+    <div className="integration-check-heading">
+      <span className={`integration-state is-${item.status.toLowerCase().replaceAll(" ", "-")}`}>
+        {statusIcon(item.status)}
+        <strong>{item.status}</strong>
+      </span>
+      <strong>{item.label}</strong>
+    </div>
+    <p>{item.detail}</p>
+    {item.requiredActions.length > 0 && <ul className="integration-prerequisites">
+      {item.requiredActions.map((action) => <li key={action}>{action}</li>)}
+    </ul>}
+  </li>;
+}
+
+function ReadinessArea({ name, area }: { name: string; area: ReadinessArea }) {
+  return <section className="integration-readiness-area" aria-label={`${name} readiness`}>
+    <div className="integration-area-heading">
+      <h3>{name}</h3>
+      <span className={`integration-area-status is-${area.status.toLowerCase().replaceAll(" ", "-")}`}>
+        {area.status}
+      </span>
+    </div>
+    <ul className="integration-check-list">
+      {area.checks.map((item) => <CheckRow key={item.id} item={item} />)}
+    </ul>
+  </section>;
 }
 
 export default function IntegrationReadinessPanel() {
@@ -107,6 +85,14 @@ export default function IntegrationReadinessPanel() {
   const [supabaseError, setSupabaseError] = useState("");
   const [checkingSupabase, setCheckingSupabase] = useState(false);
 
+  function refreshReadiness() {
+    setMetaDiagnostic(null);
+    setMetaError("");
+    setSupabaseChecks(null);
+    setSupabaseError("");
+    void readiness.refetch();
+  }
+
   async function checkMeta() {
     setCheckingMeta(true);
     setMetaError("");
@@ -116,7 +102,11 @@ export default function IntegrationReadinessPanel() {
         cache: "no-store",
       });
       if (!response.ok) throw new Error("Meta's read-only check did not complete.");
-      setMetaDiagnostic(await response.json());
+      const body = await response.json() as MetaDiagnostic;
+      if (body.requestApplied || !body.diagnosticOnly) {
+        throw new Error("Unexpected Meta diagnostic response.");
+      }
+      setMetaDiagnostic(body);
     } catch {
       setMetaDiagnostic(null);
       setMetaError("Meta's read-only check is unavailable. No credential or lead data is shown.");
@@ -145,81 +135,73 @@ export default function IntegrationReadinessPanel() {
   }
 
   const data = readiness.data;
-  const runtimeReady = Boolean(
-    data?.database.leastPrivilegeVerified &&
-    data.crm.persistenceReady &&
-    data.crm.identityTrackingReady &&
-    data.crm.canonicalAssignmentsReady,
-  );
+  let checklist = data?.checklist ?? null;
+  if (checklist && metaDiagnostic) {
+    checklist = applyMetaDiagnosticToChecklist(checklist, metaDiagnostic);
+  }
+  if (checklist && supabaseChecks) {
+    checklist = applySupabaseReaderDiagnosticToChecklist(checklist, supabaseChecks);
+  }
+
   return <section className="integration-readiness" aria-labelledby="integration-readiness-title" data-testid="integrated-readiness">
     <div className="integration-readiness-heading">
       <div>
         <p className="crm-eyebrow">Admin operations</p>
-        <h2 id="integration-readiness-title">Integrated readiness</h2>
-        <p>Configuration presence is not the same as a verified live connection. Checks never display credentials or applicant data.</p>
+        <h2 id="integration-readiness-title">Integrated go-live checklist</h2>
+        <p>PASS means a live, scoped check passed. Configuration presence and source tests alone never count as go-live verification.</p>
       </div>
-      <button className="crm-button crm-button-quiet" type="button" onClick={() => void readiness.refetch()} disabled={readiness.isFetching}>
+      <button className="crm-button crm-button-quiet" type="button" onClick={refreshReadiness} disabled={readiness.isFetching}>
         <RefreshCw size={15} aria-hidden="true" /> Refresh
       </button>
     </div>
 
-    {readiness.isLoading && <p role="status">Checking CRM and integration readiness…</p>}
+    {readiness.isLoading && <p role="status">Checking current runtime readiness…</p>}
     {readiness.isError && <div className="crm-error" role="alert">Integrated readiness is unavailable. Check the server health diagnostics.</div>}
 
-    {data && <>
-      <div className={`integration-readiness-summary ${runtimeReady ? "is-ready" : "is-blocked"}`}>
+    {checklist && <>
+      <div className="integration-readiness-summary is-blocked">
         <ShieldCheck size={18} aria-hidden="true" />
-        <strong>{runtimeReady ? "CRM runtime checks passed" : "CRM runtime has a blocker"}</strong>
-        <span>AVNI pilot sending remains hard-disabled. Meta Page identity, subscription, and form access require the separate read-only check below.</span>
+        <strong>Sending and follow-up campaigns remain disabled.</strong>
+        <span>These checks report prerequisites only; they never authorize a dispatch, change a subscription, or enable a workflow.</span>
+        <small>Checklist scope: {checklist.environment}. A Development PASS is never represented as Production PASS.</small>
       </div>
 
       <div className="integration-readiness-grid">
-        <section>
-          <h3>CRM</h3>
-          <State ready={data.database.leastPrivilegeVerified} label={data.database.leastPrivilegeVerified ? "Least-privilege database role verified at startup" : "Production requires an explicit least-privilege application URL"} />
-          <State ready={data.crm.persistenceReady && data.crm.identityTrackingReady && data.crm.canonicalAssignmentsReady} label={data.crm.persistenceReady && data.crm.identityTrackingReady && data.crm.canonicalAssignmentsReady ? "Lead, identity, and assignment schema ready" : data.crm.safeCode} />
-          <small>Connection mode: {data.database.connectionMode}</small>
-        </section>
+        <ReadinessArea name="CRM" area={checklist.crm} />
+        <ReadinessArea name="AVNI counsellor" area={checklist.avni} />
+        <ReadinessArea name="Meta Lead Ads" area={checklist.meta} />
+      </div>
 
+      <div className="integration-readiness-actions">
         <section>
-          <h3>AVNI</h3>
-          <State ready={data.avni.operationalSchemaReady} label={data.avni.operationalSchemaReady ? "CRM operational schema available" : "Required CRM integration schema unavailable"} />
-          <State ready={data.avni.conversationHistory.readerConfigurationValid && data.avni.conversationHistory.liveSchemaVerified} label={data.avni.conversationHistory.liveSchemaVerified ? "Supabase conversation reader verified" : data.avni.conversationHistory.readerConfigurationValid ? "Reader configuration present; Supabase schema not verified" : "Conversation reader configuration unavailable"} />
-          <button className="crm-button crm-button-secondary" type="button" onClick={() => void checkSupabaseReader()} disabled={checkingSupabase}>
-            {checkingSupabase ? "Checking Supabase…" : "Verify Supabase reader (read-only)"}
-          </button>
+          <h4>Safe read-only checks</h4>
+          <p>Meta checks make Graph GET requests only when clicked. Supabase checks use the configured restricted reader and synthetic empty lookups only.</p>
+          <div className="integration-action-buttons">
+            <button className="crm-button crm-button-secondary" type="button" onClick={() => void checkSupabaseReader()} disabled={checkingSupabase}>
+              {checkingSupabase ? "Checking Supabase…" : "Run Supabase reader preflight"}
+            </button>
+            <button className="crm-button crm-button-secondary" type="button" onClick={() => void checkMeta()} disabled={checkingMeta}>
+              {checkingMeta ? "Checking Meta…" : "Run Meta Page diagnostic"}
+            </button>
+          </div>
           {supabaseError && <p className="crm-error" role="alert">{supabaseError}</p>}
-          {supabaseChecks && <small role="status">{Object.values(supabaseChecks).filter(Boolean).length}/{Object.keys(supabaseChecks).length} Supabase reader checks passed. Checks use catalog permissions and synthetic empty lookups only.</small>}
-          <State ready={data.avni.registrationWebhook.urlValid && data.avni.registrationWebhook.secretPresent} label={data.avni.registrationWebhook.urlValid && data.avni.registrationWebhook.secretPresent ? "Registration webhook configured" : "Registration webhook configuration incomplete"} />
-          <small>VSL event dispatcher: {data.avni.registrationWebhook.dispatcherActive ? "enabled by server configuration" : data.avni.registrationWebhook.dispatchRequested ? "requested but unavailable" : "disabled"}.</small>
-          <State ready={data.avni.pilotDispatch.hardDisabled && !data.avni.pilotDispatch.runtimeWriterConfigured} label="Pilot sender hard-disabled; runtime writer is not connected" />
-          <small>HMAC keyring: {data.avni.pilotDispatch.hmacKeyringState}. The candidate endpoint is read-only; n8n campaign/follow-up execution state is not verified here.</small>
-        </section>
-
-        <section>
-          <h3>Meta Lead Ads</h3>
-          <State ready={data.meta.leadAdsConfigured && data.meta.graphApiVersionFormatValid} label={data.meta.leadAdsConfigured && data.meta.graphApiVersionFormatValid ? "Required configuration names present; token/Page identity not yet checked" : "Configuration incomplete or Graph version format invalid"} />
-          {data.meta.leadAdsMissingConfigurationNames.length > 0 && <small>Missing or invalid: {data.meta.leadAdsMissingConfigurationNames.join(", ")}</small>}
-          <small>Page identity, leadgen subscription, and form access: not checked.</small>
-          <button className="crm-button crm-button-secondary" type="button" onClick={() => void checkMeta()} disabled={checkingMeta}>
-            {checkingMeta ? "Checking Meta…" : "Run read-only Meta Page check"}
-          </button>
           {metaError && <p className="crm-error" role="alert">{metaError}</p>}
-          {metaDiagnostic && <div className="integration-meta-result" role="status">
-            <State ready={metaDiagnostic.pageIdentityChecked && metaDiagnostic.pageIdentityMatches} label={metaDiagnostic.pageIdentityChecked ? metaDiagnostic.pageIdentityMatches ? "Page token identity matches configured Page" : "Page token identity does not match" : "Page token identity not verified"} />
-            <State ready={metaDiagnostic.subscriptionChecked && metaDiagnostic.appInstalled && metaDiagnostic.leadgenSubscribed} label={metaDiagnostic.leadgenSubscribed ? "App subscribed to leadgen" : metaDiagnostic.subscriptionChecked ? "App leadgen subscription is missing" : "App subscription not verified"} />
-            <State ready={metaDiagnostic.formAccessGranted && metaDiagnostic.hasAccessibleForm} label={metaDiagnostic.formAccessGranted ? metaDiagnostic.hasAccessibleForm ? "Form access verified" : "Form endpoint accessible; no form returned" : metaDiagnostic.formAccessChecked ? "Form access check failed" : "Form access not verified"} />
-            {metaDiagnostic.errorCategory && <small>Safe result: {metaDiagnostic.errorCategory}{metaDiagnostic.graphHttpStatus ? ` · HTTP ${metaDiagnostic.graphHttpStatus}` : ""}{metaDiagnostic.graphErrorCode !== undefined && metaDiagnostic.graphErrorCode !== null ? ` · Graph code ${metaDiagnostic.graphErrorCode}` : ""}{metaDiagnostic.graphErrorSubcode !== undefined && metaDiagnostic.graphErrorSubcode !== null ? ` · subcode ${metaDiagnostic.graphErrorSubcode}` : ""}</small>}
-            <small>Read-only only; no subscription was changed and no lead submissions were fetched.</small>
-          </div>}
+          {metaDiagnostic?.errorCategory && <small role="status">
+            Meta safe result: {metaDiagnostic.errorCategory}
+            {metaDiagnostic.graphHttpStatus ? ` · HTTP ${metaDiagnostic.graphHttpStatus}` : ""}
+            {metaDiagnostic.graphErrorCode !== undefined && metaDiagnostic.graphErrorCode !== null ? ` · Graph code ${metaDiagnostic.graphErrorCode}` : ""}
+            {metaDiagnostic.graphErrorSubcode !== undefined && metaDiagnostic.graphErrorSubcode !== null ? ` · subcode ${metaDiagnostic.graphErrorSubcode}` : ""}
+            {metaDiagnostic.graphErrorType ? ` · ${metaDiagnostic.graphErrorType}` : ""}
+            {metaDiagnostic.graphErrorIsTransient === true ? " · transient" : ""}
+          </small>}
         </section>
       </div>
 
       <details className="integration-diagnostics-detail">
-        <summary>Additional AVNI database diagnostics</summary>
+        <summary>Additional AVNI runtime diagnostics</summary>
         <AvniProductionDiagnostics />
       </details>
-      <small className="integration-readiness-updated">Last checked: {new Date(data.checkedAt).toLocaleString()}</small>
+      <small className="integration-readiness-updated">Last checked: {new Date(data?.checkedAt ?? Date.now()).toLocaleString()}</small>
     </>}
   </section>;
 }

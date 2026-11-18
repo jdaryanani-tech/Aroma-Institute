@@ -1,12 +1,15 @@
 # AICHM operational database and AVNI integration
 
-Updated 2026-11-07. This is a workspace implementation note, not evidence of a
-production publish or database migration.
+Updated 2026-11-07. This is a historical workspace implementation note, not
+evidence of current production state. Production runtime connection selection
+has since changed as described below.
 
 ## Database boundary
 
-- The running app's normal `pg.Pool` and Drizzle connection use `DATABASE_URL`
-  in `server/db.ts`, which is the existing Replit PostgreSQL database.
+- At the time this note was written, the normal `pg.Pool` and Drizzle
+  connection used `DATABASE_URL`. Current Production code requires
+  `AICHM_APP_DATABASE_URL`, verifies its distinct least-privilege role, and
+  fails closed rather than falling back to `DATABASE_URL`.
 - The app's runtime does not import the Supabase connection factory.
   `server/db/supabase-migration.ts` is only used by opt-in migration/import code.
 - Production catalog inspection found the 34 existing application tables:
@@ -96,8 +99,9 @@ configured by this change.
 and reconciliation rules. `server/db/supabase-legacy-import-runner.ts` and
 `script/aichm-import-supabase-legacy.ts` provide a default read-only dry-run
 planner and an opt-in batched import path. The Supabase factory enforces the
-approved project and strict TLS; the target remains `DATABASE_URL`. The tool
-does not write to Supabase.
+approved project and strict TLS. At the time of this 2026-11-07 note, the
+target pool used `DATABASE_URL`; current Production runtime requires
+`AICHM_APP_DATABASE_URL`. The tool does not write to Supabase.
 
 The latest read-only Supabase inventory available to this workspace recorded
 31 `public.leads`, 301 `public.conversations`, and 54
@@ -128,16 +132,17 @@ opening a target transaction. It is not enabled or executed in this task.
 
 ## Configuration and release gates
 
-Latest production secret-name presence check: missing
+Historical 2026-11-07 production secret-name presence check: missing
 `N8N_VSL_REGISTRATION_WEBHOOK_SECRET`, `N8N_VSL_REGISTRATION_WEBHOOK_URL`,
 `N8N_VSL_DISPATCH_ENABLED`, `AICHM_VAPID_PUBLIC_KEY`, and
 `AICHM_VAPID_PRIVATE_KEY`. No secret values were read.
 
-The new migration has not been applied. Replit's managed production schema is
-changed through the reviewed Publish schema diff, not by running DDL from the
-app or a custom production script. Do not use `npm run db:migrate` against the
-drifted production migration ledger. Supabase's 31/301/54 source records remain
-untouched; no import, live booking, outbound WhatsApp, or deployment occurred.
+The migration/deployment and untouched-data statements below record the
+2026-11-07 audit only; they do not establish current live state. Replit's
+managed production schema changes require the reviewed Publish schema diff;
+do not run `npm run db:migrate` against an unreconciled production ledger.
+Recheck current deployment and Supabase records through an approved read-only
+path before relying on this historical snapshot.
 
 The existing app mentions Aroma LEAP fee/scholarship details in its current
 counselling copy. This change does not edit or select new course fees or
