@@ -59,6 +59,10 @@ function mockClient(overrides: Record<string, unknown> = {}) {
           member_is_owner: false, member_is_migrator: false, member_has_other_groups: false,
         },
       ] };
+      if (sql.includes("FROM pg_class c JOIN pg_namespace") &&
+          sql.includes("admissions_conversation_dispatch_grants")) {
+        return { rows: [{ public_privileges: 0 }] };
+      }
       if (sql.includes("FROM pg_class c JOIN pg_namespace")) return { rows: [
         ...Object.entries(runtimeTableOperations).map(([table_name, operations]) => ({
           table_name,
@@ -67,6 +71,9 @@ function mockClient(overrides: Record<string, unknown> = {}) {
           privileges: makePrivileges(operations),
         })),
       ] };
+      if (sql.includes("WHERE r.rolname IN ('anon','authenticated','service_role'")) {
+        return { rows: [] };
+      }
       if (sql.includes("FROM pg_class sequence")) return { rows: [
         { sequence_name: "lms_users_id_seq", owner_table: "lms_users", column_name: "id", usage: true, select: false, update: false },
         { sequence_name: "unowned_sequence", owner_table: null, column_name: null, usage: false, select: false, update: false },
@@ -202,8 +209,13 @@ test("forward migration table grants match the reviewed runtime privilege matrix
     .sort(([left], [right]) => left.localeCompare(right));
   assert.deepEqual(actual, expected);
   const dispatchMigration = await readFile("migrations/0019_avni_dispatch_grants.sql", "utf8");
-  assert.match(dispatchMigration,/GRANT SELECT,INSERT,UPDATE ON TABLE admissions_conversation_dispatch_grants TO aichm_app_runtime/);
   assert.match(dispatchMigration,/REVOKE ALL ON TABLE admissions_conversation_dispatch_grants FROM PUBLIC/);
+  assert.doesNotMatch(dispatchMigration,/GRANT\s+SELECT.*admissions_conversation_dispatch_grants/i);
+  const dispatchAclMigration = await readFile("migrations/0020_avni_dispatch_authorization_fence.sql", "utf8");
+  assert.match(
+    dispatchAclMigration,
+    /GRANT SELECT,\s*INSERT,\s*UPDATE\s+ON TABLE public\.admissions_conversation_dispatch_grants TO aichm_app_runtime/,
+  );
 });
 
 test("runtime role postconditions fail closed if the app can mutate assignment history", async () => {

@@ -20,17 +20,22 @@ role grant. Do not apply 0019 alone.
 
 ## Scope and ownership
 
-- `aichm_private` is not a PostgREST-exposed schema. Seven normalized tables
+- `aichm_private` is not a PostgREST-exposed schema. Eight normalized tables
   hold threads, provider events, messages, outbox rows, send attempts,
-  delivery receipts, and control audit events.
+  delivery receipts, control audit events, and retained-key provider-reference
+  aliases.
 - Admissions identity and WhatsApp consent/opt-out remain authoritative in
   Replit PostgreSQL. Supabase stores only the nullable exact `public.leads.id`
   cross-link. Provider event/thread/message/receipt references are accepted by
-  the SQL draft only as `hmac-sha256:v1:<hex>` tokens. The SQL checks token
-  shape; it cannot prove a caller actually computed an HMAC. No HMAC adapter or
-  key has been added because there is no approved server-only key boundary for
-  it. A keyed, domain-separated server HMAC adapter is a hard prerequisite
-  before any event can be persisted. Raw provider IDs, remote JIDs, phone
+  the SQL draft only as `hmac-sha256:v2:<key-id>:<hex>` tokens. The server-only
+  adapter uses injected keys, domain separation, and timing-safe verification.
+  Its deterministic tests use synthetic keys only; no live key provider or
+  secret is configured. SQL checks token shape and key-ID consistency; it cannot
+  prove a caller actually computed an HMAC. All retained-key aliases must be
+  supplied in one request and are transactionally reserved using sorted
+  advisory locks, preserving canonical IDs across key rotation. An operator
+  must retain old keys until aliases are safely migrated and audited; no key
+  retirement procedure is implemented. Raw provider IDs, remote JIDs, phone
   numbers, and provider media IDs must never be passed to persistent columns.
   Media pointers are restricted to app-owned `media:v1:<uuid>` references.
 - Foreign keys do not cascade transcript deletion; mapped lead/thread deletion
@@ -93,11 +98,23 @@ cannot guarantee recall of a request that crossed the in-flight boundary. This
 is an explicit policy requiring owner approval before live sending is enabled.
 The migration does not create a provider sender or enable any messaging.
 
+The read-only `inspectAvniMigrationReadiness` helper requires an explicitly
+injected connection and expected primary identity for each database. It opens a
+`BEGIN READ ONLY` transaction, verifies database/server/session/current-user
+identity plus primary status, then composes the existing Replit and Supabase
+catalog/role postconditions. It does not open a pool, inspect environment
+variables, register or run migrations, provision roles, or claim that an
+unqueried migration ledger is applied. The Replit 0019/0020 files remain manual,
+unregistered drafts; actual applied migration state is explicitly reported as
+not checked unless a separately reviewed ledger reader is added. The report
+never returns connection or database identity values, and dispatch remains
+disabled.
+
 ## Access and rollout prerequisites
 
 - The migration creates two `NOLOGIN`, `NOINHERIT`, non-superuser,
   non-`BYPASSRLS` roles: `aichm_conversation_owner` and
-  `aichm_conversation_runtime`. The owner owns only these seven private tables
+  `aichm_conversation_runtime`. The owner owns only these eight private tables
   and their RPCs; forced RLS has a policy only for that non-login owner. The
   owner has no memberships or schema `CREATE` after migration. The runtime role
   receives schema `USAGE` and narrowly scoped `EXECUTE` for event, thread,
@@ -189,10 +206,11 @@ it does not provision or repair any roles or credentials.
 
 ## Objects in the draft
 
-The seven private tables are `conversation_threads`,
+The eight private tables are `conversation_threads`,
 `conversation_messages`, `conversation_events`, `conversation_outbox`,
 `conversation_outbox_attempts`, `conversation_delivery_receipts`, and
-`conversation_control_events`. Their unique constraints cover provider event
+`conversation_control_events`, and `conversation_provider_reference_aliases`.
+Their unique constraints cover provider event
 and message identity, stable idempotency keys, outbox identity, attempt number,
 provider message identity, receipt identity, and control request/version.
 Queue indexes support due-order and lease-expiry scans. Attempts are capped at

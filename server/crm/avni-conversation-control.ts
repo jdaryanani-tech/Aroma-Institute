@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { Request } from "express";
 import { z } from "zod";
 import { canReadCanonicalLead, crmAccessLevel, type CrmPrincipal } from "./authorization";
@@ -55,6 +54,7 @@ export type AvniControlCode =
   | "conversation_missing"
   | "conversation_closed"
   | "ownership_conflict"
+  | "invalid_control_request"
   | "runtime_unavailable";
 
 export type AvniControlResult = {
@@ -66,6 +66,7 @@ export type AvniControlResult = {
 };
 
 const leadIdSchema = z.string().uuid();
+const requestIdSchema = z.string().uuid();
 
 function result(
   status: AvniControlResult["status"],
@@ -87,6 +88,8 @@ export async function transitionAvniConversationControl(
     canonicalLeadId: string;
     expectedControlVersion: number;
     action: "takeover" | "resume";
+    /** Stable caller-generated UUID for retries of this exact intent. */
+    requestId: string;
     reason?: string | null;
   },
   dependencies: {
@@ -106,8 +109,9 @@ export async function transitionAvniConversationControl(
   if (!leadIdSchema.safeParse(input.canonicalLeadId).success ||
       !Number.isSafeInteger(input.expectedControlVersion) ||
       input.expectedControlVersion < 0 ||
+      !requestIdSchema.safeParse(input.requestId).success ||
       (input.reason != null && (input.reason.trim().length < 3 || input.reason.trim().length > 500))) {
-    return result("denied", "canonical_lead_unavailable");
+    return result("denied", "invalid_control_request");
   }
   if (!dependencies.writer) return result("unavailable", "runtime_unavailable");
 
@@ -193,7 +197,7 @@ export async function transitionAvniConversationControl(
       expectedControlVersion: input.expectedControlVersion,
       action: input.action,
       actorRef: `replit_lms_user:${sessionUserId}`,
-      requestId: randomUUID(),
+      requestId: input.requestId,
       reason: input.reason?.trim() || null,
     });
     if (rpcResult.outcome === "changed" || rpcResult.outcome === "duplicate") {

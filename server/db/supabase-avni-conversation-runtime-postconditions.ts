@@ -396,7 +396,7 @@ export async function assertAvniConversationRuntimePostconditions(
     JOIN pg_roles owner ON owner.oid=p.proowner
     WHERE n.nspname='aichm_private' AND p.proname=ANY($1::text[])
     ORDER BY p.proname
-  `, [rpcNames, [...RUNTIME_EXECUTABLE_RPCS]]);
+  `, [rpcNames, Array.from(RUNTIME_EXECUTABLE_RPCS)]);
   if (functions.length !== rpcNames.length) fail("AVNI_CONVERSATION_RUNTIME_RPC_MISSING");
   for (const fn of functions) {
     const searchPath = fn.configuration?.find(value => value.startsWith("search_path="));

@@ -11,7 +11,9 @@ export type AvniProviderReferenceKind = typeof AVNI_PROVIDER_REFERENCE_KINDS[num
 
 const providerSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/);
 const keyIdSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/);
-const rawReferenceSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9._:-]+$/);
+const rawReferenceSchema = z.string().min(1).max(500).refine(
+  value => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value),
+);
 const tokenSchema = z.string().regex(
   /^hmac-sha256:v2:[a-z0-9][a-z0-9_-]{0,31}:[0-9a-f]{64}$/,
 );

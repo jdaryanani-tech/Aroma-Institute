@@ -72,14 +72,22 @@ is a new attempt, not a receipt-state rollback.
 
 - Event/thread/message/receipt identity tokens: server-only, keyed,
   domain-separated HMAC-SHA-256 values represented as
-  `hmac-sha256:v1:<64 lowercase hex>`. Idempotency keys use the token suffix
-  under distinct `event:v1:` or `message:v1:` namespaces. A plain SHA-256 digest
-  of a provider reference is forbidden because it can be guessed offline.
-- The SQL draft validates token shape and key/token consistency but cannot
-  verify the HMAC. No HMAC adapter or key is implemented: this repository lacks
-  an approved server-only key-management boundary. That adapter is a hard
-  prerequisite before persistence or transport work begins; do not invent a
-  key or persist raw provider references in the meantime.
+  `hmac-sha256:v2:<key-id>:<64 lowercase hex>`. Key IDs use a strict lowercase
+  ASCII allowlist; signing and verification require an injected server-only key
+  provider, fixed domain separation, and timing-safe comparison. No key is
+  configured or generated in this repository.
+- The SQL draft stores one alias row per retained key ID and canonical provider
+  reference. Every accepted event supplies the complete retained-key alias set;
+  sorted transaction advisory locks serialize alias creation, so a retry after
+  key rotation resolves to the original event/thread/message/receipt rather than
+  creating a second record. Retained keys must remain available until every
+  persistent reference produced with those keys has an alias under the active
+  key and the old key is no longer needed for verification. Key retirement
+  requires a separately reviewed inventory/rotation procedure.
+- SQL validates token shape and alias consistency, but cannot verify the HMAC.
+  Raw provider IDs, remote JIDs, phone numbers, and provider media IDs must
+  never be passed to persistence. A plain SHA-256 digest is forbidden because
+  provider references can be guessed offline.
 - Keys contain no message text, phone number, or raw provider reference.
 - A production adapter must require stable provider event/message identifiers;
   it must not synthesize dedupe keys from message text or contact details.

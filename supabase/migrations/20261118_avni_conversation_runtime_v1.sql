@@ -538,10 +538,10 @@ CREATE OR REPLACE FUNCTION aichm_private.accept_provider_event(
   p_media_ref text,
   p_delivery_state text,
   p_raw_provider_state text,
-  p_provider_thread_aliases text[] DEFAULT NULL,
-  p_provider_event_aliases text[] DEFAULT NULL,
-  p_provider_message_aliases text[] DEFAULT NULL,
-  p_provider_receipt_aliases text[] DEFAULT NULL
+  p_provider_thread_aliases text[],
+  p_provider_event_aliases text[],
+  p_provider_message_aliases text[],
+  p_provider_receipt_aliases text[]
 ) RETURNS TABLE(outcome text,thread_id uuid,event_id uuid,message_id uuid)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, aichm_private, pg_temp
@@ -568,10 +568,10 @@ DECLARE
   v_message_aliases text[];
   v_receipt_aliases text[];
 BEGIN
-  v_thread_aliases:=COALESCE(p_provider_thread_aliases,ARRAY[p_provider_thread_key]);
-  v_event_aliases:=COALESCE(p_provider_event_aliases,ARRAY[p_provider_event_key]);
-  v_message_aliases:=COALESCE(p_provider_message_aliases,ARRAY[p_provider_message_key]);
-  v_receipt_aliases:=COALESCE(p_provider_receipt_aliases,ARRAY[p_provider_event_key]);
+  v_thread_aliases:=p_provider_thread_aliases;
+  v_event_aliases:=p_provider_event_aliases;
+  v_message_aliases:=p_provider_message_aliases;
+  v_receipt_aliases:=p_provider_receipt_aliases;
   IF p_provider IS NULL OR p_provider !~ '^[a-z][a-z0-9_-]{0,39}$'
     OR p_provider_event_key IS NULL
     OR p_provider_event_key !~ '^hmac-sha256:v2:[a-z0-9][a-z0-9_-]{0,31}:[0-9a-f]{64}$'
@@ -589,7 +589,6 @@ BEGIN
     OR p_provider_thread_key<>ALL(v_thread_aliases)
     OR p_provider_event_key<>ALL(v_event_aliases)
     OR cardinality(v_receipt_aliases) NOT BETWEEN 1 AND 16
-    OR p_provider_event_key<>ALL(v_receipt_aliases)
   THEN
     RAISE EXCEPTION 'invalid_conversation_event' USING ERRCODE='22023';
   END IF;
@@ -670,6 +669,26 @@ BEGIN
     PERFORM aichm_private.bind_provider_reference_aliases(
       p_provider,'event',v_event_aliases,v_existing_reference_id
     );
+    IF p_kind='message' AND v_message_id IS NOT NULL THEN
+      PERFORM 1 FROM aichm_private.conversation_messages m
+      WHERE m.id=v_message_id AND m.thread_id=v_thread_id
+        AND m.provider=p_provider;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'conversation_message_idempotency_conflict' USING ERRCODE='P0001';
+      END IF;
+      PERFORM aichm_private.bind_provider_reference_aliases(
+        p_provider,'message',v_message_aliases,v_message_id
+      );
+    ELSIF p_kind='delivery' THEN
+      SELECT r.id INTO v_receipt_id
+      FROM aichm_private.conversation_delivery_receipts r
+      WHERE r.event_id=v_existing_reference_id;
+      IF FOUND THEN
+        PERFORM aichm_private.bind_provider_reference_aliases(
+          p_provider,'receipt',v_receipt_aliases,v_receipt_id
+        );
+      END IF;
+    END IF;
     RETURN QUERY SELECT 'duplicate_event'::text,v_thread_id,v_existing_reference_id,v_message_id;
     RETURN;
   END IF;

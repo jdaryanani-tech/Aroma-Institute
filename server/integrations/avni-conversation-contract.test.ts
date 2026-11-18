@@ -146,6 +146,14 @@ test("event validation rejects unknown versions, extra provider payload, and uns
   }).success, false);
   assert.equal(validateAvniConversationEvent({
     ...inboundFixture,
+    threadRef: "15551234567@s.whatsapp.net",
+  }).success, true, "provider thread references may contain standard JID punctuation");
+  assert.equal(validateAvniConversationEvent({
+    ...inboundFixture,
+    threadRef: "bad\u0000reference",
+  }).success, false);
+  assert.equal(validateAvniConversationEvent({
+    ...inboundFixture,
     messageType: "image",
     text: undefined,
     mediaRef: "provider-media-id-must-not-be-persisted",

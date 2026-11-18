@@ -19,6 +19,10 @@ import {
   type AvniProviderReferenceKind,
 } from "../integrations/avni-provider-reference-hmac";
 import {
+  AVNI_MIGRATION_SOURCE_ORDER,
+  inspectAvniMigrationReadiness,
+} from "./avni-migration-readiness-preflight";
+import {
   assertAvniConversationPreflightPostconditions,
   assertAvniConversationRuntimePostconditions,
   assertAvniConversationRuntimeReadiness,
@@ -484,7 +488,7 @@ async function createReadyThread() {
 
 async function enqueueAssistant(threadId: string, version = 2) {
   const messageRef = `queued-${randomUUID()}`;
-  const messageKey = syntheticToken(messageRef);
+  const messageKey = syntheticToken(messageRef, "message");
   const event = makeMessageEvent({
     providerMessageRef: messageRef,
     direction: "outbound",
@@ -566,12 +570,71 @@ test("ephemeral PostgreSQL preparation proves private RPC boundary and legacy hi
     await directRead.query("ROLLBACK TO SAVEPOINT privilege_check");
     await assert.rejects(directRead.query(
       `INSERT INTO aichm_private.conversation_threads(provider,provider_thread_key)
-       VALUES ('whatsapp',$1)`, [syntheticToken("direct-write-denied")],
+       VALUES ('whatsapp',$1)`, [syntheticToken("direct-write-denied", "thread")],
     ));
     await directRead.query("ROLLBACK TO SAVEPOINT privilege_check");
     await directRead.query("ROLLBACK");
   } finally {
     directRead.release();
+  }
+});
+
+test("migration readiness preflight verifies the disposable Supabase target read-only", {
+  skip: !enabled,
+}, async () => {
+  requireHarness();
+  const client = await pool!.connect();
+  try {
+    const { rows } = await client.query<{
+      database_name: string;
+      server_address: string;
+      server_port: number;
+      session_user: string;
+      current_user: string;
+    }>(`
+      SELECT current_database()::text AS database_name,
+        inet_server_addr()::text AS server_address,inet_server_port() AS server_port,
+        session_user::text AS session_user,current_user::text AS current_user
+    `);
+    const observed = rows[0]!;
+    assert.ok(
+      observed?.database_name && observed.server_address && observed.server_port !== null &&
+      observed.session_user && observed.current_user,
+      "disposable database identity query must return all non-secret fingerprint components",
+    );
+    const report = await inspectAvniMigrationReadiness({
+      replit: {
+        client: null,
+        expectedIdentity: null,
+        sourceOrder: AVNI_MIGRATION_SOURCE_ORDER.replit,
+      },
+      supabase: {
+        client,
+        expectedIdentity: {
+          databaseName: observed.database_name,
+          serverAddress: observed.server_address,
+          serverPort: Number(observed.server_port),
+          sessionUser: observed.session_user,
+          currentUser: observed.current_user,
+        },
+        approvedRuntimeLoginRole: null,
+        sourceOrder: AVNI_MIGRATION_SOURCE_ORDER.supabase,
+      },
+      crmMigrationSqlRegisteredInDrizzleJournal: false,
+    });
+    assert.equal(report.supabase.targetIdentity, "matched_primary");
+    assert.equal(report.supabase.catalog, "verified");
+    assert.equal(report.supabase.approvedRuntimeLogin, "not_approved");
+    assert.equal(report.supabase.status, "blocked");
+    assert.equal(report.supabase.safeCode, "SUPABASE_RUNTIME_LOGIN_NOT_APPROVED");
+    assert.equal(report.appliedMigrationState, "not_checked");
+    assert.equal(report.dispatchEnabled, false);
+    const transactionMode = await client.query<{ read_only: string }>(
+      "SELECT current_setting('transaction_read_only') AS read_only",
+    );
+    assert.equal(transactionMode.rows[0]?.read_only, "off");
+  } finally {
+    client.release();
   }
 });
 
@@ -723,25 +786,22 @@ test("provider events are idempotent, changed replays conflict, and unmapped thr
   skip: !enabled,
 }, async () => {
   const event = makeMessageEvent();
-  const first = await acceptMessage(event);
-  const duplicate = await acceptMessage(event, "test-b");
-  assert.equal(first.outcome, "accepted");
-  assert.equal(duplicate.outcome, "duplicate_event");
+  const raced = await Promise.all([
+    acceptMessage(event, "test-a"),
+    acceptMessage(event, "test-b"),
+  ]);
+  const first = raced.find(result => result.outcome === "accepted")!;
+  const duplicate = raced.find(result => result.outcome === "duplicate_event")!;
+  assert.ok(first, "one key-ring writer inserts the event");
+  assert.ok(duplicate, "the other key-ring writer resolves the existing event");
   assert.equal(first.message_id, duplicate.message_id);
 
-  const wrapper = makeMessageEvent({
-    providerMessageRef: event.providerMessageRef,
-    threadRef: event.threadRef,
-    text: event.text,
-  });
-  const secondWrapper = await acceptMessage(wrapper);
-  assert.equal(secondWrapper.outcome, "accepted");
   const messageCount = await queryRows<{ count: string }>(
     "SELECT count(*)::text AS count FROM aichm_private.conversation_messages WHERE provider_message_key=$1",
     [syntheticToken(event.providerMessageRef, "message")],
   );
   assert.equal(Number(messageCount[0].count), 1);
-  assert.match(first.threadKey as string, /^hmac-sha256:v2:test-a:[0-9a-f]{64}$/);
+  assert.match(first.threadKey as string, /^hmac-sha256:v2:test-[ab]:[0-9a-f]{64}$/);
   assert.notEqual(first.threadKey, event.threadRef);
   const aliasCount = await queryRows<{ count: string }>(
     `SELECT count(*)::text AS count FROM aichm_private.conversation_provider_reference_aliases
@@ -749,22 +809,36 @@ test("provider events are idempotent, changed replays conflict, and unmapped thr
     [first.event_id],
   );
   assert.equal(Number(aliasCount[0]?.count), 2, "both retained key IDs map to one canonical event");
+  const messageAliases = await queryRows<{ count: string }>(
+    `SELECT count(*)::text AS count FROM aichm_private.conversation_provider_reference_aliases
+     WHERE reference_kind='message' AND message_id=$1`,
+    [first.message_id],
+  );
+  assert.equal(Number(messageAliases[0]?.count), 2, "message aliases are also completed on rotated replay");
   const eventCount = await queryRows<{ count: string }>(
     "SELECT count(*)::text AS count FROM aichm_private.conversation_events WHERE thread_id=$1",
     [first.thread_id],
   );
   assert.equal(Number(eventCount[0]?.count), 1, "rotation retry must not insert a second event");
+  const wrapper = makeMessageEvent({
+    providerMessageRef: event.providerMessageRef,
+    threadRef: event.threadRef,
+    text: event.text,
+  });
+  const secondWrapper = await acceptMessage(wrapper);
+  assert.equal(secondWrapper.outcome, "accepted");
 
   const plainDigest = "c".repeat(64);
   await assert.rejects(asRuntime(client => client.query(
     `SELECT * FROM aichm_private.accept_provider_event(
-      $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+      $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+      $18::text[],$19::text[],$20::text[],$21::text[]
     )`,
     [
       "whatsapp", plainDigest, plainDigest, `event:v1:${plainDigest}`, "d".repeat(64),
       event.occurredAt, "message", syntheticToken("raw-rejected-message"),
       `message:v1:${"e".repeat(64)}`, "f".repeat(64), "inbound", "prospect", "text",
-      "synthetic", null, null, null,
+      "synthetic", null, null, null, [], [], [], [],
     ],
   )), /invalid_conversation_event/);
 
@@ -1360,7 +1434,7 @@ test("delivery receipts retain raw provider labels and ignore regressions", {
   const send = await claimAndAuthorize(queued.rows[0].outbox_id);
   assert.equal(send.allowed, true);
   const providerMessageRef = `sent-${randomUUID()}`;
-  const providerMessageKey = syntheticToken(providerMessageRef);
+  const providerMessageKey = syntheticToken(providerMessageRef, "message");
   const sent = await asRuntime(client => client.query(
     "SELECT aichm_private.record_conversation_send_result($1,$2,$3,'sent',$4) AS result",
     [queued.rows[0].outbox_id, send.attempt_id, send.lease_token, providerMessageKey],
@@ -1394,13 +1468,21 @@ test("delivery receipts retain raw provider labels and ignore regressions", {
     const event = parsed.event;
     return asRuntime(client => client.query(
       `SELECT * FROM aichm_private.accept_provider_event(
-        $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,NULL,NULL,NULL,NULL,NULL,NULL,NULL,$9,$10
+        $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,NULL,NULL,NULL,NULL,NULL,NULL,NULL,$9,$10,
+        $11::text[],$12::text[],$13::text[],$14::text[]
       )`,
       [
-        event.provider, syntheticToken(event.providerEventRef), syntheticToken(event.threadRef),
-        conversationEventIdempotencyKey(syntheticToken(event.providerEventRef)), conversationEventFingerprint(event),
-        event.occurredAt, event.kind, syntheticToken(event.providerMessageRef), event.deliveryState,
+        event.provider,
+        syntheticToken(event.providerEventRef, "event"),
+        syntheticToken(event.threadRef, "thread"),
+        conversationEventIdempotencyKey(syntheticToken(event.providerEventRef, "event")),
+        conversationEventFingerprint(event),
+        event.occurredAt, event.kind, syntheticToken(event.providerMessageRef, "message"), event.deliveryState,
         event.rawProviderReceiptValue,
+        syntheticAliases(event.threadRef, "thread", "test-a"),
+        syntheticAliases(event.providerEventRef, "event", "test-a"),
+        syntheticAliases(event.providerMessageRef, "message", "test-a"),
+        syntheticAliases(event.providerEventRef, "receipt", "test-a"),
       ],
     ));
   }
@@ -1446,7 +1528,7 @@ test("a late receipt for a prior attempt is retained without mutating the curren
 
   const firstSend = await claimAndAuthorize(queued.rows[0].outbox_id);
   const priorProviderMessageRef = `prior-attempt-${randomUUID()}`;
-  const priorProviderMessageKey = syntheticToken(priorProviderMessageRef);
+  const priorProviderMessageKey = syntheticToken(priorProviderMessageRef, "message");
   await asRuntime(client => client.query(
     "SELECT aichm_private.record_conversation_send_result($1,$2,$3,'failed',$4)",
     [queued.rows[0].outbox_id, firstSend.attempt_id, firstSend.lease_token, priorProviderMessageKey],
@@ -1464,7 +1546,7 @@ test("a late receipt for a prior attempt is retained without mutating the curren
     [queued.rows[0].message_id],
   );
   const secondSend = await claimAndAuthorize(queued.rows[0].outbox_id);
-  const currentProviderMessageKey = syntheticToken(`current-attempt-${randomUUID()}`);
+  const currentProviderMessageKey = syntheticToken(`current-attempt-${randomUUID()}`, "message");
   await asRuntime(client => client.query(
     "SELECT aichm_private.record_conversation_send_result($1,$2,$3,'sent',$4)",
     [queued.rows[0].outbox_id, secondSend.attempt_id, secondSend.lease_token, currentProviderMessageKey],
@@ -1488,13 +1570,20 @@ test("a late receipt for a prior attempt is retained without mutating the curren
   const event = parsed.event;
   const recorded = await asRuntime(client => client.query(
     `SELECT * FROM aichm_private.accept_provider_event(
-      $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,NULL,NULL,NULL,NULL,NULL,NULL,NULL,$9,$10
+        $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,NULL,NULL,NULL,NULL,NULL,NULL,NULL,$9,$10,
+        $11::text[],$12::text[],$13::text[],$14::text[]
     )`,
     [
-      event.provider, syntheticToken(event.providerEventRef), syntheticToken(event.threadRef),
-      conversationEventIdempotencyKey(syntheticToken(event.providerEventRef)),
+        event.provider,
+        syntheticToken(event.providerEventRef, "event"),
+        syntheticToken(event.threadRef, "thread"),
+        conversationEventIdempotencyKey(syntheticToken(event.providerEventRef, "event")),
       conversationEventFingerprint(event), event.occurredAt, event.kind,
-      syntheticToken(event.providerMessageRef), event.deliveryState, event.rawProviderReceiptValue,
+        syntheticToken(event.providerMessageRef, "message"), event.deliveryState, event.rawProviderReceiptValue,
+        syntheticAliases(event.threadRef, "thread", "test-a"),
+        syntheticAliases(event.providerEventRef, "event", "test-a"),
+        syntheticAliases(event.providerMessageRef, "message", "test-a"),
+        syntheticAliases(event.providerEventRef, "receipt", "test-a"),
     ],
   ));
   assert.equal(recorded.rows[0].outcome, "receipt_recorded");
@@ -1522,7 +1611,7 @@ test("provider acceptance is recorded as sent, not delivered, and takeover canno
   const queued = await enqueueAssistant(threadId);
   const send = await claimAndAuthorize(queued.rows[0].outbox_id);
   const providerAcceptedRef = `accepted-${randomUUID()}`;
-  const providerAcceptedKey = syntheticToken(providerAcceptedRef);
+  const providerAcceptedKey = syntheticToken(providerAcceptedRef, "message");
   await asRuntime(client => client.query(
     "SELECT aichm_private.record_conversation_send_result($1,$2,$3,'sent',$4)",
     [queued.rows[0].outbox_id, send.attempt_id, send.lease_token, providerAcceptedKey],

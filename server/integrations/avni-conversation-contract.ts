@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-const opaqueReference = z.string().trim().min(1).max(200)
-  .regex(/^[A-Za-z0-9._:-]+$/, "Reference must be an opaque identifier.");
+const opaqueReference = z.string().min(1).max(500).refine(
+  value => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value),
+  "Reference must be a bounded opaque identifier without control characters.",
+);
 const providerName = z.string().trim().min(1).max(40)
   .regex(/^[a-z][a-z0-9_-]*$/, "Provider must be a stable lowercase name.");
 const appMediaReference = z.string()

@@ -20,34 +20,35 @@ function keyProvider(activeKeyId: string, ids = ["key-a"]): AvniHmacKeyProvider 
 
 test("signs domain-separated HMAC references and verifies with a timing-safe adapter", () => {
   const provider = keyProvider("key-a");
+  const threadReference = "15551234567@s.whatsapp.net";
   const thread = signAvniProviderReference({
     provider: "whatsapp",
     kind: "thread",
-    rawReference: "provider-thread-123",
+    rawReference: threadReference,
   }, provider);
   assert.match(thread.token, /^hmac-sha256:v2:key-a:[0-9a-f]{64}$/);
   assert.equal(verifyAvniProviderReference({
     provider: "whatsapp",
     kind: "thread",
-    rawReference: "provider-thread-123",
+    rawReference: threadReference,
     token: thread.token,
   }, provider), true);
   assert.equal(verifyAvniProviderReference({
     provider: "whatsapp",
     kind: "event",
-    rawReference: "provider-thread-123",
+    rawReference: threadReference,
     token: thread.token,
   }, provider), false);
   assert.equal(verifyAvniProviderReference({
     provider: "evolution",
     kind: "thread",
-    rawReference: "provider-thread-123",
+    rawReference: threadReference,
     token: thread.token,
   }, provider), false);
   assert.equal(verifyAvniProviderReference({
     provider: "whatsapp",
     kind: "thread",
-    rawReference: "provider-thread-124",
+    rawReference: `${threadReference}-different`,
     token: thread.token,
   }, provider), false);
 });
@@ -134,6 +135,6 @@ test("missing keys, unknown key IDs, malformed aliases, and invalid key material
     retainedKeys: () => [{ keyId: "key-a", key: Buffer.from("short") }],
   }), /KEY_CONFIGURATION_UNAVAILABLE/);
   assert.throws(() => signAvniProviderReference({
-    provider: "whatsapp", kind: "event", rawReference: "not a safe opaque reference",
+    provider: "whatsapp", kind: "event", rawReference: "bad\u0000reference",
   }, keyProvider("key-a")), /INPUT_INVALID/);
 });
