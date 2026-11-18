@@ -51,8 +51,19 @@ for an inbound message authored by a prospect. Outbound human/AI events and
 delivery events are never new AI prompts.
 
 Delivery events use the same version, provider/event/thread/time fields plus
-`kind: "delivery"`, `providerMessageRef`, and `deliveryState` from `queued`,
-`sent`, `delivered`, `read`, `failed`, or `unknown`.
+`kind: "delivery"`, `providerMessageRef`, and canonical `deliveryState` from
+`queued`, `sent`, `delivered`, `read`, `failed`, or `unknown`. An optional
+`rawProviderReceiptValue` (1–100 safe label characters) preserves the provider's
+status label separately; it is not used for state decisions. Legacy UI
+presentation may call an inbound message `received`, and the old proposal SQL
+has `pending`; neither is a canonical outbound delivery state. A reader must
+map legacy `pending` to `queued` rather than add a second state vocabulary.
+
+Within one provider send attempt, receipts only advance through
+`queued → sent → delivered → read`; `failed` is terminal for that attempt, and
+`unknown` can be replaced by a known state. Late lower-state receipts are
+retained as receipt events but cannot regress the attempt/message state. A retry
+is a new attempt, not a receipt-state rollback.
 
 ## Idempotency
 

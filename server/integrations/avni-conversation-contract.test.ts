@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  advanceDeliveryState,
   classifyConversationEvent,
   conversationEventIdempotencyKey,
   conversationMessageIdempotencyKey,
@@ -76,6 +77,50 @@ test("versioned contract validates provider-neutral inbound and outbound message
     deliveryState: "delivered",
   });
   assert.equal(classifyConversationEvent(delivery), "delivery_update");
+});
+
+test("delivery states align to the canonical SQL vocabulary and preserve raw receipt value separately", () => {
+  const receipt = parseFixture({
+    contractVersion: 1,
+    provider: "whatsapp",
+    providerEventRef: "event-delivery-raw",
+    threadRef: "thread-opaque-01",
+    occurredAt: "2026-11-18T08:01:00.000Z",
+    kind: "delivery",
+    providerMessageRef: "message-ai",
+    deliveryState: "delivered",
+    rawProviderReceiptValue: "provider-specific-delivered-label",
+  });
+  assert.equal(receipt.kind, "delivery");
+  if (receipt.kind !== "delivery") return;
+  assert.equal(receipt.deliveryState, "delivered");
+  assert.equal(receipt.rawProviderReceiptValue, "provider-specific-delivered-label");
+  assert.equal(validateAvniConversationEvent({
+    ...receipt,
+    deliveryState: "pending",
+  }).success, false);
+  assert.equal(validateAvniConversationEvent({
+    ...receipt,
+    rawProviderReceiptValue: "provider status contains unsafe text",
+  }).success, false);
+});
+
+test("receipt state progression is monotonic within an attempt", () => {
+  assert.deepEqual(advanceDeliveryState(null, "queued"), {
+    state: "queued", changed: true, regressionIgnored: false,
+  });
+  assert.deepEqual(advanceDeliveryState("queued", "sent"), {
+    state: "sent", changed: true, regressionIgnored: false,
+  });
+  assert.deepEqual(advanceDeliveryState("delivered", "sent"), {
+    state: "delivered", changed: false, regressionIgnored: true,
+  });
+  assert.deepEqual(advanceDeliveryState("read", "delivered"), {
+    state: "read", changed: false, regressionIgnored: true,
+  });
+  assert.deepEqual(advanceDeliveryState("failed", "sent"), {
+    state: "failed", changed: false, regressionIgnored: true,
+  });
 });
 
 test("event validation rejects unknown versions, extra provider payload, and unsafe media URLs", () => {

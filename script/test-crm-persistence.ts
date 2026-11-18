@@ -344,6 +344,13 @@ async function main(): Promise<void> {
     }));
     return;
   }
+  const suiteArgument = process.argv[3] ?? "--suite=crm-persistence";
+  const testFileBySuite: Record<string, string> = {
+    "--suite=crm-persistence": "server/crm/persistence.test.ts",
+    "--suite=avni-conversation-runtime": "server/db/supabase-avni-conversation-runtime.integration.test.ts",
+  };
+  const selectedTestFile = testFileBySuite[suiteArgument];
+  if (!selectedTestFile) throw new Error("CRM_TEST_SUITE_NOT_ALLOWLISTED");
 
   let failureCode: string | undefined;
   let scratchRoot: string | undefined;
@@ -450,12 +457,12 @@ async function main(): Promise<void> {
         };
         const testResult = await runTool(
           path.resolve("node_modules/.bin/tsx"),
-          ["--test", "server/crm/persistence.test.ts"],
+          ["--test", selectedTestFile],
           testEnv,
           "inherit",
           240_000,
         );
-        if (testResult.code !== 0) throw new Error("CRM_TEST_PERSISTENCE_SUITE_FAILED");
+        if (testResult.code !== 0) throw new Error("CRM_TEST_ISOLATED_SUITE_FAILED");
         return testResult;
       },
     );
@@ -506,15 +513,23 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({
       status: "passed",
       isolatedInstance: true,
+      suite: suiteArgument,
       scratchDatabase: databaseName,
-      migrationsApplied: [
-        "0014_crm_canonical_assignments.sql",
-        "0015_crm_assignment_audit_invariants.sql",
-        "0016_crm_runtime_role_separation.sql",
-        "0017_meta_lead_ads_schema.sql",
-        "0018_meta_phone_identity_diagnostics.sql",
-      ],
-      metaMigrationReappliedForIdempotency: true,
+      ...(suiteArgument === "--suite=crm-persistence" ? {
+        migrationsApplied: [
+          "0014_crm_canonical_assignments.sql",
+          "0015_crm_assignment_audit_invariants.sql",
+          "0016_crm_runtime_role_separation.sql",
+          "0017_meta_lead_ads_schema.sql",
+          "0018_meta_phone_identity_diagnostics.sql",
+        ],
+        metaMigrationReappliedForIdempotency: true,
+      } : {
+        migrationsApplied: [
+          "20261107_aichm_two_database_contract.sql (disposable fixture)",
+          "20261118_avni_conversation_runtime_v1.sql (disposable fixture)",
+        ],
+      }),
     }));
   }
 }

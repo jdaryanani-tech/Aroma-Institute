@@ -15,6 +15,15 @@ const messageType = z.enum([
   "location",
   "unknown",
 ]);
+export const AVNI_DELIVERY_STATES = [
+  "queued",
+  "sent",
+  "delivered",
+  "read",
+  "failed",
+  "unknown",
+] as const;
+export type AvniDeliveryState = typeof AVNI_DELIVERY_STATES[number];
 
 const messageEventSchema = z.object({
   contractVersion: z.literal(1),
@@ -33,6 +42,12 @@ const messageEventSchema = z.object({
   if (event.messageType === "text" && !event.text?.trim()) {
     context.addIssue({ code: "custom", path: ["text"], message: "Text messages require non-empty text." });
   }
+  if (
+    (event.direction === "inbound" && !["prospect", "unknown"].includes(event.author)) ||
+    (event.direction === "outbound" && event.author === "prospect")
+  ) {
+    context.addIssue({ code: "custom", path: ["author"], message: "Author and direction are inconsistent." });
+  }
   if (event.mediaRef && /^https?:\/\//i.test(event.mediaRef)) {
     context.addIssue({ code: "custom", path: ["mediaRef"], message: "Media references must not be URLs." });
   }
@@ -46,7 +61,9 @@ const deliveryEventSchema = z.object({
   occurredAt: z.string().datetime({ offset: true }),
   kind: z.literal("delivery"),
   providerMessageRef: opaqueReference,
-  deliveryState: z.enum(["queued", "sent", "delivered", "read", "failed", "unknown"]),
+  deliveryState: z.enum(AVNI_DELIVERY_STATES),
+  rawProviderReceiptValue: z.string().trim().min(1).max(100)
+    .regex(/^[A-Za-z0-9_.:-]{1,100}$/).optional(),
 }).strict();
 
 export const avniConversationEventSchema = z.union([
@@ -114,6 +131,10 @@ function stableKey(namespace: string, provider: string, reference: string): stri
   return `${namespace}:v1:${digest}`;
 }
 
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 /** Uses opaque provider references only; message text, phone, and payload are never key material. */
 export function conversationEventIdempotencyKey(event: AvniConversationEvent): string {
   return stableKey("event", event.provider, `${event.kind}:${event.providerEventRef}`);
@@ -122,6 +143,50 @@ export function conversationEventIdempotencyKey(event: AvniConversationEvent): s
 /** Collapses duplicate message deliveries even if the provider wraps them in different events. */
 export function conversationMessageIdempotencyKey(event: AvniConversationEvent): string {
   return stableKey("message", event.provider, event.providerMessageRef);
+}
+
+export function conversationEventFingerprint(event: AvniConversationEvent): string {
+  if (event.kind === "delivery") {
+    return sha256(JSON.stringify([
+      event.contractVersion, event.provider, event.providerEventRef, event.threadRef,
+      event.occurredAt, event.kind, event.providerMessageRef, event.deliveryState,
+      event.rawProviderReceiptValue ?? null,
+    ]));
+  }
+  return sha256(JSON.stringify([
+    event.contractVersion, event.provider, event.providerEventRef, event.threadRef,
+    event.occurredAt, event.kind, event.providerMessageRef, event.direction,
+    event.author, event.messageType, event.text ?? null, event.mediaRef ?? null,
+  ]));
+}
+
+export function conversationMessageFingerprint(event: Extract<AvniConversationEvent, { kind: "message" }>): string {
+  return sha256(JSON.stringify([
+    event.provider, event.providerMessageRef, event.threadRef, event.occurredAt,
+    event.direction, event.author, event.messageType, event.text ?? null, event.mediaRef ?? null,
+  ]));
+}
+
+const deliveryStateTransitions: Record<AvniDeliveryState, ReadonlySet<AvniDeliveryState>> = {
+  queued: new Set<AvniDeliveryState>(["sent", "delivered", "read", "failed"]),
+  sent: new Set<AvniDeliveryState>(["delivered", "read", "failed"]),
+  delivered: new Set<AvniDeliveryState>(["read"]),
+  read: new Set<AvniDeliveryState>(),
+  failed: new Set<AvniDeliveryState>(),
+  unknown: new Set<AvniDeliveryState>(["queued", "sent", "delivered", "read", "failed"]),
+};
+
+/** Monotonic within one provider send attempt. Retries receive a new attempt row. */
+export function advanceDeliveryState(
+  current: AvniDeliveryState | null,
+  incoming: AvniDeliveryState,
+): { state: AvniDeliveryState; changed: boolean; regressionIgnored: boolean } {
+  if (current === null) return { state: incoming, changed: true, regressionIgnored: false };
+  if (current === incoming) return { state: current, changed: false, regressionIgnored: false };
+  if (deliveryStateTransitions[current].has(incoming)) {
+    return { state: incoming, changed: true, regressionIgnored: false };
+  }
+  return { state: current, changed: false, regressionIgnored: true };
 }
 
 export type AiReplyEligibilityCode =
