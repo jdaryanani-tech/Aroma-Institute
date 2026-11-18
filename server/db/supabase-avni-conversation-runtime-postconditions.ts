@@ -224,14 +224,23 @@ export async function assertAvniConversationRuntimePostconditions(client: Querya
   const { rows: roleRows } = await client.query<{
     role_name: string;
     can_login: boolean;
+    can_inherit: boolean;
     bypass_rls: boolean;
     is_superuser: boolean;
+    can_create_db: boolean;
+    can_create_role: boolean;
+    can_replicate: boolean;
   }>(`
-    SELECT rolname AS role_name,rolcanlogin AS can_login,rolbypassrls AS bypass_rls,
-      rolsuper AS is_superuser
+    SELECT rolname AS role_name,rolcanlogin AS can_login,rolinherit AS can_inherit,
+      rolbypassrls AS bypass_rls,rolsuper AS is_superuser,
+      rolcreatedb AS can_create_db,rolcreaterole AS can_create_role,rolreplication AS can_replicate
     FROM pg_roles WHERE rolname='aichm_conversation_runtime'
   `);
-  if (roleRows.length !== 1 || roleRows[0].can_login || roleRows[0].bypass_rls || roleRows[0].is_superuser) {
+  if (
+    roleRows.length !== 1 || roleRows[0].can_login || roleRows[0].can_inherit ||
+    roleRows[0].bypass_rls || roleRows[0].is_superuser || roleRows[0].can_create_db ||
+    roleRows[0].can_create_role || roleRows[0].can_replicate
+  ) {
     fail("AVNI_CONVERSATION_RUNTIME_ROLE_DRIFTED");
   }
 
@@ -263,6 +272,8 @@ export async function assertAvniConversationRuntimePostconditions(client: Querya
     runtime_execute: boolean;
     reader_execute: boolean;
     service_execute: boolean;
+    anon_execute: boolean;
+    authenticated_execute: boolean;
     public_execute: boolean;
   }>(`
     SELECT p.proname AS function_name,oidvectortypes(p.proargtypes) AS identity_arguments,
@@ -270,6 +281,8 @@ export async function assertAvniConversationRuntimePostconditions(client: Querya
       has_function_privilege('aichm_conversation_runtime',p.oid,'EXECUTE') AS runtime_execute,
       has_function_privilege('aichm_crm_reader',p.oid,'EXECUTE') AS reader_execute,
       has_function_privilege('service_role',p.oid,'EXECUTE') AS service_execute,
+      has_function_privilege('anon',p.oid,'EXECUTE') AS anon_execute,
+      has_function_privilege('authenticated',p.oid,'EXECUTE') AS authenticated_execute,
       EXISTS (
         SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
         WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'
@@ -284,8 +297,44 @@ export async function assertAvniConversationRuntimePostconditions(client: Querya
     if (
       fn.identity_arguments !== EXPECTED_RPC_SIGNATURES[fn.function_name] ||
       !fn.security_definer ||
-      searchPath !== "search_path=pg_catalog, aichm_private, public" ||
-      !fn.runtime_execute || fn.reader_execute || fn.service_execute || fn.public_execute
+      searchPath !== "search_path=pg_catalog, aichm_private" ||
+      !fn.runtime_execute || fn.reader_execute || fn.service_execute ||
+      fn.anon_execute || fn.authenticated_execute || fn.public_execute
     ) fail("AVNI_CONVERSATION_RUNTIME_RPC_PRIVILEGE_OR_PATH_DRIFTED");
+  }
+
+  const { rows: helper } = await client.query<{ exposed: boolean }>(`
+    SELECT has_function_privilege('aichm_conversation_runtime',
+      'aichm_private.delivery_transition_allowed(text,text)'::regprocedure,'EXECUTE')
+      OR has_function_privilege('aichm_crm_reader',
+      'aichm_private.delivery_transition_allowed(text,text)'::regprocedure,'EXECUTE')
+      OR has_function_privilege('service_role',
+      'aichm_private.delivery_transition_allowed(text,text)'::regprocedure,'EXECUTE')
+      OR has_function_privilege('anon',
+      'aichm_private.delivery_transition_allowed(text,text)'::regprocedure,'EXECUTE')
+      OR has_function_privilege('authenticated',
+      'aichm_private.delivery_transition_allowed(text,text)'::regprocedure,'EXECUTE')
+      OR EXISTS (
+        SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+        WHERE p.proname='delivery_transition_allowed' AND acl.grantee=0
+          AND acl.privilege_type='EXECUTE'
+      ) AS exposed
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='aichm_private' AND p.proname='delivery_transition_allowed'
+  `);
+  if (helper.length !== 1 || helper[0].exposed) {
+    fail("AVNI_CONVERSATION_RUNTIME_INTERNAL_HELPER_EXPOSED");
+  }
+
+  const { rows: memberships } = await client.query<{ count: string }>(`
+    SELECT count(*)::text AS count
+    FROM pg_auth_members m
+    JOIN pg_roles granted_role ON granted_role.oid=m.roleid
+    JOIN pg_roles member_role ON member_role.oid=m.member
+    WHERE granted_role.rolname='aichm_conversation_runtime'
+       OR member_role.rolname='aichm_conversation_runtime'
+  `);
+  if (Number(memberships[0]?.count) !== 0) {
+    fail("AVNI_CONVERSATION_RUNTIME_ROLE_MEMBERSHIP_UNREVIEWED");
   }
 }

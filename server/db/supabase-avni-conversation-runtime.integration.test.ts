@@ -161,6 +161,23 @@ async function installSyntheticPrerequisitesAndMigration(): Promise<void> {
   } finally {
     client.release();
   }
+
+  const reader = await pool!.connect();
+  try {
+    await reader.query("BEGIN");
+    await reader.query("SET LOCAL ROLE aichm_crm_reader");
+    const history = await reader.query(
+      "SELECT * FROM aichm_private.aichm_crm_conversations_for_replit_lead($1::uuid)",
+      ["20000000-0000-4000-8000-000000000001"],
+    );
+    assert.equal(history.rows.length, 1);
+    await reader.query("SAVEPOINT reader_table_access");
+    await assert.rejects(reader.query("SELECT * FROM aichm_private.conversation_threads"));
+    await reader.query("ROLLBACK TO SAVEPOINT reader_table_access");
+    await reader.query("ROLLBACK");
+  } finally {
+    reader.release();
+  }
 }
 
 before(async () => {
@@ -281,7 +298,12 @@ test("ephemeral PostgreSQL preparation proves private RPC boundary and legacy hi
   requireHarness();
   assert.equal(legacyHistoryAfter.length, 1);
   assert.equal((legacyHistoryAfter[0] as { body: string }).body, "synthetic legacy history");
-  await assertAvniConversationRuntimePostconditions(await pool!.connect());
+  const postconditionClient = await pool!.connect();
+  try {
+    await assertAvniConversationRuntimePostconditions(postconditionClient);
+  } finally {
+    postconditionClient.release();
+  }
 
   const directRead = await pool!.connect();
   try {
@@ -466,9 +488,12 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
   const attempt = firstClaim.rows.find(row => row.outbox_id === retryQueue.rows[0].outbox_id);
   assert.ok(attempt);
   await pool!.query(
-    `UPDATE aichm_private.conversation_outbox SET lease_expires_at=now()-interval '1 second' WHERE id=$1;
-     UPDATE aichm_private.conversation_outbox_attempts SET lease_expires_at=now()-interval '1 second' WHERE id=$2`,
-    [retryQueue.rows[0].outbox_id, attempt.attempt_id],
+    `UPDATE aichm_private.conversation_outbox SET lease_expires_at=now()-interval '1 second' WHERE id=$1`,
+    [retryQueue.rows[0].outbox_id],
+  );
+  await pool!.query(
+    `UPDATE aichm_private.conversation_outbox_attempts SET lease_expires_at=now()-interval '1 second' WHERE id=$1`,
+    [attempt.attempt_id],
   );
   const secondClaim = await asRuntime(client => client.query(
     "SELECT * FROM aichm_private.claim_next_conversation_outbound(true,60)",
@@ -480,6 +505,39 @@ test("claim skips a thread locked by takeover, and expired claim leases are boun
     [retryQueue.rows[0].outbox_id],
   );
   assert.equal(count[0].attempt_count, 2);
+
+  const { threadId: ceilingThread } = await createReadyThread();
+  const ceilingQueue = await enqueueAssistant(ceilingThread);
+  for (let expectedAttempt = 1; expectedAttempt <= 8; expectedAttempt += 1) {
+    const batch = await asRuntime(client => client.query(
+      "SELECT * FROM aichm_private.claim_next_conversation_outbound(true,60)",
+    ));
+    const claim = batch.rows.find(row => row.outbox_id === ceilingQueue.rows[0].outbox_id);
+    assert.ok(claim, `attempt ${expectedAttempt} should be claimed`);
+    const attemptNumber = await queryRows<{ attempt_number: number }>(
+      "SELECT attempt_number FROM aichm_private.conversation_outbox_attempts WHERE id=$1",
+      [claim.attempt_id],
+    );
+    assert.equal(attemptNumber[0].attempt_number, expectedAttempt);
+    await pool!.query(
+      "UPDATE aichm_private.conversation_outbox SET lease_expires_at=now()-interval '1 second' WHERE id=$1",
+      [ceilingQueue.rows[0].outbox_id],
+    );
+    await pool!.query(
+      "UPDATE aichm_private.conversation_outbox_attempts SET lease_expires_at=now()-interval '1 second' WHERE id=$1",
+      [claim.attempt_id],
+    );
+  }
+  const exhausted = await asRuntime(client => client.query(
+    "SELECT * FROM aichm_private.claim_next_conversation_outbound(true,60)",
+  ));
+  assert.equal(exhausted.rows.some(row => row.outbox_id === ceilingQueue.rows[0].outbox_id), false);
+  const ceilingState = await queryRows<{ state: string; attempt_count: number }>(
+    "SELECT state,attempt_count FROM aichm_private.conversation_outbox WHERE id=$1",
+    [ceilingQueue.rows[0].outbox_id],
+  );
+  assert.equal(ceilingState[0].state, "failed");
+  assert.equal(ceilingState[0].attempt_count, 8);
 });
 
 test("delivery receipts retain raw provider labels and ignore regressions", {

@@ -460,7 +460,7 @@ async function main(): Promise<void> {
           ["--test", selectedTestFile],
           testEnv,
           "inherit",
-          240_000,
+          suiteArgument === "--suite=avni-conversation-runtime" ? 30_000 : 240_000,
         );
         if (testResult.code !== 0) throw new Error("CRM_TEST_ISOLATED_SUITE_FAILED");
         return testResult;

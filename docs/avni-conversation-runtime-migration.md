@@ -16,6 +16,8 @@ loopback PostgreSQL cluster created by the explicit
   Replit PostgreSQL. Supabase stores only the nullable exact `public.leads.id`
   cross-link. New provider thread keys must be a server-computed keyed hash;
   raw WhatsApp remote JIDs/phone numbers are not stored in the thread index.
+- Foreign keys do not cascade transcript deletion; mapped lead/thread deletion
+  is restricted until a separately reviewed retention/deletion policy exists.
 - New threads start unmapped and human-owned. Mapping uses an exact existing
   Supabase lead/crosswalk, never a phone guess. Unmapped, ambiguous, held,
   closed, stale-version, and mismatched-ownership cases fail closed.

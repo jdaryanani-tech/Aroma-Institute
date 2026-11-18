@@ -16,6 +16,19 @@ $role$;
 
 ALTER ROLE aichm_conversation_runtime NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB
   NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+DO $role_membership$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_auth_members m
+    JOIN pg_catalog.pg_roles r ON r.oid=m.roleid
+    JOIN pg_catalog.pg_roles u ON u.oid=m.member
+    WHERE r.rolname='aichm_conversation_runtime'
+       OR u.rolname='aichm_conversation_runtime'
+  ) THEN
+    RAISE EXCEPTION 'AVNI_RUNTIME_ROLE_MEMBERSHIP_PREEXISTS';
+  END IF;
+END
+$role_membership$;
 
 GRANT USAGE ON SCHEMA aichm_private TO aichm_conversation_runtime;
 
@@ -23,7 +36,7 @@ CREATE TABLE aichm_private.conversation_threads (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   provider text NOT NULL,
   provider_thread_hash text NOT NULL,
-  supabase_lead_id uuid REFERENCES public.leads(id) ON DELETE SET NULL,
+  supabase_lead_id uuid REFERENCES public.leads(id) ON DELETE RESTRICT,
   mapping_status text NOT NULL DEFAULT 'unmapped',
   mode text NOT NULL DEFAULT 'human',
   lifecycle text NOT NULL DEFAULT 'open',
@@ -54,7 +67,7 @@ CREATE INDEX avni_conversation_threads_lead_updated_idx
 
 CREATE TABLE aichm_private.conversation_messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE CASCADE,
+  thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE RESTRICT,
   provider text NOT NULL,
   provider_message_ref text,
   idempotency_key text NOT NULL,
@@ -115,7 +128,7 @@ CREATE INDEX avni_conversation_messages_delivery_idx
 
 CREATE TABLE aichm_private.conversation_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE CASCADE,
+  thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE RESTRICT,
   provider text NOT NULL,
   provider_event_ref text NOT NULL,
   idempotency_key text NOT NULL,
@@ -145,8 +158,8 @@ CREATE INDEX avni_conversation_events_unlinked_idx
 
 CREATE TABLE aichm_private.conversation_outbox (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE CASCADE,
-  message_id uuid NOT NULL UNIQUE REFERENCES aichm_private.conversation_messages(id) ON DELETE CASCADE,
+  thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE RESTRICT,
+  message_id uuid NOT NULL UNIQUE REFERENCES aichm_private.conversation_messages(id) ON DELETE RESTRICT,
   author text NOT NULL,
   actor_ref text,
   idempotency_key text NOT NULL UNIQUE,
@@ -188,7 +201,7 @@ CREATE INDEX avni_conversation_outbox_thread_state_idx
 
 CREATE TABLE aichm_private.conversation_outbox_attempts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  outbox_id uuid NOT NULL REFERENCES aichm_private.conversation_outbox(id) ON DELETE CASCADE,
+  outbox_id uuid NOT NULL REFERENCES aichm_private.conversation_outbox(id) ON DELETE RESTRICT,
   attempt_number smallint NOT NULL,
   provider text NOT NULL,
   provider_message_ref text,
@@ -220,8 +233,8 @@ CREATE INDEX avni_conversation_attempts_expiry_idx
 
 CREATE TABLE aichm_private.conversation_delivery_receipts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  event_id uuid NOT NULL UNIQUE REFERENCES aichm_private.conversation_events(id) ON DELETE CASCADE,
-  attempt_id uuid NOT NULL REFERENCES aichm_private.conversation_outbox_attempts(id) ON DELETE CASCADE,
+  event_id uuid NOT NULL UNIQUE REFERENCES aichm_private.conversation_events(id) ON DELETE RESTRICT,
+  attempt_id uuid NOT NULL REFERENCES aichm_private.conversation_outbox_attempts(id) ON DELETE RESTRICT,
   provider text NOT NULL,
   provider_receipt_ref text NOT NULL,
   raw_provider_state text NOT NULL,
@@ -244,7 +257,7 @@ CREATE INDEX avni_conversation_receipts_attempt_time_idx
 
 CREATE TABLE aichm_private.conversation_control_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE CASCADE,
+  thread_id uuid NOT NULL REFERENCES aichm_private.conversation_threads(id) ON DELETE RESTRICT,
   request_id uuid NOT NULL UNIQUE,
   action text NOT NULL,
   actor_ref text NOT NULL,
@@ -322,7 +335,7 @@ CREATE OR REPLACE FUNCTION aichm_private.accept_provider_event(
   p_raw_provider_state text
 ) RETURNS TABLE(outcome text,thread_id uuid,event_id uuid,message_id uuid)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private, public
+SET search_path = pg_catalog, aichm_private
 AS $function$
 DECLARE
   v_thread_id uuid;
@@ -415,7 +428,7 @@ BEGIN
       p_direction,p_author,p_message_type,p_body,p_media_ref,
       CASE WHEN p_direction='outbound' THEN 'queued' ELSE NULL END,p_occurred_at
     )
-    ON CONFLICT (provider,provider_message_ref) DO NOTHING
+    ON CONFLICT (provider,provider_message_ref) WHERE provider_message_ref IS NOT NULL DO NOTHING
     RETURNING id INTO v_message_id;
 
     IF v_message_id IS NULL THEN
@@ -521,7 +534,7 @@ CREATE OR REPLACE FUNCTION aichm_private.link_conversation_thread(
   p_reason text
 ) RETURNS TABLE(outcome text,control_version bigint)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private, public
+SET search_path = pg_catalog, aichm_private
 AS $function$
 DECLARE
   v_thread aichm_private.conversation_threads%ROWTYPE;
@@ -578,7 +591,7 @@ CREATE OR REPLACE FUNCTION aichm_private.enqueue_conversation_message(
   p_whatsapp_send_allowed boolean DEFAULT false
 ) RETURNS TABLE(outcome text,outbox_id uuid,message_id uuid,control_version bigint)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private, public
+SET search_path = pg_catalog, aichm_private
 AS $function$
 DECLARE
   v_thread aichm_private.conversation_threads%ROWTYPE;
@@ -659,7 +672,7 @@ CREATE OR REPLACE FUNCTION aichm_private.claim_next_conversation_outbound(
   expected_control_version bigint,lease_token uuid,lease_expires_at timestamptz
 )
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private, public
+SET search_path = pg_catalog, aichm_private
 AS $function$
 DECLARE
   v_outbox aichm_private.conversation_outbox%ROWTYPE;
@@ -771,7 +784,7 @@ CREATE OR REPLACE FUNCTION aichm_private.authorize_conversation_outbound_attempt
   p_whatsapp_send_allowed boolean
 ) RETURNS boolean
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private, public
+SET search_path = pg_catalog, aichm_private
 AS $function$
 DECLARE
   v_outbox aichm_private.conversation_outbox%ROWTYPE;
@@ -829,7 +842,7 @@ CREATE OR REPLACE FUNCTION aichm_private.record_conversation_send_result(
   p_provider_message_ref text
 ) RETURNS text
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private, public
+SET search_path = pg_catalog, aichm_private
 AS $function$
 DECLARE
   v_attempt aichm_private.conversation_outbox_attempts%ROWTYPE;
@@ -884,7 +897,7 @@ CREATE OR REPLACE FUNCTION aichm_private.transition_conversation_control(
   p_whatsapp_opted_out boolean DEFAULT true
 ) RETURNS TABLE(outcome text,control_version bigint)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-SET search_path = pg_catalog, aichm_private, public
+SET search_path = pg_catalog, aichm_private
 AS $function$
 DECLARE
   v_thread aichm_private.conversation_threads%ROWTYPE;
