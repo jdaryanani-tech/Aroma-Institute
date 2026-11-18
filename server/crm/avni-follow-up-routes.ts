@@ -118,21 +118,7 @@ async function listDueFollowUps(
          JOIN admissions_crm_profiles profile ON profile.inquiry_id=versioned_inquiry.id
          WHERE versioned_inquiry.lead_id=l.id) AS version,
         CASE WHEN latest.stage='nurture' AND pause.event_hash IS NOT NULL
-          AND NOT EXISTS(SELECT 1 FROM admissions_crm_activities delivered
-            WHERE delivered.inquiry_id IN (
-              SELECT related.id FROM inquiries related WHERE related.lead_id=l.id
-            )
-              AND delivered.data->>'automationAction'='delivery'
-              AND delivered.data->>'automationFollowUpKind'='pause_checkin'
-              AND delivered.data->>'pauseEventHash'=pause.event_hash)
-          AND NOT EXISTS(SELECT 1 FROM admissions_crm_activities reengaged
-            WHERE reengaged.inquiry_id IN (
-              SELECT related.id FROM inquiries related WHERE related.lead_id=l.id
-            )
-              AND reengaged.occurred_at>pause.occurred_at
-              AND reengaged.data->>'automationAction' IS NULL
-              AND (reengaged.type='followup'
-                OR (reengaged.type='stage' AND reengaged.data->>'to'<>'nurture')))
+          AND NOT pause.checkin_delivered AND NOT pause.reengaged
          THEN 'pause_checkin' ELSE 'routine' END AS follow_up_kind
       FROM admissions_leads l
       JOIN LATERAL(
@@ -147,7 +133,24 @@ async function listDueFollowUps(
       JOIN lms_users assignee ON assignee.id=assignment.assignee_user_id AND assignee.is_active=true
       JOIN admissions_lead_contact_preferences consent ON consent.lead_id=l.id
      LEFT JOIN LATERAL(
-       SELECT activity.data->>'automationEventHash' AS event_hash,activity.occurred_at
+        SELECT activity.data->>'automationEventHash' AS event_hash,activity.occurred_at,
+          EXISTS(SELECT 1 FROM admissions_crm_activities delivered
+            WHERE delivered.inquiry_id IN (
+              SELECT related.id FROM inquiries related WHERE related.lead_id=l.id
+            )
+              AND delivered.data->>'automationAction'='delivery'
+              AND delivered.data->>'automationFollowUpKind'='pause_checkin'
+              AND delivered.data->>'pauseEventHash'=activity.data->>'automationEventHash'
+          ) AS checkin_delivered,
+          EXISTS(SELECT 1 FROM admissions_crm_activities reengaged
+            WHERE reengaged.inquiry_id IN (
+              SELECT related.id FROM inquiries related WHERE related.lead_id=l.id
+            )
+              AND reengaged.occurred_at>activity.occurred_at
+              AND reengaged.data->>'automationAction' IS NULL
+              AND (reengaged.type='followup'
+                OR (reengaged.type='stage' AND reengaged.data->>'to'<>'nurture'))
+          ) AS reengaged
        FROM admissions_crm_activities activity
         WHERE activity.inquiry_id IN (
           SELECT related.id FROM inquiries related WHERE related.lead_id=l.id
@@ -163,6 +166,10 @@ async function listDueFollowUps(
           WHERE assigned_role.user_id=assignee.id AND assigned_role.role::text='admissions'
         )
        AND consent.consent_status='granted' AND consent.opted_out_at IS NULL
+        AND NOT (
+          latest.stage='nurture' AND pause.event_hash IS NOT NULL
+          AND pause.checkin_delivered AND NOT pause.reengaged
+        )
        ${cursorCondition}
       ORDER BY latest.follow_up_at,l.id
      LIMIT $${limitParam}`,

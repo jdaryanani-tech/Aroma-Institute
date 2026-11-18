@@ -781,6 +781,7 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
          ["pending_pause_checkin", { stage: "nurture", followUpAt: dueAt(4) }],
          ["delivered_pause_checkin_cleared", { stage: "nurture", followUpAt: null }],
          ["delivered_pause_checkin_stale_due", { stage: "nurture", followUpAt: dueAt(2) }],
+         ["delivered_pause_checkin_reengaged", { stage: "nurture", followUpAt: dueAt(3) }],
          ["reengaged_pause_lead", { stage: "nurture", followUpAt: dueAt(1) }],
        ];
        for (const [key, options] of fixtureSpecs) await addDueFixture(key, options);
@@ -804,6 +805,7 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
        const pendingPause = dueFixtures.get("pending_pause_checkin")!;
        const deliveredCleared = dueFixtures.get("delivered_pause_checkin_cleared")!;
        const deliveredStale = dueFixtures.get("delivered_pause_checkin_stale_due")!;
+       const deliveredReengaged = dueFixtures.get("delivered_pause_checkin_reengaged")!;
        const reengaged = dueFixtures.get("reengaged_pause_lead")!;
        const pauseAt = new Date(dueNow - 60_000);
        async function addActivity(
@@ -822,6 +824,7 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
          ["pending", pendingPause],
          ["delivered-cleared", deliveredCleared],
          ["delivered-stale", deliveredStale],
+          ["delivered-reengaged", deliveredReengaged],
          ["reengaged", reengaged],
        ] as const) {
          const pauseEventHash = `synthetic-pause-${key}`;
@@ -829,14 +832,14 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
            automationAction: "pause",
            automationEventHash: pauseEventHash,
          });
-         if (key === "delivered-cleared" || key === "delivered-stale") {
+         if (key === "delivered-cleared" || key === "delivered-stale" || key === "delivered-reengaged") {
            await addActivity(fixture.inquiryId, "followup", new Date(dueNow - 30_000), {
              automationAction: "delivery",
              automationFollowUpKind: "pause_checkin",
              pauseEventHash,
            });
          }
-         if (key === "reengaged") {
+         if (key === "reengaged" || key === "delivered-reengaged") {
            await addActivity(fixture.inquiryId, "followup", new Date(dueNow - 30_000), {
              noteSource: "synthetic_reengagement",
            });
@@ -892,7 +895,7 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
          assert.deepEqual(returned.map(item => item.candidateRef), [
            dueFixtures.get("routine_valid")!.leadId,
            pendingPause.leadId,
-           deliveredStale.leadId,
+           deliveredReengaged.leadId,
            reengaged.leadId,
          ]);
          assert.deepEqual(returned.map(item => item.followUpKind), [
@@ -902,11 +905,12 @@ test("isolated CRM SQL: additive repeat migrations, distinct identities, audit, 
          const excludedIds = fixtureSpecs
            .filter(([key]) => ![
              "routine_valid", "pending_pause_checkin",
-             "delivered_pause_checkin_stale_due", "reengaged_pause_lead",
+             "delivered_pause_checkin_reengaged", "reengaged_pause_lead",
            ].includes(key))
            .map(([key]) => dueFixtures.get(key)!.leadId);
          assert.equal(excludedIds.some(id => returned.some(item => item.candidateRef === id)), false);
          assert.equal(returned.some(item => item.candidateRef === deliveredCleared.leadId), false);
+         assert.equal(returned.some(item => item.candidateRef === deliveredStale.leadId), false);
          const serialized = JSON.stringify([...firstPage.items, ...secondPage.items, readAudit]);
          assert.equal(serialized.includes("Synthetic AVNI"), false);
          assert.equal(serialized.includes("60000000"), false);
