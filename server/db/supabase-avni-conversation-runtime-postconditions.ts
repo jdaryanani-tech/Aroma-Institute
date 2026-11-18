@@ -10,6 +10,7 @@ export const AVNI_CONVERSATION_RUNTIME_TABLES = [
   "conversation_outbox_attempts",
   "conversation_delivery_receipts",
   "conversation_control_events",
+  "conversation_provider_reference_aliases",
 ] as const;
 
 const EXPECTED_COLUMNS: Record<string, readonly string[]> = {
@@ -56,6 +57,11 @@ const EXPECTED_COLUMNS: Record<string, readonly string[]> = {
     "actor_ref:text:true", "reason:text:false", "prior_version:bigint:true",
     "resulting_version:bigint:true", "occurred_at:timestamp with time zone:true",
   ],
+  conversation_provider_reference_aliases: [
+    "id:uuid:true", "provider:text:true", "reference_kind:text:true", "key_id:text:true",
+    "reference_token:text:true", "thread_id:uuid:false", "event_id:uuid:false",
+    "message_id:uuid:false", "receipt_id:uuid:false", "created_at:timestamp with time zone:true",
+  ],
 };
 
 const EXPECTED_INDEXES: Record<string, boolean> = {
@@ -74,6 +80,7 @@ const EXPECTED_INDEXES: Record<string, boolean> = {
   avni_conversation_attempts_expiry_idx: false,
   avni_conversation_receipts_attempt_time_idx: false,
   avni_conversation_control_thread_time_idx: false,
+  avni_conversation_reference_alias_target_idx: false,
 };
 
 const EXPECTED_CONSTRAINTS = [
@@ -126,17 +133,33 @@ const EXPECTED_CONSTRAINTS = [
   "avni_conversation_control_reason_ck",
   "avni_conversation_control_versions_ck",
   "avni_conversation_control_thread_version_uq",
+  "avni_conversation_reference_alias_provider_ck",
+  "avni_conversation_reference_alias_kind_ck",
+  "avni_conversation_reference_alias_key_id_ck",
+  "avni_conversation_reference_alias_token_ck",
+  "avni_conversation_reference_alias_target_ck",
+  "avni_conversation_reference_alias_uq",
 ] as const;
 
 const EXPECTED_RPC_SIGNATURES: Record<string, string> = {
-  accept_provider_event: "text, text, text, text, text, timestamp with time zone, text, text, text, text, text, text, text, text, text, text, text",
+  accept_provider_event: "text, text, text, text, text, timestamp with time zone, text, text, text, text, text, text, text, text, text, text, text, text[], text[], text[], text[]",
   link_conversation_thread: "uuid, uuid, bigint, text, uuid, text",
   enqueue_conversation_message: "uuid, bigint, text, text, text, text, text, text, text",
   claim_next_conversation_outbound: "integer",
   begin_conversation_send: "uuid, uuid, uuid, uuid, bigint, uuid, text, text",
   record_conversation_send_result: "uuid, uuid, uuid, text, text",
   transition_conversation_control: "uuid, bigint, text, text, uuid, text",
+  resolve_provider_reference_aliases: "text, text, text[]",
+  bind_provider_reference_aliases: "text, text, text[], uuid",
 };
+const RUNTIME_EXECUTABLE_RPCS = new Set([
+  "accept_provider_event",
+  "link_conversation_thread",
+  "enqueue_conversation_message",
+  "claim_next_conversation_outbound",
+  "begin_conversation_send",
+  "record_conversation_send_result",
+]);
 
 function fail(code: string): never {
   const error = new Error(code) as Error & { code: string };
@@ -196,7 +219,7 @@ export async function assertAvniConversationRuntimePostconditions(
   const expectedPolicies = [
     "avni_rpc_owner_attempts", "avni_rpc_owner_controls", "avni_rpc_owner_events",
     "avni_rpc_owner_messages", "avni_rpc_owner_outbox", "avni_rpc_owner_receipts",
-    "avni_rpc_owner_threads",
+    "avni_rpc_owner_reference_aliases", "avni_rpc_owner_threads",
   ];
   if (
     policies.length !== expectedPolicies.length ||
@@ -366,14 +389,14 @@ export async function assertAvniConversationRuntimePostconditions(
           AND acl.grantee<>p.proowner
           AND (
             acl.grantee<>(SELECT oid FROM pg_roles WHERE rolname='aichm_conversation_runtime')
-            OR p.proname='transition_conversation_control'
+            OR NOT (p.proname=ANY($2::text[]))
           )
       ) AS unexpected_execute
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     JOIN pg_roles owner ON owner.oid=p.proowner
     WHERE n.nspname='aichm_private' AND p.proname=ANY($1::text[])
     ORDER BY p.proname
-  `, [rpcNames]);
+  `, [rpcNames, [...RUNTIME_EXECUTABLE_RPCS]]);
   if (functions.length !== rpcNames.length) fail("AVNI_CONVERSATION_RUNTIME_RPC_MISSING");
   for (const fn of functions) {
     const searchPath = fn.configuration?.find(value => value.startsWith("search_path="));
@@ -382,7 +405,7 @@ export async function assertAvniConversationRuntimePostconditions(
       !fn.security_definer ||
       fn.owner_name !== "aichm_conversation_owner" ||
       searchPath !== "search_path=pg_catalog, aichm_private, pg_temp" ||
-      fn.runtime_execute !== (fn.function_name !== "transition_conversation_control") ||
+       fn.runtime_execute !== RUNTIME_EXECUTABLE_RPCS.has(fn.function_name) ||
       fn.reader_execute || fn.service_execute ||
        fn.anon_execute || fn.authenticated_execute || fn.public_execute || fn.unexpected_execute
     ) fail("AVNI_CONVERSATION_RUNTIME_RPC_PRIVILEGE_OR_PATH_DRIFTED");

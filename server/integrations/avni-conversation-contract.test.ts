@@ -171,21 +171,21 @@ test("keyed-token validation rejects raw and unkeyed provider-reference digests"
   assert.equal(providerReferenceTokenSchema.safeParse("event-001").success, false);
   assert.equal(providerReferenceTokenSchema.safeParse("a".repeat(64)).success, false);
   assert.equal(
-    providerReferenceTokenSchema.safeParse(`hmac-sha256:v1:${"a".repeat(64)}`).success,
+    providerReferenceTokenSchema.safeParse(`hmac-sha256:v2:key-a:${"a".repeat(64)}`).success,
     true,
   );
 });
 
 test("idempotency keys consume keyed tokens and content fingerprints exclude provider references", () => {
-  // Opaque format fixtures only. No HMAC key or production adapter exists in this phase.
-  const eventToken = `hmac-sha256:v1:${"a".repeat(64)}`;
-  const messageToken = `hmac-sha256:v1:${"b".repeat(64)}`;
-  const eventRetryToken = `hmac-sha256:v1:${"c".repeat(64)}`;
+  // Synthetic token fixtures; actual HMAC keys are injected only by the server adapter.
+  const eventToken = `hmac-sha256:v2:key-a:${"a".repeat(64)}`;
+  const messageToken = `hmac-sha256:v2:key-a:${"b".repeat(64)}`;
+  const eventRetryToken = `hmac-sha256:v2:key-b:${"c".repeat(64)}`;
   assert.equal(conversationEventIdempotencyKey(eventToken), `event:v1:${"a".repeat(64)}`);
   assert.equal(conversationMessageIdempotencyKey(messageToken), `message:v1:${"b".repeat(64)}`);
   assert.notEqual(conversationEventIdempotencyKey(eventToken), conversationEventIdempotencyKey(eventRetryToken));
   assert.throws(
-    () => conversationEventIdempotencyKey("a".repeat(64) as `hmac-sha256:v1:${string}`),
+    () => conversationEventIdempotencyKey("a".repeat(64) as `hmac-sha256:v2:key-a:${string}`),
     /INVALID_PROVIDER_REFERENCE_TOKEN/,
   );
 

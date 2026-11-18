@@ -13,6 +13,12 @@ import {
   type AvniConversationEvent,
 } from "../integrations/avni-conversation-contract";
 import {
+  createAvniProviderReferenceAliases,
+  signAvniProviderReference,
+  type AvniHmacKeyProvider,
+  type AvniProviderReferenceKind,
+} from "../integrations/avni-provider-reference-hmac";
+import {
   assertAvniConversationPreflightPostconditions,
   assertAvniConversationRuntimePostconditions,
   assertAvniConversationRuntimeReadiness,
@@ -38,16 +44,39 @@ let legacyHistoryAfter: unknown[] = [];
 let migrationRollbackVerified = false;
 let preflightMigrationRollbackVerified = false;
 
-// Synthetic opaque token-format fixtures only. These are random strings, not an
-// HMAC implementation; the production adapter remains a hard prerequisite.
-const syntheticProviderTokens = new Map<string, string>();
-function syntheticToken(reference: string): `hmac-sha256:v1:${string}` {
-  let token = syntheticProviderTokens.get(reference);
-  if (!token) {
-    token = `hmac-sha256:v1:${randomUUID().replaceAll("-", "")}${randomUUID().replaceAll("-", "")}`;
-    syntheticProviderTokens.set(reference, token);
-  }
-  return token as `hmac-sha256:v1:${string}`;
+// These keys are deterministic test-only fixtures, never production secrets.
+function syntheticKeyProvider(activeKeyId = "test-a"): AvniHmacKeyProvider {
+  return {
+    activeKeyId: () => activeKeyId,
+    retainedKeys: () => [
+      { keyId: "test-a", key: Buffer.alloc(32, 0x41) },
+      { keyId: "test-b", key: Buffer.alloc(32, 0x42) },
+    ],
+  };
+}
+
+function syntheticToken(
+  reference: string,
+  kind: AvniProviderReferenceKind = "event",
+  activeKeyId = "test-a",
+): string {
+  return signAvniProviderReference({
+    provider: "whatsapp",
+    kind,
+    rawReference: reference,
+  }, syntheticKeyProvider(activeKeyId)).token;
+}
+
+function syntheticAliases(
+  reference: string,
+  kind: AvniProviderReferenceKind,
+  activeKeyId: string,
+): string[] {
+  return createAvniProviderReferenceAliases({
+    provider: "whatsapp",
+    kind,
+    rawReference: reference,
+  }, syntheticKeyProvider(activeKeyId)).map(alias => alias.token);
 }
 
 function requireHarness(): asserts pool {
@@ -251,7 +280,7 @@ async function installSyntheticPrerequisitesAndMigration(): Promise<void> {
     `, [[
       "conversation_threads", "conversation_messages", "conversation_events",
       "conversation_outbox", "conversation_outbox_attempts", "conversation_delivery_receipts",
-      "conversation_control_events",
+      "conversation_control_events", "conversation_provider_reference_aliases",
     ]]);
     assert.equal(state.rows[0].role_count, "0");
     assert.equal(state.rows[0].table_count, "0");
@@ -391,10 +420,13 @@ function makeMessageEvent(overrides: Partial<Extract<AvniConversationEvent, { ki
   return validation.event;
 }
 
-async function acceptMessage(event: Extract<AvniConversationEvent, { kind: "message" }>) {
-  const threadKey = syntheticToken(event.threadRef);
-  const eventKey = syntheticToken(event.providerEventRef);
-  const messageKey = syntheticToken(event.providerMessageRef);
+async function acceptMessage(
+  event: Extract<AvniConversationEvent, { kind: "message" }>,
+  activeKeyId = "test-a",
+) {
+  const threadKey = syntheticToken(event.threadRef, "thread", activeKeyId);
+  const eventKey = syntheticToken(event.providerEventRef, "event", activeKeyId);
+  const messageKey = syntheticToken(event.providerMessageRef, "message", activeKeyId);
   const params = [
     event.provider, eventKey, threadKey,
     conversationEventIdempotencyKey(eventKey), conversationEventFingerprint(event),
@@ -402,11 +434,16 @@ async function acceptMessage(event: Extract<AvniConversationEvent, { kind: "mess
     conversationMessageIdempotencyKey(messageKey), conversationMessageFingerprint(event),
     event.direction, event.author, event.messageType, event.text ?? null,
     event.mediaRef ?? null, null, null,
+    syntheticAliases(event.threadRef, "thread", activeKeyId),
+    syntheticAliases(event.providerEventRef, "event", activeKeyId),
+    syntheticAliases(event.providerMessageRef, "message", activeKeyId),
+    syntheticAliases(event.providerEventRef, "receipt", activeKeyId),
   ];
   return asRuntime(async client => {
     const { rows } = await client.query(
       `SELECT * FROM aichm_private.accept_provider_event(
-        $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+        $1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+        $18::text[],$19::text[],$20::text[],$21::text[]
       )`,
       params,
     );
@@ -687,7 +724,7 @@ test("provider events are idempotent, changed replays conflict, and unmapped thr
 }, async () => {
   const event = makeMessageEvent();
   const first = await acceptMessage(event);
-  const duplicate = await acceptMessage(event);
+  const duplicate = await acceptMessage(event, "test-b");
   assert.equal(first.outcome, "accepted");
   assert.equal(duplicate.outcome, "duplicate_event");
   assert.equal(first.message_id, duplicate.message_id);
@@ -701,11 +738,22 @@ test("provider events are idempotent, changed replays conflict, and unmapped thr
   assert.equal(secondWrapper.outcome, "accepted");
   const messageCount = await queryRows<{ count: string }>(
     "SELECT count(*)::text AS count FROM aichm_private.conversation_messages WHERE provider_message_key=$1",
-    [syntheticToken(event.providerMessageRef)],
+    [syntheticToken(event.providerMessageRef, "message")],
   );
   assert.equal(Number(messageCount[0].count), 1);
-  assert.match(first.threadKey as string, /^hmac-sha256:v1:[0-9a-f]{64}$/);
+  assert.match(first.threadKey as string, /^hmac-sha256:v2:test-a:[0-9a-f]{64}$/);
   assert.notEqual(first.threadKey, event.threadRef);
+  const aliasCount = await queryRows<{ count: string }>(
+    `SELECT count(*)::text AS count FROM aichm_private.conversation_provider_reference_aliases
+     WHERE reference_kind='event' AND event_id=$1`,
+    [first.event_id],
+  );
+  assert.equal(Number(aliasCount[0]?.count), 2, "both retained key IDs map to one canonical event");
+  const eventCount = await queryRows<{ count: string }>(
+    "SELECT count(*)::text AS count FROM aichm_private.conversation_events WHERE thread_id=$1",
+    [first.thread_id],
+  );
+  assert.equal(Number(eventCount[0]?.count), 1, "rotation retry must not insert a second event");
 
   const plainDigest = "c".repeat(64);
   await assert.rejects(asRuntime(client => client.query(

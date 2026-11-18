@@ -27,7 +27,10 @@ export const AVNI_DELIVERY_STATES = [
 ] as const;
 export type AvniDeliveryState = typeof AVNI_DELIVERY_STATES[number];
 export const providerReferenceTokenSchema = z.string()
-  .regex(/^hmac-sha256:v1:[0-9a-f]{64}$/, "Provider references must be HMAC-tokenized by the server.");
+  .regex(
+    /^hmac-sha256:v2:[a-z0-9][a-z0-9_-]{0,31}:[0-9a-f]{64}$/,
+    "Provider references must be HMAC-tokenized by the server.",
+  );
 export type ProviderReferenceToken = z.infer<typeof providerReferenceTokenSchema>;
 
 const messageEventSchema = z.object({
@@ -129,7 +132,7 @@ export function classifyConversationEvent(event: AvniConversationEvent): Convers
 function tokenDigest(token: ProviderReferenceToken): string {
   const parsed = providerReferenceTokenSchema.safeParse(token);
   if (!parsed.success) throw new Error("INVALID_PROVIDER_REFERENCE_TOKEN");
-  return token.slice("hmac-sha256:v1:".length);
+  return token.split(":")[3]!;
 }
 
 function sha256(value: string): string {
