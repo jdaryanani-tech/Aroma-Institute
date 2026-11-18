@@ -1,8 +1,9 @@
 # AVNI conversation runtime migration draft
 
-`supabase/migrations/20261118_avni_conversation_runtime_v1.sql` is an
-unapplied, review-only migration draft. It was not run against Supabase,
-Development, or Production. Its verification suite uses only a disposable
+`supabase/migrations/20261118_avni_conversation_runtime_v1.sql` and
+`supabase/migrations/20261118_avni_conversation_runtime_v2_preflight.sql` are unapplied,
+review-only migration drafts. They were not run against Supabase, Development,
+or Production. Their verification suite uses only a disposable
 loopback PostgreSQL cluster created by the explicit
 `script/test-crm-persistence.ts --run-isolated-ephemeral-postgres
 --suite=avni-conversation-runtime` command.
@@ -86,6 +87,14 @@ provider sender or enable any messaging.
   contract and `public.leads.replit_lead_id` unique mapping on the intended
   Supabase primary. This draft does not infer that the old preparation SQL is
   applied.
+- The ordered 20261118 v2 preflight extension grants the NOLOGIN conversation owner
+  column-level `SELECT` on only `public.leads.id` and
+  `public.leads.replit_lead_id`, plus a policy limited to rows with a non-null
+  crosswalk when RLS is enabled. Its stable, fixed-search-path RPC accepts only
+  the server-resolved Replit lead UUID and expected control version, resolves
+  the exact crosswalk internally, and returns safe state plus an internal
+  thread reference to the dedicated CRM reader role. The reader still has no
+  direct table access. The app adapter strips all IDs from its result.
 - Apply only after a separate reviewed schema diff, role review, backup/
   recovery plan, and explicit owner approval. Do not backfill or dual-write
   legacy `public.conversations` as part of this draft.
@@ -95,6 +104,26 @@ provider sender or enable any messaging.
   WhatsApp consent, opt-out, and any required rate limits. Client fields and
   provider webhook claims about actor, assignment, consent, or opt-out are
   never authoritative. These checks are not implemented by the SQL draft.
+
+## Replit preflight adapter boundary
+
+`server/crm/avni-conversation-authorization.ts` is a server-only adapter, not an
+HTTP route. It reads actor identity only from the authenticated LMS session,
+reloads active status and current role rows, applies the existing canonical
+assignment predicate, locks and checks the canonical lead and contact
+preference rows, then calls the dedicated read-only Supabase preflight RPC.
+The Supabase reader role is used; no writer connection or service credential is
+introduced. The public adapter result contains only a safe status/code,
+conversation mode/version, and the constant `sendAuthorized: false`; it never
+returns lead, Supabase, or thread identifiers.
+
+This is intentionally only a preflight. It does not enqueue, claim, mutate a
+conversation, or contact a provider. The Replit consent check and a Supabase
+outbox write/provider call are not atomic across databases. A later sender must
+not treat this result as permission to send; a separate cross-database
+authorization protocol must be designed and tested first. The background
+`avni-followup-reader` capability remains separate and cannot call this
+interactive adapter.
 
 ## Objects in the draft
 

@@ -13,6 +13,7 @@ import {
   type AvniConversationEvent,
 } from "../integrations/avni-conversation-contract";
 import {
+  assertAvniConversationPreflightPostconditions,
   assertAvniConversationRuntimePostconditions,
   assertAvniConversationRuntimeReadiness,
 } from "./supabase-avni-conversation-runtime-postconditions";
@@ -35,6 +36,7 @@ const enabled = process.env.NODE_ENV === "test" &&
 let pool: Pool | undefined;
 let legacyHistoryAfter: unknown[] = [];
 let migrationRollbackVerified = false;
+let preflightMigrationRollbackVerified = false;
 
 // Synthetic opaque token-format fixtures only. These are random strings, not an
 // HMAC implementation; the production adapter remains a hard prerequisite.
@@ -77,6 +79,23 @@ async function asRuntime<T>(callback: (client: PoolClient) => Promise<T>): Promi
   try {
     await client.query("BEGIN");
     await client.query("SET LOCAL ROLE aichm_conversation_runtime");
+    const value = await callback(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function asReader<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
+  requireHarness();
+  const client = await pool!.connect();
+  try {
+    await client.query("BEGIN READ ONLY");
+    await client.query("SET LOCAL ROLE aichm_crm_reader");
     const value = await callback(client);
     await client.query("COMMIT");
     return value;
@@ -210,9 +229,53 @@ async function installSyntheticPrerequisitesAndMigration(): Promise<void> {
   );
   assert.deepEqual(afterMigration.rows, before.rows, "the legacy CRM history RPC result must not change");
   legacyHistoryAfter = afterMigration.rows;
+  const preflightMigration = await readFile(
+    "supabase/migrations/20261118_avni_conversation_runtime_v2_preflight.sql",
+    "utf8",
+  );
+  const failingPreflightMigration = preflightMigration.replace(
+    /\nCOMMIT;\s*$/,
+    "\nSELECT 1/0;\nCOMMIT;\n",
+  );
+  assert.notEqual(
+    failingPreflightMigration,
+    preflightMigration,
+    "the preflight test must inject a failure before COMMIT",
+  );
+  const preflightRollbackClient = await pool!.connect();
+  try {
+    await assert.rejects(preflightRollbackClient.query(failingPreflightMigration), /division by zero/i);
+    await preflightRollbackClient.query("ROLLBACK");
+    const state = await preflightRollbackClient.query<{
+      function_absent: boolean;
+      policy_absent: boolean;
+      owner_column_privilege_absent: boolean;
+    }>(`
+      SELECT
+        to_regprocedure('aichm_private.preflight_conversation_for_replit_lead(uuid,bigint)') IS NULL
+          AS function_absent,
+        NOT EXISTS (
+          SELECT 1 FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid
+          JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='public' AND c.relname='leads'
+            AND p.polname='avni_conversation_owner_crosswalk_select'
+        ) AS policy_absent,
+        NOT has_column_privilege(
+          'aichm_conversation_owner','public.leads','replit_lead_id','SELECT'
+        ) AS owner_column_privilege_absent
+    `);
+    assert.equal(state.rows[0]?.function_absent, true);
+    assert.equal(state.rows[0]?.policy_absent, true);
+    assert.equal(state.rows[0]?.owner_column_privilege_absent, true);
+    preflightMigrationRollbackVerified = true;
+  } finally {
+    preflightRollbackClient.release();
+  }
+  await pool!.query(preflightMigration);
   const client = await pool!.connect();
   try {
     await assertAvniConversationRuntimePostconditions(client);
+    await assertAvniConversationPreflightPostconditions(client);
   } finally {
     client.release();
   }
@@ -233,6 +296,17 @@ async function installSyntheticPrerequisitesAndMigration(): Promise<void> {
   } finally {
     reader.release();
   }
+  const deniedPublicRead = await pool!.connect();
+  try {
+    await deniedPublicRead.query("BEGIN");
+    await deniedPublicRead.query("SET LOCAL ROLE aichm_crm_reader");
+    await deniedPublicRead.query("SAVEPOINT public_lead_access");
+    await assert.rejects(deniedPublicRead.query("SELECT id,replit_lead_id FROM public.leads"));
+    await deniedPublicRead.query("ROLLBACK TO SAVEPOINT public_lead_access");
+    await deniedPublicRead.query("ROLLBACK");
+  } finally {
+    deniedPublicRead.release();
+  }
 }
 
 before(async () => {
@@ -249,6 +323,12 @@ test("injected migration failure rolls back role and table creation atomically",
   skip: !enabled,
 }, () => {
   assert.equal(migrationRollbackVerified, true);
+});
+
+test("injected preflight migration failure rolls back RPC, policy and column privileges", {
+  skip: !enabled,
+}, () => {
+  assert.equal(preflightMigrationRollbackVerified, true);
 });
 
 function makeMessageEvent(overrides: Partial<Extract<AvniConversationEvent, { kind: "message" }>> = {}) {
@@ -299,9 +379,10 @@ async function acceptMessage(event: Extract<AvniConversationEvent, { kind: "mess
 async function createReadyThread() {
   const accepted = await acceptMessage(makeMessageEvent());
   const supabaseLeadId = randomUUID();
+  const replitLeadId = randomUUID();
   await pool!.query(
     "INSERT INTO public.leads(id,replit_lead_id) VALUES ($1,$2)",
-    [supabaseLeadId, randomUUID()],
+    [supabaseLeadId, replitLeadId],
   );
   const linkRequestId = randomUUID();
   const link = await asRuntime(client => client.query(
@@ -319,6 +400,7 @@ async function createReadyThread() {
   return {
     threadId: accepted.thread_id as string,
     supabaseLeadId,
+    replitLeadId,
     linkRequestId,
     threadKey: accepted.threadKey as string,
     threadRef: accepted.event.threadRef,
@@ -371,6 +453,7 @@ test("ephemeral PostgreSQL preparation proves private RPC boundary and legacy hi
   const postconditionClient = await pool!.connect();
   try {
     await assertAvniConversationRuntimePostconditions(postconditionClient);
+    await assertAvniConversationPreflightPostconditions(postconditionClient);
   } finally {
     postconditionClient.release();
   }
@@ -423,6 +506,85 @@ test("runtime readiness is separate, read-only, and accepts only one constrained
     await client.query(`DROP ROLE IF EXISTS ${broadRole}`).catch(() => undefined);
     client.release();
   }
+});
+
+test("crosswalk preflight is exact, bounded to the CRM link, and control-version aware", {
+  skip: !enabled,
+}, async () => {
+  requireHarness();
+  const missing = await asReader(client => client.query<{
+    outcome: string; thread_id: string | null;
+  }>(
+    "SELECT * FROM aichm_private.preflight_conversation_for_replit_lead($1::uuid,$2::bigint)",
+    [randomUUID(), 0],
+  ));
+  assert.equal(missing.rows[0]?.outcome, "crosswalk_missing");
+  assert.equal(missing.rows[0]?.thread_id, null);
+
+  const ready = await createReadyThread();
+  const current = await asReader(client => client.query<{
+    outcome: string; thread_id: string | null; control_version: string;
+  }>(
+    "SELECT * FROM aichm_private.preflight_conversation_for_replit_lead($1::uuid,$2::bigint)",
+    [ready.replitLeadId, 2],
+  ));
+  assert.equal(current.rows[0]?.outcome, "preflight_ready");
+  assert.equal(current.rows[0]?.thread_id, ready.threadId);
+  assert.equal(Number(current.rows[0]?.control_version), 2);
+
+  await pool!.query("ALTER TABLE public.leads ENABLE ROW LEVEL SECURITY; ALTER TABLE public.leads FORCE ROW LEVEL SECURITY");
+  const forcedRls = await asReader(client => client.query<{ outcome: string }>(
+    "SELECT * FROM aichm_private.preflight_conversation_for_replit_lead($1::uuid,$2::bigint)",
+    [ready.replitLeadId, 2],
+  ));
+  assert.equal(forcedRls.rows[0]?.outcome, "preflight_ready");
+
+  const stale = await asReader(client => client.query<{ outcome: string; thread_id: string | null }>(
+    "SELECT * FROM aichm_private.preflight_conversation_for_replit_lead($1::uuid,$2::bigint)",
+    [ready.replitLeadId, 1],
+  ));
+  assert.equal(stale.rows[0]?.outcome, "stale_control_version");
+  assert.equal(stale.rows[0]?.thread_id, null);
+
+  const duplicateCrosswalk = await pool!.connect();
+  try {
+    await duplicateCrosswalk.query("BEGIN");
+    await duplicateCrosswalk.query("DROP INDEX public.public_leads_replit_lead_id_uq");
+    await duplicateCrosswalk.query(
+      "INSERT INTO public.leads(id,replit_lead_id) VALUES ($1,$2)",
+      [randomUUID(), ready.replitLeadId],
+    );
+    await duplicateCrosswalk.query("SET LOCAL ROLE aichm_crm_reader");
+    const ambiguous = await duplicateCrosswalk.query<{ outcome: string }>(
+      "SELECT * FROM aichm_private.preflight_conversation_for_replit_lead($1::uuid,$2::bigint)",
+      [ready.replitLeadId, 2],
+    );
+    assert.equal(ambiguous.rows[0]?.outcome, "crosswalk_ambiguous");
+    await duplicateCrosswalk.query("ROLLBACK");
+  } catch (error) {
+    await duplicateCrosswalk.query("ROLLBACK");
+    throw error;
+  } finally {
+    duplicateCrosswalk.release();
+  }
+
+  const secondProviderEvent = makeMessageEvent({
+    provider: "whatsapp_alt",
+    threadRef: `synthetic-thread-${randomUUID()}`,
+    providerEventRef: `event-${randomUUID()}`,
+    providerMessageRef: `provider-message-${randomUUID()}`,
+  });
+  const secondThread = await acceptMessage(secondProviderEvent);
+  const linkedSecond = await asRuntime(client => client.query(
+    `SELECT * FROM aichm_private.link_conversation_thread($1,$2,0,'replit_lms_user:42',$3,'synthetic second provider')`,
+    [secondThread.thread_id, ready.supabaseLeadId, randomUUID()],
+  ));
+  assert.equal(linkedSecond.rows[0]?.outcome, "linked");
+  const ambiguousThread = await asReader(client => client.query<{ outcome: string }>(
+    "SELECT * FROM aichm_private.preflight_conversation_for_replit_lead($1::uuid,$2::bigint)",
+    [ready.replitLeadId, 2],
+  ));
+  assert.equal(ambiguousThread.rows[0]?.outcome, "conversation_ambiguous");
 });
 
 test("provider events are idempotent, changed replays conflict, and unmapped threads cannot queue", {

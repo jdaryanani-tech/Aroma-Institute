@@ -528,6 +528,7 @@ async function main(): Promise<void> {
         migrationsApplied: [
           "20261107_aichm_two_database_contract.sql (disposable fixture)",
           "20261118_avni_conversation_runtime_v1.sql (disposable fixture)",
+          "20261118_avni_conversation_runtime_v2_preflight.sql (disposable fixture)",
         ],
       }),
     }));

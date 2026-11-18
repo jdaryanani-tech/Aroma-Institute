@@ -60,12 +60,51 @@ export type SupabaseConversationItem = {
   providerMessageId: string | null;
   occurredAt: string;
 };
+export type SupabaseConversationPreflight = {
+  outcome:
+    | "invalid_request"
+    | "crosswalk_missing"
+    | "crosswalk_ambiguous"
+    | "conversation_missing"
+    | "conversation_ambiguous"
+    | "conversation_closed"
+    | "stale_control_version"
+    | "preflight_ready";
+  mode: "ai" | "human" | null;
+  lifecycle: "open" | "closed" | null;
+  controlVersion: number | null;
+};
 
 const cursorSchema = z.object({
   at: z.string().datetime({ offset: true }),
   conversationId: z.string().uuid(),
   side: z.enum(["message", "ai_response"]),
 }).strict();
+const conversationPreflightSchema = z.object({
+  outcome: z.enum([
+    "invalid_request",
+    "crosswalk_missing",
+    "crosswalk_ambiguous",
+    "conversation_missing",
+    "conversation_ambiguous",
+    "conversation_closed",
+    "stale_control_version",
+    "preflight_ready",
+  ]),
+  thread_id: z.string().uuid().nullable(),
+  mode: z.enum(["ai", "human"]).nullable(),
+  lifecycle: z.enum(["open", "closed"]).nullable(),
+  control_version: z.union([z.number().int().nonnegative(), z.string().regex(/^\d+$/)])
+    .nullable(),
+}).strict().superRefine((row, context) => {
+  if (row.outcome === "preflight_ready" && !row.thread_id) {
+    context.addIssue({
+      code: "custom",
+      path: ["thread_id"],
+      message: "Ready preflight requires one internal thread.",
+    });
+  }
+});
 
 function required(value: string | undefined, key: string) {
   const result = value?.trim();
@@ -363,6 +402,28 @@ export function createSupabaseAvniReader(queryable: ReadonlyQueryable) {
         }) : null,
       };
     },
+    async preflightConversation(replitLeadId: string, expectedControlVersion: number) {
+      const { rows } = await queryable.query(
+        `SELECT * FROM aichm_private.preflight_conversation_for_replit_lead(
+          $1::uuid,$2::bigint
+        )`,
+        [replitLeadId, expectedControlVersion],
+      );
+      if (rows.length !== 1) throw new Error("invalid_conversation_preflight_result");
+      const parsed = conversationPreflightSchema.parse(rows[0]);
+      const controlVersion = parsed.control_version === null
+        ? null
+        : Number(parsed.control_version);
+      if (controlVersion !== null && !Number.isSafeInteger(controlVersion)) {
+        throw new Error("invalid_conversation_preflight_result");
+      }
+      return {
+        outcome: parsed.outcome,
+        mode: parsed.mode,
+        lifecycle: parsed.lifecycle,
+        controlVersion,
+      } satisfies SupabaseConversationPreflight;
+    },
     async verifyConfirmation(
       replitLeadId: string,
       conversationId: string,
@@ -383,6 +444,16 @@ export async function readSupabaseConversationPage(
   limit = 50,
 ) {
   return createSupabaseAvniReader(getPool()).readConversationPage(replitLeadId, cursor, limit);
+}
+
+export async function readSupabaseConversationPreflight(
+  replitLeadId: string,
+  expectedControlVersion: number,
+) {
+  return createSupabaseAvniReader(getPool()).preflightConversation(
+    replitLeadId,
+    expectedControlVersion,
+  );
 }
 
 export async function verifySupabaseAvniConfirmation(

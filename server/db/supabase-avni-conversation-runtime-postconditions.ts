@@ -453,3 +453,118 @@ export async function assertAvniConversationRuntimeReadiness(
     Number(runtimeMembers[0]?.count) !== 1
   ) fail("AVNI_CONVERSATION_RUNTIME_LOGIN_NOT_APPROVED");
 }
+
+/**
+ * Verifies the read-only Replit-to-Supabase conversation preflight boundary.
+ * This is a migration/catalog check only; it does not provision a login.
+ */
+export async function assertAvniConversationPreflightPostconditions(
+  client: Queryable,
+): Promise<void> {
+  const { rows: crosswalkPrivileges } = await client.query<{
+    owner_table_select: boolean;
+    owner_id_select: boolean;
+    owner_crosswalk_select: boolean;
+    owner_other_column_select_count: string;
+    owner_public_usage: boolean;
+    owner_public_create: boolean;
+    reader_table_select: boolean;
+    runtime_table_select: boolean;
+    service_table_select: boolean;
+  }>(`
+    SELECT
+      has_table_privilege('aichm_conversation_owner','public.leads','SELECT') AS owner_table_select,
+      has_column_privilege('aichm_conversation_owner','public.leads','id','SELECT') AS owner_id_select,
+      has_column_privilege('aichm_conversation_owner','public.leads','replit_lead_id','SELECT') AS owner_crosswalk_select,
+      (SELECT count(*)::text FROM pg_attribute a
+       WHERE a.attrelid='public.leads'::regclass AND a.attnum>0 AND NOT a.attisdropped
+         AND a.attname NOT IN ('id','replit_lead_id')
+         AND has_column_privilege('aichm_conversation_owner','public.leads',a.attname,'SELECT')
+      ) AS owner_other_column_select_count,
+      has_schema_privilege('aichm_conversation_owner','public','USAGE') AS owner_public_usage,
+      has_schema_privilege('aichm_conversation_owner','public','CREATE') AS owner_public_create,
+      has_table_privilege('aichm_crm_reader','public.leads','SELECT') AS reader_table_select,
+      has_table_privilege('aichm_conversation_runtime','public.leads','SELECT') AS runtime_table_select,
+      has_table_privilege('service_role','public.leads','SELECT') AS service_table_select
+  `);
+  const crosswalk = crosswalkPrivileges[0];
+  if (
+    !crosswalk ||
+    crosswalk.owner_table_select ||
+    !crosswalk.owner_id_select ||
+    !crosswalk.owner_crosswalk_select ||
+    Number(crosswalk.owner_other_column_select_count) !== 0 ||
+    !crosswalk.owner_public_usage ||
+    crosswalk.owner_public_create ||
+    crosswalk.reader_table_select ||
+    crosswalk.runtime_table_select ||
+    crosswalk.service_table_select
+  ) fail("AVNI_CONVERSATION_PREFLIGHT_CROSSWALK_PRIVILEGE_DRIFTED");
+
+  const { rows: policies } = await client.query<{
+    owner_only_role: boolean;
+    command: string;
+    permissive: boolean;
+    predicate: string | null;
+  }>(`
+    SELECT p.polroles=ARRAY[(SELECT oid FROM pg_roles WHERE rolname='aichm_conversation_owner')]::oid[]
+        AS owner_only_role,
+      p.polcmd AS command,p.polpermissive AS permissive,
+      pg_get_expr(p.polqual,p.polrelid) AS predicate
+    FROM pg_policy p
+    WHERE p.polrelid='public.leads'::regclass
+      AND p.polname='avni_conversation_owner_crosswalk_select'
+  `);
+  if (
+    policies.length !== 1 ||
+    policies[0].owner_only_role !== true ||
+    policies[0].command !== "r" ||
+    policies[0].permissive !== true ||
+    !policies[0].predicate?.includes("replit_lead_id IS NOT NULL")
+  ) fail("AVNI_CONVERSATION_PREFLIGHT_CROSSWALK_POLICY_DRIFTED");
+
+  const { rows: functions } = await client.query<{
+    owner_name: string;
+    identity_arguments: string;
+    security_definer: boolean;
+    stable: boolean;
+    configuration: string[] | null;
+    reader_execute: boolean;
+    runtime_execute: boolean;
+    service_execute: boolean;
+    anon_execute: boolean;
+    authenticated_execute: boolean;
+    public_execute: boolean;
+  }>(`
+    SELECT owner.rolname AS owner_name,oidvectortypes(p.proargtypes) AS identity_arguments,
+      p.prosecdef AS security_definer,p.provolatile='s' AS stable,p.proconfig AS configuration,
+      has_function_privilege('aichm_crm_reader',p.oid,'EXECUTE') AS reader_execute,
+      has_function_privilege('aichm_conversation_runtime',p.oid,'EXECUTE') AS runtime_execute,
+      has_function_privilege('service_role',p.oid,'EXECUTE') AS service_execute,
+      has_function_privilege('anon',p.oid,'EXECUTE') AS anon_execute,
+      has_function_privilege('authenticated',p.oid,'EXECUTE') AS authenticated_execute,
+      EXISTS (
+        SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+        WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'
+      ) AS public_execute
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    JOIN pg_roles owner ON owner.oid=p.proowner
+    WHERE n.nspname='aichm_private' AND p.proname='preflight_conversation_for_replit_lead'
+  `);
+  const fn = functions[0];
+  const searchPath = fn?.configuration?.find(value => value.startsWith("search_path="));
+  if (
+    functions.length !== 1 ||
+    fn.owner_name !== "aichm_conversation_owner" ||
+    fn.identity_arguments !== "uuid, bigint" ||
+    !fn.security_definer ||
+    !fn.stable ||
+    searchPath !== "search_path=pg_catalog, aichm_private, pg_temp" ||
+    !fn.reader_execute ||
+    fn.runtime_execute ||
+    fn.service_execute ||
+    fn.anon_execute ||
+    fn.authenticated_execute ||
+    fn.public_execute
+  ) fail("AVNI_CONVERSATION_PREFLIGHT_RPC_PRIVILEGE_OR_PATH_DRIFTED");
+}

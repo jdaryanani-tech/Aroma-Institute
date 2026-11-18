@@ -98,6 +98,54 @@ test("history reader uses only the bounded Supabase RPC and keyset pagination", 
   assert.equal((await reader.readConversationPage("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", page.nextCursor!, 10)).items.length, 2);
 });
 
+test("conversation preflight reader calls only the exact server RPC and validates its safe result", async () => {
+  const seen: Array<{ text: string; values?: unknown[] }> = [];
+  const reader = createSupabaseAvniReader({
+    async query(text, values) {
+      seen.push({ text, values });
+      return { rows: [{
+        outcome: "preflight_ready",
+        thread_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        mode: "ai",
+        lifecycle: "open",
+        control_version: "9",
+      }] };
+    },
+  });
+  const result = await reader.preflightConversation(
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    9,
+  );
+  assert.match(seen[0].text, /preflight_conversation_for_replit_lead/);
+  assert.deepEqual(seen[0].values, [
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    9,
+  ]);
+  assert.deepEqual(result, {
+    outcome: "preflight_ready",
+    mode: "ai",
+    lifecycle: "open",
+    controlVersion: 9,
+  });
+
+  const malformed = createSupabaseAvniReader({
+    async query() {
+      return { rows: [{
+        outcome: "preflight_ready",
+        thread_id: "not-a-uuid",
+        mode: "ai",
+        lifecycle: "open",
+        control_version: "9",
+        lead_phone: "must-not-be-accepted",
+      }] };
+    },
+  });
+  await assert.rejects(
+    malformed.preflightConversation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 9),
+    /Unrecognized key/,
+  );
+});
+
 test("booking confirmation verification sends stable lead UUID and external Supabase message ID only", async () => {
   const calls: unknown[][] = [];
   const reader = createSupabaseAvniReader({
