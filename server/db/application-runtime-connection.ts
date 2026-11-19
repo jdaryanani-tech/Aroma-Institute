@@ -9,6 +9,7 @@ type Endpoint = {
   port: number;
   database: string;
   queryPolicy: string[];
+  sslModeEntries: string[];
 };
 
 export type ApplicationRuntimeMode =
@@ -139,7 +140,14 @@ function reject(code: string): never {
   throw error;
 }
 
-function isPrivateDatabaseHost(host: string): boolean {
+function isReplitManagedNeonHost(host: string): boolean {
+  // Replit's legacy managed PostgreSQL endpoints use
+  // <endpoint-id>.<region>.aws.neon.tech. Accept only that documented shape;
+  // the Production URL must still match DATABASE_URL exactly and use TLS.
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.aws\.neon\.tech$/.test(host);
+}
+
+function isAllowedDatabaseHost(host: string): boolean {
   const normalized = host.toLowerCase().replace(/\.$/, "");
   if (normalized === "helium") return true;
   if (isIP(normalized) === 4) {
@@ -149,7 +157,16 @@ function isPrivateDatabaseHost(host: string): boolean {
       (parts[0] === 192 && parts[1] === 168);
   }
   if (isIP(normalized) !== 0) return false;
-  return normalized.endsWith(".internal");
+  return normalized.endsWith(".internal") || isReplitManagedNeonHost(normalized);
+}
+
+function hasRequiredManagedNeonTls(endpoint: Endpoint): boolean {
+  return !isReplitManagedNeonHost(endpoint.host) ||
+    (endpoint.sslModeEntries.length === 1 && endpoint.sslModeEntries[0] === "require");
+}
+
+function isAllowedDatabaseEndpoint(endpoint: Endpoint): boolean {
+  return isAllowedDatabaseHost(endpoint.host) && hasRequiredManagedNeonTls(endpoint);
 }
 
 function endpointFrom(raw: string | undefined, label: "app" | "platform"): Endpoint & {
@@ -210,6 +227,9 @@ function endpointFrom(raw: string | undefined, label: "app" | "platform"): Endpo
     host: url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, ""),
     port,
     database,
+    sslModeEntries: Array.from(url.searchParams.entries())
+      .filter(([key]) => key.toLowerCase() === "sslmode")
+      .map(([, value]) => value),
     queryPolicy: Array.from(url.searchParams.entries())
       .map(([key, value]) => `${key}=${value}`)
       .sort(),
@@ -230,7 +250,7 @@ export function resolveApplicationRuntimeMode(
     if (!explicit?.trim()) reject("APP_DATABASE_URL_REQUIRED");
     const app = endpointFrom(explicit, "app");
     const platform = endpointFrom(environment[PLATFORM_DATABASE_URL_ENV], "platform");
-    if (!isPrivateDatabaseHost(app.host) || !isPrivateDatabaseHost(platform.host)) {
+    if (!isAllowedDatabaseEndpoint(app) || !isAllowedDatabaseEndpoint(platform)) {
       reject("APP_DATABASE_ENDPOINT_NOT_INTERNAL");
     }
     if (
@@ -256,7 +276,7 @@ export function resolveApplicationRuntimeMode(
 
   const app = endpointFrom(explicit, "app");
   const platform = endpointFrom(environment[PLATFORM_DATABASE_URL_ENV], "platform");
-  if (!isPrivateDatabaseHost(app.host) || !isPrivateDatabaseHost(platform.host)) {
+  if (!isAllowedDatabaseEndpoint(app) || !isAllowedDatabaseEndpoint(platform)) {
     reject("APP_DATABASE_ENDPOINT_NOT_INTERNAL");
   }
   if (
@@ -284,8 +304,8 @@ export function applicationDatabaseEndpointsMatch(
   try {
     const application = endpointFrom(applicationUrl, "app");
     const reference = endpointFrom(referenceUrl, "platform");
-    return isPrivateDatabaseHost(application.host) &&
-      isPrivateDatabaseHost(reference.host) &&
+    return isAllowedDatabaseEndpoint(application) &&
+      isAllowedDatabaseEndpoint(reference) &&
       application.host === reference.host &&
       application.port === reference.port &&
       application.database === reference.database &&

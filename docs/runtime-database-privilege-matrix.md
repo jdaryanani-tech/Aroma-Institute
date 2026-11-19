@@ -165,12 +165,15 @@ invalid app URL. Replit's official Helium Development database documentation
 describes the database as running alongside the app, accessible only from
 within the app, and never public. The verified Development service hostname is
 the exact single-label `helium`; the app guard accepts that exact name alongside
-the existing RFC1918 IPv4 and `.internal` cases. It does not accept arbitrary
-single-label names, public DNS names, or public IP addresses. The app login
-username is intentionally allowed to differ from the platform URL's username;
-otherwise a dedicated non-superuser could not replace the historical
-`postgres` login. Host, effective port, database name, and query/TLS policy
-must still match.
+the existing RFC1918 IPv4 and `.internal` cases. Replit also documents a legacy
+managed PostgreSQL host shape of `<endpoint-id>.<region>.aws.neon.tech`. The
+guard accepts only that exact two-label AWS Neon shape, only when both the app
+and platform URLs use the same host, and only when both specify exactly one
+`sslmode=require`. Other public DNS names, arbitrary Neon hosts, and public IP
+addresses remain rejected. The app login username is intentionally allowed to
+differ from the platform URL's username; otherwise a dedicated non-superuser
+could not replace the historical `postgres` login. Host, effective port,
+database name, and query/TLS policy must still match.
 Startup then checks current database, login role, primary/read-write status,
 non-superuser status, safe group memberships, required core privileges,
 read-only assignment table ACLs, assignment-function EXECUTE, and absence of
