@@ -36,11 +36,13 @@ has since changed as described below.
 
 ## AVNI contract
 
-All integration endpoints use exactly one request header:
+Lead and questionnaire integration endpoints use exactly one request header:
 `x-aichm-webhook-secret`, compared against the server-only
-`N8N_VSL_REGISTRATION_WEBHOOK_SECRET`. Comparison is timing-safe. Missing
-configuration returns a generic 503; values are never sent to the client or
-logged. Current production secret-name inspection found
+`N8N_VSL_REGISTRATION_WEBHOOK_SECRET`. Comparison is timing-safe. The due
+follow-up candidate-read endpoint uses the same header name but requires the
+separate `N8N_AVNI_FOLLOWUP_READ_SECRET`. Missing configuration returns a
+generic 503; values are never sent to the client or logged. Current production
+secret-name inspection found
 `N8N_VSL_REGISTRATION_WEBHOOK_SECRET` and
 `N8N_VSL_REGISTRATION_WEBHOOK_URL` absent.
 
@@ -51,14 +53,21 @@ logged. Current production secret-name inspection found
 - `POST /api/integrations/n8n/leads/upsert`: creates/reuses the canonical
   `admissions_leads` identity and one CRM inquiry anchor; does not mark VSL
   registration or completion.
-- `POST /api/integrations/n8n/conversations/messages`: idempotently persists
-  an inbound or pending outbound WhatsApp message before provider delivery.
-- `PATCH /api/integrations/n8n/conversations/messages/:messageId/delivery`:
-  records final outbound sent/failed state.
-- `GET /api/integrations/n8n/leads/:leadId/conversations` and
-  `POST /api/integrations/n8n/conversations/read`: read the saved chronological
-  conversation history. Message content is available only to the authenticated
-  server-to-server integration or the authorized CRM detail API.
+- `POST /api/integrations/n8n/crm/follow-ups/due`: read-only, bounded candidate
+  lookup. It uses the dedicated follow-up read credential and returns only
+  opaque lead references, due times, versions, and follow-up kinds.
+- The legacy conversation routes
+  (`POST /api/integrations/n8n/conversations/messages`,
+  `PATCH /api/integrations/n8n/conversations/messages/:messageId/delivery`,
+  `GET /api/integrations/n8n/leads/:leadId/conversations`, and
+  `POST /api/integrations/n8n/conversations/read`) are retired. Their current
+  handlers return HTTP 410; they do not persist or return transcript or
+  delivery data.
+- The Supabase conversation integration is read-only. The Supabase runtime
+  writer is unavailable, the live conversation schema is unverified, and AVNI
+  pilot dispatch remains hard-disabled. The retired routes cannot be used to
+  write messages, update delivery state, or read conversation history through
+  Replit's operational API.
 - Existing `/api/integrations/n8n/counselling/*` endpoints remain in place and
   continue to use the existing questionnaire validation/persistence path.
 
@@ -86,10 +95,12 @@ Paths:
 - `PATCH /api/integrations/n8n/calendar/bookings/:bookingId`
 - `POST /api/integrations/n8n/calendar/bookings/:bookingId/cancel`
 
-The CRM displays saved conversation messages and Calendar booking evidence
-only when their tables exist. Calendar push keys are configured with
-`AICHM_VAPID_PUBLIC_KEY` and `AICHM_VAPID_PRIVATE_KEY`; both names were absent
-in the latest production secret-name check. The durable runner command exists
+The CRM conversation view uses the read-only Supabase integration; this does
+not mean a runtime writer or verified live conversation schema is available.
+Calendar booking evidence is displayed only when its tables exist. Calendar
+push keys are configured with `AICHM_VAPID_PUBLIC_KEY` and
+`AICHM_VAPID_PRIVATE_KEY`; both names were absent in the latest production
+secret-name check. The durable runner command exists
 (`npm run calendar:run-reminders`), but no reliable scheduled invocation is
 configured by this change.
 
