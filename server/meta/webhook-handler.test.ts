@@ -34,6 +34,7 @@ type TestState = {
   status: number | null;
   body: unknown;
   calls: { fetch: number; persist: number; schema: number };
+  persistedFormIds: Array<string | null>;
 };
 
 function testDependencies(
@@ -53,8 +54,9 @@ function testDependencies(
       state.calls.fetch++;
       return { id: leadId, field_data: [] };
     },
-    persistLead: async () => {
+    persistLead: async (input) => {
       state.calls.persist++;
+      state.persistedFormIds.push(input.formId);
     },
     logger,
     ...overrides,
@@ -62,7 +64,13 @@ function testDependencies(
 }
 
 function testState(): TestState {
-  return { events: [], status: null, body: undefined, calls: { fetch: 0, persist: 0, schema: 0 } };
+  return {
+    events: [],
+    status: null,
+    body: undefined,
+    calls: { fetch: 0, persist: 0, schema: 0 },
+    persistedFormIds: [],
+  };
 }
 
 function createTestApp(
@@ -185,6 +193,8 @@ test("signature absence, malformed value, and mismatch remain 401 with safe diag
       assert.equal(response.status, 401);
       assert.equal(code(state), expectedCode);
       assert.equal(state.calls.schema, 0);
+      assert.equal(state.calls.fetch, 0);
+      assert.equal(state.calls.persist, 0);
     });
   }
 });
@@ -228,6 +238,117 @@ test("configured Page mismatch remains 403 and does not fetch the lead", async (
   assert.equal(response.status, 403);
   assert.equal(code(state), "configured_page_id_mismatch");
   assert.equal(state.calls.fetch, 0);
+  assert.equal(state.calls.persist, 0);
+});
+
+test("matching notification and fetched form IDs persist the lead", async () => {
+  const state = testState();
+  const response = await post(
+    createTestApp(state, {
+      fetchLead: async (leadId) => ({ id: leadId, form_id: "333", field_data: [] }),
+    }),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(state.calls.persist, 1);
+  assert.deepEqual(state.persistedFormIds, ["333"]);
+  assert.equal(state.events.at(-1)?.event, "meta_webhook");
+  assert.equal(
+    state.events.at(-1) && "outcome" in state.events.at(-1)! && state.events.at(-1)!.outcome,
+    "success",
+  );
+});
+
+test("mismatched notification and fetched form IDs are rejected before persistence without logging IDs", async () => {
+  const state = testState();
+  const response = await post(
+    createTestApp(state, {
+      fetchLead: async (leadId) => {
+        state.calls.fetch++;
+        return { id: leadId, form_id: "444", field_data: [] };
+      },
+    }),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(state.calls.fetch, 1);
+  assert.equal(state.calls.persist, 0);
+  assert.equal(code(state), "notification_form_id_mismatch");
+  const diagnostic = JSON.stringify(state.events);
+  assert.equal(diagnostic.includes("333"), false);
+  assert.equal(diagnostic.includes("444"), false);
+  assert.equal(response.text.includes("333"), false);
+  assert.equal(response.text.includes("444"), false);
+});
+
+test("a later form mismatch prevents writes for earlier valid notifications in the same request", async () => {
+  const state = testState();
+  const batchedBody = {
+    entry: [{
+      id: "111",
+      changes: [
+        { field: "leadgen", value: { leadgen_id: "222", page_id: "111", form_id: "333" } },
+        { field: "leadgen", value: { leadgen_id: "223", page_id: "111", form_id: "333" } },
+      ],
+    }],
+  };
+  const response = await post(
+    createTestApp(state, {
+      fetchLead: async (leadId) => {
+        state.calls.fetch++;
+        return {
+          id: leadId,
+          form_id: leadId === "222" ? "333" : "444",
+          field_data: [],
+        };
+      },
+    }),
+    JSON.stringify(batchedBody),
+    TEST_SIGNATURE,
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(state.calls.fetch, 2);
+  assert.equal(state.calls.persist, 0);
+  assert.equal(code(state), "notification_form_id_mismatch");
+  const safeOutput = `${JSON.stringify(state.events)}${response.text}`;
+  for (const id of ["111", "222", "223", "333", "444"]) {
+    assert.equal(safeOutput.includes(id), false);
+  }
+});
+
+test("missing form ID on either side preserves existing fallback behavior", async () => {
+  const notificationWithoutFormId = JSON.stringify({
+    entry: [{
+      id: "111",
+      changes: [{ field: "leadgen", value: { leadgen_id: "222", page_id: "111" } }],
+    }],
+  });
+  const fetchedWithoutFormIdState = testState();
+  const fetchedWithoutFormIdResponse = await post(
+    createTestApp(fetchedWithoutFormIdState, {
+      fetchLead: async (leadId) => ({ id: leadId, field_data: [] }),
+    }),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+  );
+  assert.equal(fetchedWithoutFormIdResponse.status, 200);
+  assert.deepEqual(fetchedWithoutFormIdState.persistedFormIds, ["333"]);
+
+  const notificationWithoutFormIdState = testState();
+  const notificationWithoutFormIdResponse = await post(
+    createTestApp(notificationWithoutFormIdState, {
+      fetchLead: async (leadId) => ({ id: leadId, form_id: "333", field_data: [] }),
+    }),
+    notificationWithoutFormId,
+    TEST_SIGNATURE,
+  );
+  assert.equal(notificationWithoutFormIdResponse.status, 200);
+  assert.deepEqual(notificationWithoutFormIdState.persistedFormIds, ["333"]);
 });
 
 test("Graph HTTP errors retain their status but log only allowlisted status/category", async () => {

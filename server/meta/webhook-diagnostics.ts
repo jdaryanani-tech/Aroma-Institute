@@ -25,6 +25,7 @@ export type MetaWebhookReasonCode =
   | "notification_page_id_invalid"
   | "notification_payload_invalid"
   | "configured_page_id_mismatch"
+  | "notification_form_id_mismatch"
   | "graph_lead_fetch_http_failure"
   | "graph_lead_fetch_failed"
   | "database_persistence_failed"
@@ -81,6 +82,7 @@ export type MetaWebhookDiagnostic =
         | "raw_body"
         | "notification"
         | "page_validation"
+        | "form_validation"
         | "graph_fetch"
         | "persistence"
         | "request_pipeline";

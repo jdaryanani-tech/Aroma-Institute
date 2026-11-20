@@ -221,6 +221,7 @@ export function createMetaLeadgenHandler(deps: MetaLeadgenHandlerDependencies) {
       return void res.sendStatus(403);
     }
 
+    const fetchedLeads: Array<{ notification: MetaNotification; lead: MetaFetchedLead }> = [];
     for (const notification of parsed.notifications) {
       let lead: MetaFetchedLead;
       try {
@@ -244,6 +245,21 @@ export function createMetaLeadgenHandler(deps: MetaLeadgenHandlerDependencies) {
         });
       }
 
+      const notificationFormId = notification.formId?.trim();
+      const fetchedFormId = typeof lead.form_id === "string" ? lead.form_id.trim() : "";
+      if (notificationFormId && fetchedFormId && notificationFormId !== fetchedFormId) {
+        diagnostic({
+          stage: "form_validation",
+          reasonCode: "notification_form_id_mismatch",
+          httpStatus: 403,
+        });
+        return void res.sendStatus(403);
+      }
+
+      fetchedLeads.push({ notification, lead });
+    }
+
+    for (const { notification, lead } of fetchedLeads) {
       const created = typeof lead.created_time === "string" ? new Date(lead.created_time) : null;
       try {
         await deps.persistLead({
