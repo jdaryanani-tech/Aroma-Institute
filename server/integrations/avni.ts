@@ -109,6 +109,57 @@ export const avniIntegrationAuth: RequestHandler = async (req, res, next) => {
   }
 };
 
+type AvniCrmFollowUpSnapshot = {
+  stage: string;
+  expectedVersion: number;
+  followUpAt: string | null;
+  followUpDue: boolean;
+};
+
+export function registerAvniLeadUpsertRoute(
+  app: Express,
+  dependencies: {
+    authenticate: RequestHandler;
+    schemaReady: () => Promise<boolean>;
+    upsertLead: typeof upsertIntegrationLead;
+    readLeadJourney: typeof readLeadFollowUpByPhone;
+    readCrmFollowUpState: (leadId: string) => Promise<AvniCrmFollowUpSnapshot | null>;
+  },
+) {
+  app.post("/api/integrations/n8n/leads/upsert", dependencies.authenticate, async (req, res) => {
+    const parsed = z.object({
+      phone: canonicalPhone,
+      name: z.string().trim().min(2).max(120),
+      source: z.string().trim().min(1).max(80).default("avni_whatsapp"),
+      programInterest: z.string().trim().min(1).max(200).default("Professional Barista Executive Program"),
+    }).strict().safeParse(req.body);
+    if (!parsed.success) return void res.status(400).json({ message: "A valid phone and name are required." });
+    try {
+      if (!await dependencies.schemaReady()) {
+        return void res.status(503).json({ message: "AVNI integration schema is not ready." });
+      }
+      const result = await dependencies.upsertLead(parsed.data);
+      const journey = await dependencies.readLeadJourney(result.canonicalPhone);
+      const crm = await dependencies.readCrmFollowUpState(result.lead.id);
+      if (!crm) return void res.status(503).json({ message: "CRM follow-up state is unavailable." });
+      return void res.status(result.inquiryCreated ? 201 : 200).json({
+        leadId: result.lead.id,
+        inquiryId: result.inquiryId,
+        inquiryCreated: result.inquiryCreated,
+        crm,
+        registeredAt: journey?.registeredAt ?? null,
+        video: journey?.video ?? null,
+        questionnaire: journey?.questionnaire ? {
+          status: journey.questionnaire.status,
+          completedAt: journey.questionnaire.completedAt,
+        } : null,
+      });
+    } catch {
+      return void res.status(503).json({ message: "Lead could not be saved." });
+    }
+  });
+}
+
 export function registerAvniIntegrationRoutes(
   app: Express,
   options: { runtimeDatabaseVerified?: boolean } = {},
@@ -381,35 +432,12 @@ export function registerAvniIntegrationRoutes(
     }
   });
 
-  app.post("/api/integrations/n8n/leads/upsert", avniIntegrationAuth, async (req, res) => {
-    const parsed = z.object({
-      phone: canonicalPhone,
-      name: z.string().trim().min(2).max(120),
-      source: z.string().trim().min(1).max(80).default("avni_whatsapp"),
-      programInterest: z.string().trim().min(1).max(200).default("Professional Barista Executive Program"),
-    }).strict().safeParse(req.body);
-    if (!parsed.success) return void res.status(400).json({ message: "A valid phone and name are required." });
-    try {
-      if (!await schemaReady()) return void res.status(503).json({ message: "AVNI integration schema is not ready." });
-      const result = await upsertIntegrationLead(parsed.data);
-      const journey = await readLeadFollowUpByPhone(result.canonicalPhone);
-      const crm = await readCrmFollowUpState(result.lead.id);
-      if (!crm) return void res.status(503).json({ message: "CRM follow-up state is unavailable." });
-      return void res.status(result.inquiryCreated ? 201 : 200).json({
-        leadId: result.lead.id,
-        inquiryId: result.inquiryId,
-        inquiryCreated: result.inquiryCreated,
-        crm,
-        registeredAt: journey?.registeredAt ?? null,
-        video: journey?.video ?? null,
-        questionnaire: journey?.questionnaire ? {
-          status: journey.questionnaire.status,
-          completedAt: journey.questionnaire.completedAt,
-        } : null,
-      });
-    } catch {
-      return void res.status(503).json({ message: "Lead could not be saved." });
-    }
+  registerAvniLeadUpsertRoute(app, {
+    authenticate: avniIntegrationAuth,
+    schemaReady,
+    upsertLead: upsertIntegrationLead,
+    readLeadJourney: readLeadFollowUpByPhone,
+    readCrmFollowUpState,
   });
 
   app.get("/api/integrations/n8n/leads/:leadId/context", avniIntegrationAuth, async (req, res) => {
