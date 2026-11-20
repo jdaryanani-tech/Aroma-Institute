@@ -50,9 +50,10 @@ function testDependencies(
       return true;
     },
     expectedPageId: () => "111",
+    allowedFormIds: () => new Set(["333"]),
     fetchLead: async (leadId) => {
       state.calls.fetch++;
-      return { id: leadId, field_data: [] };
+      return { id: leadId, form_id: "333", field_data: [] };
     },
     persistLead: async (input) => {
       state.calls.persist++;
@@ -241,6 +242,42 @@ test("configured Page mismatch remains 403 and does not fetch the lead", async (
   assert.equal(state.calls.persist, 0);
 });
 
+test("missing or empty form allowlist fails closed before fetching or persisting", async (t) => {
+  for (const [label, allowedFormIds] of [
+    ["missing", null],
+    ["empty", new Set<string>()],
+  ] as const) {
+    await t.test(label, async () => {
+      const state = testState();
+      const response = await post(
+        createTestApp(state, { allowedFormIds: () => allowedFormIds }),
+        JSON.stringify(GOOD_BODY),
+        TEST_SIGNATURE,
+      );
+      assert.equal(response.status, 503);
+      assert.equal(code(state), "form_allowlist_missing");
+      assert.equal(state.calls.fetch, 0);
+      assert.equal(state.calls.persist, 0);
+    });
+  }
+});
+
+test("same-Page notification from a form outside the allowlist is rejected before fetch", async () => {
+  const state = testState();
+  const unapprovedBody = JSON.stringify({
+    entry: [{
+      id: "111",
+      changes: [{ field: "leadgen", value: { leadgen_id: "222", page_id: "111", form_id: "444" } }],
+    }],
+  });
+  const response = await post(createTestApp(state), unapprovedBody, TEST_SIGNATURE);
+  assert.equal(response.status, 403);
+  assert.equal(code(state), "form_id_not_allowed");
+  assert.equal(state.calls.fetch, 0);
+  assert.equal(state.calls.persist, 0);
+  assert.doesNotMatch(`${JSON.stringify(state.events)}${response.text}`, /444/);
+});
+
 test("matching notification and fetched form IDs persist the lead", async () => {
   const state = testState();
   const response = await post(
@@ -321,7 +358,7 @@ test("a later form mismatch prevents writes for earlier valid notifications in t
   }
 });
 
-test("missing form ID on either side preserves existing fallback behavior", async () => {
+test("missing form ID on either side is rejected without persistence", async () => {
   const notificationWithoutFormId = JSON.stringify({
     entry: [{
       id: "111",
@@ -336,8 +373,9 @@ test("missing form ID on either side preserves existing fallback behavior", asyn
     JSON.stringify(GOOD_BODY),
     TEST_SIGNATURE,
   );
-  assert.equal(fetchedWithoutFormIdResponse.status, 200);
-  assert.deepEqual(fetchedWithoutFormIdState.persistedFormIds, ["333"]);
+  assert.equal(fetchedWithoutFormIdResponse.status, 403);
+  assert.equal(code(fetchedWithoutFormIdState), "graph_form_id_missing");
+  assert.equal(fetchedWithoutFormIdState.calls.persist, 0);
 
   const notificationWithoutFormIdState = testState();
   const notificationWithoutFormIdResponse = await post(
@@ -347,8 +385,39 @@ test("missing form ID on either side preserves existing fallback behavior", asyn
     notificationWithoutFormId,
     TEST_SIGNATURE,
   );
-  assert.equal(notificationWithoutFormIdResponse.status, 200);
-  assert.deepEqual(notificationWithoutFormIdState.persistedFormIds, ["333"]);
+  assert.equal(notificationWithoutFormIdResponse.status, 403);
+  assert.equal(code(notificationWithoutFormIdState), "notification_form_id_missing");
+  assert.equal(notificationWithoutFormIdState.calls.fetch, 0);
+  assert.equal(notificationWithoutFormIdState.calls.persist, 0);
+
+  const blankNotificationState = testState();
+  const blankNotificationBody = JSON.stringify({
+    entry: [{
+      id: "111",
+      changes: [{ field: "leadgen", value: { leadgen_id: "222", page_id: "111", form_id: "  " } }],
+    }],
+  });
+  const blankNotificationResponse = await post(
+    createTestApp(blankNotificationState),
+    blankNotificationBody,
+    TEST_SIGNATURE,
+  );
+  assert.equal(blankNotificationResponse.status, 403);
+  assert.equal(code(blankNotificationState), "notification_form_id_missing");
+  assert.equal(blankNotificationState.calls.fetch, 0);
+  assert.equal(blankNotificationState.calls.persist, 0);
+
+  const blankGraphState = testState();
+  const blankGraphResponse = await post(
+    createTestApp(blankGraphState, {
+      fetchLead: async (leadId) => ({ id: leadId, form_id: "  ", field_data: [] }),
+    }),
+    JSON.stringify(GOOD_BODY),
+    TEST_SIGNATURE,
+  );
+  assert.equal(blankGraphResponse.status, 403);
+  assert.equal(code(blankGraphState), "graph_form_id_missing");
+  assert.equal(blankGraphState.calls.persist, 0);
 });
 
 test("Graph HTTP errors retain their status but log only allowlisted status/category", async () => {
@@ -484,7 +553,10 @@ test("diagnostics never include signatures, payload fields, identifiers, or arbi
         id: "111",
         changes: [{
           field: "leadgen",
-          value: { leadgen_id: "222", page_id: "111", email: "SENTINEL_EMAIL", phone: "SENTINEL_PHONE" },
+          value: {
+            leadgen_id: "222", page_id: "111", form_id: "333",
+            email: "SENTINEL_EMAIL", phone: "SENTINEL_PHONE",
+          },
         }],
       }],
     }),

@@ -47,6 +47,7 @@ export type MetaLeadgenHandlerDependencies = {
   verifySignature: (rawBody: unknown, signature: string) => boolean;
   isSchemaReady: () => Promise<boolean>;
   expectedPageId: () => string | undefined;
+  allowedFormIds: () => ReadonlySet<string> | null;
   fetchLead: (leadId: string) => Promise<MetaFetchedLead>;
   persistLead: (input: PersistMetaLeadInput) => Promise<unknown>;
   logger?: MetaWebhookDiagnosticLogger;
@@ -164,6 +165,12 @@ export function createMetaLeadgenHandler(deps: MetaLeadgenHandlerDependencies) {
     const diagnostic = (detail: Parameters<typeof emitMetaWebhookDiagnostic>[1]) =>
       emitMetaWebhookDiagnostic(req, detail, logger);
 
+    const allowedFormIds = deps.allowedFormIds();
+    if (!allowedFormIds?.size) {
+      diagnostic({ stage: "configuration", reasonCode: "form_allowlist_missing", httpStatus: 503 });
+      return void res.sendStatus(503);
+    }
+
     if (!deps.isConfigured()) {
       diagnostic({ stage: "configuration", reasonCode: "lead_ads_configuration_missing", httpStatus: 503 });
       return void res.sendStatus(503);
@@ -221,7 +228,16 @@ export function createMetaLeadgenHandler(deps: MetaLeadgenHandlerDependencies) {
       return void res.sendStatus(403);
     }
 
-    const fetchedLeads: Array<{ notification: MetaNotification; lead: MetaFetchedLead }> = [];
+    if (parsed.notifications.some((notification) => !notification.formId?.trim())) {
+      diagnostic({ stage: "form_validation", reasonCode: "notification_form_id_missing", httpStatus: 403 });
+      return void res.sendStatus(403);
+    }
+    if (parsed.notifications.some((notification) => !allowedFormIds.has(notification.formId!.trim()))) {
+      diagnostic({ stage: "form_validation", reasonCode: "form_id_not_allowed", httpStatus: 403 });
+      return void res.sendStatus(403);
+    }
+
+    const fetchedLeads: Array<{ notification: MetaNotification; lead: MetaFetchedLead; formId: string }> = [];
     for (const notification of parsed.notifications) {
       let lead: MetaFetchedLead;
       try {
@@ -247,6 +263,10 @@ export function createMetaLeadgenHandler(deps: MetaLeadgenHandlerDependencies) {
 
       const notificationFormId = notification.formId?.trim();
       const fetchedFormId = typeof lead.form_id === "string" ? lead.form_id.trim() : "";
+      if (!fetchedFormId) {
+        diagnostic({ stage: "form_validation", reasonCode: "graph_form_id_missing", httpStatus: 403 });
+        return void res.sendStatus(403);
+      }
       if (notificationFormId && fetchedFormId && notificationFormId !== fetchedFormId) {
         diagnostic({
           stage: "form_validation",
@@ -255,17 +275,21 @@ export function createMetaLeadgenHandler(deps: MetaLeadgenHandlerDependencies) {
         });
         return void res.sendStatus(403);
       }
+      if (!allowedFormIds.has(fetchedFormId)) {
+        diagnostic({ stage: "form_validation", reasonCode: "form_id_not_allowed", httpStatus: 403 });
+        return void res.sendStatus(403);
+      }
 
-      fetchedLeads.push({ notification, lead });
+      fetchedLeads.push({ notification, lead, formId: fetchedFormId });
     }
 
-    for (const { notification, lead } of fetchedLeads) {
+    for (const { notification, lead, formId } of fetchedLeads) {
       const created = typeof lead.created_time === "string" ? new Date(lead.created_time) : null;
       try {
         await deps.persistLead({
           metaLeadId: notification.leadId,
           pageId: notification.pageId,
-          formId: typeof lead.form_id === "string" ? lead.form_id : notification.formId,
+          formId,
           adId: typeof lead.ad_id === "string" ? lead.ad_id : null,
           adsetId: typeof lead.adset_id === "string" ? lead.adset_id : null,
           campaignId: typeof lead.campaign_id === "string" ? lead.campaign_id : null,

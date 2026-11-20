@@ -7,7 +7,7 @@ import { saveMetaInstantLead } from "../admissions/identity";
 import {
   META_CONSENT_POLICY_VERSION, buildMetaCapiPayload, capiRetryDelayMs,
   getMetaReadiness, isAcknowledgedCapiResponse,
-  isValidMetaChallenge, verifyMetaWebhookSignature,
+  isValidMetaChallenge, parseMetaAllowedFormIds, verifyMetaWebhookSignature,
 } from "./config";
 import { safeMetaEventSourceUrl, visitorKey } from "./http";
 import { enqueueMetaEvent } from "./events";
@@ -331,6 +331,7 @@ export function registerMetaRoutes(app: Express) {
 
   app.post(META_LEADGEN_WEBHOOK_PATH, createMetaLeadgenHandler({
     isConfigured: () => getMetaReadiness().leadAds.configured,
+    allowedFormIds: () => parseMetaAllowedFormIds(process.env.META_ALLOWED_FORM_IDS),
     verifySignature: (rawBody, signature) =>
       verifyMetaWebhookSignature(rawBody, signature, process.env.META_APP_SECRET),
     isSchemaReady: async () => {

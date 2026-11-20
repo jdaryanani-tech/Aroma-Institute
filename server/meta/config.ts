@@ -11,6 +11,7 @@ export const META_CONFIG_NAMES = {
     "META_PAGE_ID",
     "META_PAGE_ACCESS_TOKEN",
     "META_GRAPH_API_VERSION",
+    "META_ALLOWED_FORM_IDS",
   ],
 } as const;
 
@@ -18,6 +19,23 @@ export const META_CONSENT_POLICY_VERSION = "meta-measurement-v1";
 export const META_CAPI_ENABLED_ENV = "META_CAPI_ENABLED";
 
 export type MetaEnvironment = Record<string, string | undefined>;
+
+const META_FORM_ID = /^[0-9]{1,40}$/;
+
+/**
+ * Parse the server-side allowlist for real-time Lead Ads intake. Invalid,
+ * absent, empty, or duplicate entries fail closed and are never echoed.
+ */
+export function parseMetaAllowedFormIds(value: string | undefined): ReadonlySet<string> | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const ids = value.split(",").map((id) => id.trim());
+  if (
+    ids.length === 0 ||
+    ids.some((id) => !META_FORM_ID.test(id)) ||
+    new Set(ids).size !== ids.length
+  ) return null;
+  return new Set(ids);
+}
 
 function missing(names: readonly string[], env: MetaEnvironment) {
   return names.filter((name) => !env[name]?.trim());
@@ -27,6 +45,10 @@ export function getMetaReadiness(env: MetaEnvironment = process.env) {
   const pixelMissing = missing(META_CONFIG_NAMES.pixel, env);
   const capiMissing = missing(META_CONFIG_NAMES.capi, env);
   const leadAdsMissing = missing(META_CONFIG_NAMES.leadAds, env);
+  if (!parseMetaAllowedFormIds(env.META_ALLOWED_FORM_IDS) &&
+      !leadAdsMissing.includes("META_ALLOWED_FORM_IDS")) {
+    leadAdsMissing.push("META_ALLOWED_FORM_IDS");
+  }
   const graphVersion = env.META_GRAPH_API_VERSION?.trim() ?? "";
   const graphVersionValid = /^v\d+\.\d+$/.test(graphVersion);
   if (!graphVersionValid) {

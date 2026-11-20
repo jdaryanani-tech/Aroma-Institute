@@ -186,6 +186,16 @@ normalization, exact Meta lead-ID idempotency, and source/ad/form attribution.
 Unit tests do not prove live token validity, Page access, webhook delivery, or
 stored lead identity.
 
+Webhook intake is restricted by the server-only `META_ALLOWED_FORM_IDS`
+setting: a comma-separated list of numeric form IDs. The webhook fails closed
+when the setting is absent, empty, malformed, or duplicated; when either the
+signed notification or Graph-fetched lead lacks a form ID; when those IDs do
+not match; or when the form is not allowlisted. Before any deployment that
+enables Lead Ads intake, an authorized administrator must verify the correct
+AICHM Instant Form IDs in Meta and configure this allowlist through the
+approved secret/configuration flow. Do not copy historical or test form IDs
+without verifying that they are the intended active AICHM forms.
+
 The admin diagnostic at `GET /api/admin/meta/lead-ads-diagnostics` performs
 read-only Graph GET checks for:
 
@@ -209,7 +219,8 @@ to read leads from every form. Before operational use:
    runtime telemetry. A Meta UI “success” or source test is not proof that CRM
    persistence and canonical identity linking succeeded.
 6. Confirm `META_APP_ID`, `META_APP_SECRET`, `META_WEBHOOK_VERIFY_TOKEN`,
-   `META_PAGE_ID`, `META_PAGE_ACCESS_TOKEN`, and `META_GRAPH_API_VERSION`
+   `META_PAGE_ID`, `META_PAGE_ACCESS_TOKEN`, `META_GRAPH_API_VERSION`, and
+   `META_ALLOWED_FORM_IDS`
    through the approved secret-presence/format flow only. Never print values.
 
 The diagnostic deliberately does not call a form `/leads` edge, so

@@ -5,7 +5,7 @@ import {
   META_CONSENT_POLICY_VERSION, buildMetaCapiPayload, capiRetryDelayMs, getMetaReadiness,
   hasValidMetaConsent, isAcknowledgedCapiResponse, isPublicAdmissionsPath,
   isValidMetaChallenge, metaLeadIdempotencyKey, normalizeMetaFieldData,
-  normalizeMetaFieldDataWithDiagnostics,
+  normalizeMetaFieldDataWithDiagnostics, parseMetaAllowedFormIds,
   safeMetaWebhookFailureStatus, sanitizeMetaCustomData, verifyMetaWebhookSignature,
 } from "./config";
 import { parseMetaAttribution } from "./attribution";
@@ -40,6 +40,33 @@ test("integration readiness never enables Pixel, CAPI, or Lead Ads without confi
     META_GRAPH_API_VERSION: "v99.0", META_CAPI_ENABLED: "true",
   });
   assert.equal(development.capi.enabled, false);
+});
+
+test("Meta Lead Ads form allowlist parses only explicit comma-separated numeric IDs", () => {
+  assert.deepEqual([...parseMetaAllowedFormIds("123, 456") ?? []], ["123", "456"]);
+  for (const invalid of [undefined, "", "  ", ",", "123,", ",123", "123,abc", "123,123"]) {
+    assert.equal(parseMetaAllowedFormIds(invalid), null);
+  }
+  const missing = getMetaReadiness({
+    META_APP_ID: "app-test",
+    META_APP_SECRET: "secret-test",
+    META_WEBHOOK_VERIFY_TOKEN: "verify-test",
+    META_PAGE_ID: "page-test",
+    META_PAGE_ACCESS_TOKEN: "page-token-test",
+    META_GRAPH_API_VERSION: "v99.0",
+  });
+  assert.equal(missing.leadAds.configured, false);
+  assert.ok(missing.leadAds.missing.includes("META_ALLOWED_FORM_IDS"));
+  const configured = getMetaReadiness({
+    META_APP_ID: "app-test",
+    META_APP_SECRET: "secret-test",
+    META_WEBHOOK_VERIFY_TOKEN: "verify-test",
+    META_PAGE_ID: "page-test",
+    META_PAGE_ACCESS_TOKEN: "page-token-test",
+    META_GRAPH_API_VERSION: "v99.0",
+    META_ALLOWED_FORM_IDS: "123,456",
+  });
+  assert.equal(configured.leadAds.configured, true);
 });
 
 test("webhook verify challenge requires subscribe mode and correct token", () => {
