@@ -218,6 +218,17 @@ authorized Meta control or separately approved, privacy-safe procedure.
 `META_PIXEL_ID`, `META_CAPI_ACCESS_TOKEN`, and `META_CAPI_ENABLED` are separate
 Conversions API settings; they do not establish Lead Ads readiness.
 
+The Production environment metadata checked on 2026-11-20 did not contain
+`META_CAPI_ENABLED`, so the CAPI worker is not activated. Credential-name
+presence is not proof of a valid Page-token identity, Page subscription, or
+lead-retrieval permission. The CAPI worker currently records ambiguous
+network outcomes as failed and can retry them; because the provider may have
+accepted a request before the connection failed, this is an open duplicate
+delivery risk. Expired sending leases are recovered only while the attempt
+count is below its ceiling, leaving an expired final attempt potentially stuck.
+Keep CAPI off until an explicit unknown-outcome reconciliation and exhausted
+lease recovery policy is reviewed and tested.
+
 ## 5. Deployment and final go-live gate
 
 Before any separately approved publish:

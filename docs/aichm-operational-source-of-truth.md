@@ -148,6 +148,27 @@ Historical 2026-11-07 production secret-name presence check: missing
 `N8N_VSL_DISPATCH_ENABLED`, `AICHM_VAPID_PUBLIC_KEY`, and
 `AICHM_VAPID_PRIVATE_KEY`. No secret values were read.
 
+### Current source and configuration snapshot (2026-11-20)
+
+- AVNI conversation reads use the Supabase read-only integration. No Supabase
+  runtime writer is configured; the live conversation schema remains
+  unverified. Legacy Replit transcript, delivery-update, and conversation-read
+  routes return HTTP 410. AVNI pilot dispatch remains hard-disabled.
+- Production presence of Meta Page/app secret names is not proof that the
+  configured Page token belongs to the configured Page, that the app is
+  subscribed to `leadgen`, or that the token has form/lead retrieval access.
+  These require an authorized, read-only Meta diagnostic; no lead submissions
+  should be fetched for a readiness check.
+- `META_CAPI_ENABLED` was absent from the checked Production environment
+  metadata, so the CAPI worker activation gate is off. Presence of Pixel or
+  CAPI credential names does not enable the worker or establish live readiness.
+- CAPI delivery has unresolved recovery risks in the current implementation:
+  ambiguous network outcomes are recorded as failed and may be retried even
+  if Meta accepted the request; there is no distinct unknown-outcome state.
+  Expired sending leases are recovered only below the attempt ceiling, so an
+  expired lease at the ceiling can remain stuck. Keep CAPI disabled until a
+  reviewed reconciliation/no-blind-retry policy addresses both cases.
+
 The migration/deployment and untouched-data statements below record the
 2026-11-07 audit only; they do not establish current live state. Replit's
 managed production schema changes require the reviewed Publish schema diff;
