@@ -72,6 +72,8 @@ test("stable Development-only guard codes remain visible without arbitrary error
 test("app-role preflight blockers are reported as stable codes without raw errors", () => {
   for (const [code, category] of [
     ["APP_DATABASE_URL_NOT_CONFIGURED", "application_database_url_required"],
+    ["APP_DATABASE_HOST_POLICY_REJECTED", "application_host_policy_rejected"],
+    ["APP_DATABASE_NEON_SSLMODE_REQUIRED", "application_neon_sslmode_required"],
     ["APP_DATABASE_ENDPOINT_MISMATCH", "application_endpoint_mismatch"],
     ["APP_DATABASE_PREMIGRATION_MEMBERSHIP_REJECTED", "application_premigration_membership_rejected"],
   ] as const) {

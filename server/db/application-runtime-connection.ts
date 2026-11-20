@@ -116,6 +116,8 @@ const APPLICATION_RUNTIME_FAILURE_CODES = new Set([
   "APP_DATABASE_PLATFORM_REFERENCE_REQUIRED",
   "APP_DATABASE_PLATFORM_REFERENCE_INVALID",
   "APP_DATABASE_ENDPOINT_NOT_INTERNAL",
+  "APP_DATABASE_HOST_POLICY_REJECTED",
+  "APP_DATABASE_NEON_SSLMODE_REQUIRED",
   "APP_DATABASE_ENDPOINT_MISMATCH",
   "APP_DATABASE_LOGIN_NOT_DISTINCT",
   "APP_DATABASE_RUNTIME_IDENTITY_UNAVAILABLE",
@@ -167,6 +169,15 @@ function hasRequiredManagedNeonTls(endpoint: Endpoint): boolean {
 
 function isAllowedDatabaseEndpoint(endpoint: Endpoint): boolean {
   return isAllowedDatabaseHost(endpoint.host) && hasRequiredManagedNeonTls(endpoint);
+}
+
+function assertAllowedDatabaseEndpoint(endpoint: Endpoint): void {
+  if (!isAllowedDatabaseHost(endpoint.host)) {
+    reject("APP_DATABASE_HOST_POLICY_REJECTED");
+  }
+  if (!hasRequiredManagedNeonTls(endpoint)) {
+    reject("APP_DATABASE_NEON_SSLMODE_REQUIRED");
+  }
 }
 
 function endpointFrom(raw: string | undefined, label: "app" | "platform"): Endpoint & {
@@ -250,9 +261,8 @@ export function resolveApplicationRuntimeMode(
     if (!explicit?.trim()) reject("APP_DATABASE_URL_REQUIRED");
     const app = endpointFrom(explicit, "app");
     const platform = endpointFrom(environment[PLATFORM_DATABASE_URL_ENV], "platform");
-    if (!isAllowedDatabaseEndpoint(app) || !isAllowedDatabaseEndpoint(platform)) {
-      reject("APP_DATABASE_ENDPOINT_NOT_INTERNAL");
-    }
+    assertAllowedDatabaseEndpoint(app);
+    assertAllowedDatabaseEndpoint(platform);
     if (
       app.host !== platform.host ||
       app.port !== platform.port ||
@@ -276,9 +286,8 @@ export function resolveApplicationRuntimeMode(
 
   const app = endpointFrom(explicit, "app");
   const platform = endpointFrom(environment[PLATFORM_DATABASE_URL_ENV], "platform");
-  if (!isAllowedDatabaseEndpoint(app) || !isAllowedDatabaseEndpoint(platform)) {
-    reject("APP_DATABASE_ENDPOINT_NOT_INTERNAL");
-  }
+  assertAllowedDatabaseEndpoint(app);
+  assertAllowedDatabaseEndpoint(platform);
   if (
     app.host !== platform.host ||
     app.port !== platform.port ||

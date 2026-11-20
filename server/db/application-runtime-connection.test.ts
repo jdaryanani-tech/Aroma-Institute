@@ -169,7 +169,7 @@ test("Replit-managed legacy Neon endpoints are accepted only with matching TLS-p
     ],
     [
       `postgresql://runtime_user:runtime_pass@${endpoint}:5432/neondb?sslmode=verify-full`,
-      /APP_DATABASE_ENDPOINT_NOT_INTERNAL/,
+      /APP_DATABASE_NEON_SSLMODE_REQUIRED/,
     ],
   ];
   for (const [mismatchedAppUrl, expectedError] of mismatches) {
@@ -208,7 +208,7 @@ test("Replit-managed legacy Neon endpoints require sslmode=require on both URLs"
         DATABASE_URL: reference,
         [APP_DATABASE_URL_ENV]: app,
       }),
-      /APP_DATABASE_ENDPOINT_NOT_INTERNAL/,
+      /APP_DATABASE_NEON_SSLMODE_REQUIRED/,
     );
     assert.equal(applicationDatabaseEndpointsMatch(app, reference), false);
   }
@@ -232,7 +232,7 @@ test("the app host allowlist rejects near-miss, arbitrary, public DNS, and publi
         DATABASE_URL: url,
         [APP_DATABASE_URL_ENV]: url,
       }),
-      /APP_DATABASE_ENDPOINT_NOT_INTERNAL/,
+      /APP_DATABASE_HOST_POLICY_REJECTED/,
       `host ${host} must be rejected`,
     );
   }
@@ -242,8 +242,49 @@ test("the app host allowlist rejects near-miss, arbitrary, public DNS, and publi
       DATABASE_URL: "postgresql://platform_user:pass@db.replit.internal/heliumdb?sslmode=disable",
       [APP_DATABASE_URL_ENV]: "postgresql://runtime_user:pass@db.neon.tech/heliumdb?sslmode=disable",
     }),
-    /APP_DATABASE_ENDPOINT_NOT_INTERNAL/,
+    /APP_DATABASE_HOST_POLICY_REJECTED/,
   );
+});
+
+test("endpoint policy failures expose only a safe category code", () => {
+  const endpoint = "ep-a1b2c3.us-east-1.aws.neon.tech";
+  const platform = `postgresql://platform_user:platform_pass@${endpoint}/neondb?sslmode=require`;
+  const cases = [
+    {
+      app: "postgresql://runtime_user:runtime_pass@public.example/neondb?sslmode=require",
+      code: "APP_DATABASE_HOST_POLICY_REJECTED",
+    },
+    {
+      app: `postgresql://runtime_user:runtime_pass@${endpoint}/neondb`,
+      code: "APP_DATABASE_NEON_SSLMODE_REQUIRED",
+    },
+  ] as const;
+
+  for (const { app, code } of cases) {
+    let caught: unknown;
+    try {
+      resolveApplicationRuntimeMode({
+        NODE_ENV: "production",
+        DATABASE_URL: platform,
+        [APP_DATABASE_URL_ENV]: app,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof Error);
+    assert.equal((caught as Error & { code?: string }).code, code);
+    assert.equal(caught.message, code);
+    for (const sensitive of [
+      "runtime_user",
+      "runtime_pass",
+      "public.example",
+      endpoint,
+      "neondb",
+      "sslmode",
+    ]) {
+      assert.equal(caught.message.includes(sensitive), false);
+    }
+  }
 });
 
 test("preflight endpoint comparison allows a dedicated login but binds transport and database", () => {
@@ -403,7 +444,7 @@ test("an invalid explicit app URL fails closed instead of falling back", () => {
       DATABASE_URL: "postgresql://platform_user:pass@db.neon.tech/heliumdb?sslmode=disable",
       [APP_DATABASE_URL_ENV]: "postgresql://runtime_user:pass@db.neon.tech/heliumdb?sslmode=disable",
     }),
-    /APP_DATABASE_ENDPOINT_NOT_INTERNAL/,
+    /APP_DATABASE_HOST_POLICY_REJECTED/,
   );
 });
 

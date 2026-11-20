@@ -30,6 +30,34 @@ test("startup diagnostics include a safe allowlisted code and mapped stack frame
   });
 });
 
+test("endpoint startup diagnostics expose only allowlisted policy categories", () => {
+  for (const code of [
+    "APP_DATABASE_HOST_POLICY_REJECTED",
+    "APP_DATABASE_NEON_SSLMODE_REQUIRED",
+  ]) {
+    const error = Object.assign(
+      new Error("postgresql://runtime-user:private-password@private-host/app?token=private-token"),
+      { code },
+    );
+    const record = createStartupFailureRecord(
+      "module-load",
+      error,
+      "test-correlation",
+    );
+    const serialized = JSON.stringify(record);
+    assert.equal(record.safeErrorCode, code);
+    for (const sensitive of [
+      "runtime-user",
+      "private-password",
+      "private-host",
+      "private-token",
+      "postgresql://",
+    ]) {
+      assert.equal(serialized.includes(sensitive), false);
+    }
+  }
+});
+
 test("startup stack output keeps only safe frame names and source locations", () => {
   const error = new TypeError("do not include this message");
   error.stack = [
