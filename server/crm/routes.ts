@@ -17,6 +17,11 @@ import { assignCrmLead, crmAssignmentUpdateSchema } from "./assignment";
 import { createMetaBackfillService, safeMetaBackfillError, type MetaBackfillService } from "../meta/backfill";
 import type { SqlDb } from "./model";
 import type { MetaBackfillTotals } from "@shared/meta-backfill";
+import {
+  transitionAvniConversationControl,
+  type AvniConversationControlWriter,
+  type AvniControlPool,
+} from "./avni-conversation-control";
 
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>!Number.isNaN(new Date(v).getTime())&&new Date(v).toISOString().slice(0,10)===v);
 const querySchema=z.object({
@@ -33,6 +38,12 @@ const canonicalLeadIdSchema=z.string().uuid();
 const conversationQuerySchema=z.object({
   cursor:z.string().max(512).optional(),
   limit:z.coerce.number().int().min(1).max(100).default(50),
+}).strict();
+const conversationControlSchema=z.object({
+  action:z.enum(["takeover","resume"]),
+  expectedControlVersion:z.number().int().nonnegative().safe(),
+  requestId:z.string().uuid(),
+  reason:z.string().trim().min(3).max(500).nullable().optional(),
 }).strict();
 const metaBackfillFormsSchema=z.object({
   formIds:z.array(z.string().regex(/^[0-9]{1,40}$/)).min(1).max(50),
@@ -133,6 +144,7 @@ export function registerCrmRoutes(app: Express, dependencies: {
   connectionPool: SqlDb;
   authenticate: RequestHandler;
   metaBackfill?: MetaBackfillService;
+  avniConversationControlWriter?: AvniConversationControlWriter | null;
 } = { db: pool, connectionPool: pool, authenticate: requireLmsUser }) {
   app.use("/api/admin/crm", (_req,res,next)=>{
     res.setHeader("Cache-Control","private, no-store, max-age=0");
@@ -261,6 +273,34 @@ export function registerCrmRoutes(app: Express, dependencies: {
     res.json(await readCrmConversationPage(
       dependencies.db,idSchema.parse(req.params.id),query.cursor,query.limit,req.lmsUser as CrmPrincipal,
     ));
+  }));
+  app.post("/api/admin/crm/leads/:leadId/conversation-control",sameOriginCapture,handle(async(req,res)=>{
+    res.setHeader("Cache-Control","private, no-store, max-age=0");
+    const canonicalLeadId=canonicalLeadIdSchema.safeParse(req.params.leadId);
+    const input=conversationControlSchema.safeParse(req.body);
+    if(!canonicalLeadId.success || !input.success) {
+      return void res.status(400).json({
+        status:"denied",
+        code:"invalid_control_request",
+        controlVersion:null,
+        sendAuthorized:false,
+      });
+    }
+    const result=await transitionAvniConversationControl(req,{
+      canonicalLeadId:canonicalLeadId.data,
+      ...input.data,
+    },{
+      pool:dependencies.connectionPool as SqlDb & AvniControlPool,
+      writer:dependencies.avniConversationControlWriter ?? null,
+    });
+    const status=result.status==="unavailable" ? 503
+      : result.status==="denied"
+        ? result.code==="authentication_required" ? 401
+          : result.code==="invalid_control_request" ? 400
+            : result.code==="stale_control_version" || result.code==="control_request_conflict" ? 409
+              : 403
+        : 200;
+    return void res.status(status).json(result);
   }));
   app.get("/api/admin/crm/avni-health",requireAdmin,handle(async(_req,res)=>{
     const {rows:[schema]}=await dependencies.db.query(`SELECT
