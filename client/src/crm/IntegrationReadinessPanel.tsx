@@ -15,6 +15,10 @@ import AvniProductionDiagnostics from "./AvniProductionDiagnostics";
 type IntegratedReadiness = {
   checkedAt: string;
   checklist: IntegrationReadinessChecklist;
+  database: {
+    hostPolicySatisfied: boolean;
+    requiredTlsPolicySatisfied: boolean;
+  };
 };
 
 type MetaDiagnostic = MetaDiagnosticSummary & {
@@ -171,6 +175,42 @@ export default function IntegrationReadinessPanel() {
         <ReadinessArea name="AVNI counsellor" area={checklist.avni} />
         <ReadinessArea name="Meta Lead Ads" area={checklist.meta} />
       </div>
+
+      {data?.database && <section
+        className="integration-readiness-area"
+        aria-label="CRM database endpoint configuration"
+        data-testid="crm-database-endpoint-policy"
+      >
+        <div className="integration-area-heading">
+          <h3>CRM database endpoint configuration</h3>
+          <span className="integration-area-status is-not-checked">Configuration only</span>
+        </div>
+        <p>These checks inspect URL policy only. They do not connect to the database or verify its certificate, role, grants, or schema.</p>
+        <ul className="integration-check-list">
+          <CheckRow item={{
+            id: "database-host-policy",
+            label: "Approved internal host policy",
+            status: data.database.hostPolicySatisfied ? "PASS" : "BLOCKED",
+            detail: data.database.hostPolicySatisfied
+              ? "Configured endpoints satisfy the existing internal/managed-Neon host allowlist."
+              : "A configured endpoint is missing, invalid, or outside the existing host allowlist.",
+            requiredActions: data.database.hostPolicySatisfied
+              ? []
+              : ["Review the database endpoint configuration without relaxing the host allowlist."],
+          }} />
+          <CheckRow item={{
+            id: "database-required-tls",
+            label: "Required managed-Neon TLS mode",
+            status: data.database.requiredTlsPolicySatisfied ? "PASS" : "BLOCKED",
+            detail: data.database.requiredTlsPolicySatisfied
+              ? "The existing TLS policy is satisfied for parsed endpoints."
+              : "A required TLS mode is missing, or an endpoint could not be parsed.",
+            requiredActions: data.database.requiredTlsPolicySatisfied
+              ? []
+              : ["Review the configured sslmode without weakening the existing TLS policy."],
+          }} />
+        </ul>
+      </section>}
 
       <div className="integration-readiness-actions">
         <section>

@@ -6,6 +6,7 @@ import {
   APP_DATABASE_URL_ENV,
   buildApplicationPoolConfig,
   classifyApplicationPreMigrationSqlError,
+  inspectApplicationDatabaseEndpointPolicy,
   resolveApplicationRuntimeMode,
   verifyApplicationPreMigrationPool,
   verifyApplicationRuntimePool,
@@ -13,6 +14,72 @@ import {
 
 const platformUrl = "postgresql://platform_user:platform_pass@db.replit.internal/heliumdb?sslmode=disable";
 const appUrl = "postgresql://runtime_user:runtime_pass@db.replit.internal/heliumdb?sslmode=disable";
+
+test("endpoint readiness reports only host-policy and required-TLS booleans", () => {
+  const host = "ep-readiness-fixture.us-east-1.aws.neon.tech";
+  const platform = `postgresql://fixture-platform:DO_NOT_RETURN_PLATFORM@${host}:5432/neondb?sslmode=require`;
+  const app = `postgresql://fixture-app:DO_NOT_RETURN_APP@${host}:5432/neondb?sslmode=require`;
+
+  const result = inspectApplicationDatabaseEndpointPolicy({
+    NODE_ENV: "production",
+    DATABASE_URL: platform,
+    [APP_DATABASE_URL_ENV]: app,
+  });
+
+  assert.deepEqual(result, {
+    hostPolicySatisfied: true,
+    requiredTlsPolicySatisfied: true,
+  });
+  assert.deepEqual(Object.values(result), [true, true]);
+  const serialized = JSON.stringify(result);
+  for (const sensitive of [host, "fixture-platform", "fixture-app", "DO_NOT_RETURN"]) {
+    assert.equal(serialized.includes(sensitive), false);
+  }
+});
+
+test("endpoint readiness distinguishes an allowed Neon host from missing required TLS mode", () => {
+  const host = "ep-readiness-fixture.us-east-1.aws.neon.tech";
+  const result = inspectApplicationDatabaseEndpointPolicy({
+    NODE_ENV: "production",
+    DATABASE_URL: `postgresql://fixture-platform:secret@${host}:5432/neondb?sslmode=require`,
+    [APP_DATABASE_URL_ENV]: `postgresql://fixture-app:secret@${host}:5432/neondb`,
+  });
+
+  assert.deepEqual(result, {
+    hostPolicySatisfied: true,
+    requiredTlsPolicySatisfied: false,
+  });
+});
+
+test("endpoint readiness rejects a disallowed host without exposing its value", () => {
+  const forbiddenHost = "public.example.invalid";
+  const result = inspectApplicationDatabaseEndpointPolicy({
+    NODE_ENV: "production",
+    DATABASE_URL: `postgresql://fixture-platform:secret@${forbiddenHost}/neondb?sslmode=require`,
+    [APP_DATABASE_URL_ENV]: `postgresql://fixture-app:secret@${forbiddenHost}/neondb?sslmode=require`,
+  });
+
+  assert.deepEqual(result, {
+    hostPolicySatisfied: false,
+    requiredTlsPolicySatisfied: true,
+  });
+  assert.equal(JSON.stringify(result).includes(forbiddenHost), false);
+});
+
+test("endpoint readiness fails closed when either configured endpoint is absent or malformed", () => {
+  assert.deepEqual(inspectApplicationDatabaseEndpointPolicy({ NODE_ENV: "production" }), {
+    hostPolicySatisfied: false,
+    requiredTlsPolicySatisfied: false,
+  });
+  assert.deepEqual(inspectApplicationDatabaseEndpointPolicy({
+    NODE_ENV: "production",
+    DATABASE_URL: "not a database URL",
+    [APP_DATABASE_URL_ENV]: appUrl,
+  }), {
+    hostPolicySatisfied: false,
+    requiredTlsPolicySatisfied: false,
+  });
+});
 
 test("Development without the explicit app URL retains legacy behavior and flags it", async () => {
   const mode = resolveApplicationRuntimeMode({ NODE_ENV: "development", DATABASE_URL: platformUrl });

@@ -249,6 +249,49 @@ function endpointFrom(raw: string | undefined, label: "app" | "platform"): Endpo
   };
 }
 
+export type ApplicationDatabaseEndpointPolicyReadiness = {
+  hostPolicySatisfied: boolean;
+  requiredTlsPolicySatisfied: boolean;
+};
+
+function endpointForReadiness(
+  raw: string | undefined,
+  label: "app" | "platform",
+): Endpoint | null {
+  try {
+    return endpointFrom(raw, label);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Inspect configured endpoint policy without opening a database connection.
+ * The result intentionally contains only booleans; never return parsed URL
+ * components or the underlying parser/validation error.
+ */
+export function inspectApplicationDatabaseEndpointPolicy(
+  environment: Record<string, string | undefined>,
+): ApplicationDatabaseEndpointPolicyReadiness {
+  const app = endpointForReadiness(environment[APP_DATABASE_URL_ENV], "app");
+  const platform = endpointForReadiness(environment[PLATFORM_DATABASE_URL_ENV], "platform");
+
+  return {
+    hostPolicySatisfied: Boolean(
+      app &&
+      platform &&
+      isAllowedDatabaseHost(app.host) &&
+      isAllowedDatabaseHost(platform.host)
+    ),
+    requiredTlsPolicySatisfied: Boolean(
+      app &&
+      platform &&
+      hasRequiredManagedNeonTls(app) &&
+      hasRequiredManagedNeonTls(platform)
+    ),
+  };
+}
+
 export function resolveApplicationRuntimeMode(
   environment: Record<string, string | undefined>,
   runtimeEnvironment = environment.NODE_ENV,

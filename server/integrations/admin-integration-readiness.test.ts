@@ -7,11 +7,13 @@ import {
   ADMIN_INTEGRATION_READINESS_PATH,
   registerAdminIntegrationReadinessRoute,
 } from "./admin-integration-readiness";
+import { inspectApplicationDatabaseEndpointPolicy } from "../db/application-runtime-connection";
 
 async function call(options: {
   roles?: string[];
   authenticated?: boolean;
   failLoad?: boolean;
+  databaseEnvironment?: Record<string, string | undefined>;
 }) {
   const app = express();
   let loaded = 0;
@@ -33,6 +35,9 @@ async function call(options: {
       if (options.failLoad) throw new Error("private runtime details");
       return {
         crm: { ready: true },
+        ...(options.databaseEnvironment
+          ? { database: inspectApplicationDatabaseEndpointPolicy(options.databaseEnvironment) }
+          : {}),
         avni: { dispatchHardDisabled: true },
         meta: { pageIdentity: "not_checked" },
       };
@@ -81,4 +86,29 @@ test("integrated readiness suppresses internal errors", async () => {
   const result = await call({ failLoad: true });
   assert.equal(result.status, 503);
   assert.deepEqual(result.body, { code: "integrated_readiness_unavailable" });
+});
+
+test("database endpoint diagnostics remain admin-only and expose booleans only", async () => {
+  const host = "ep-admin-test.us-east-1.aws.neon.tech";
+  const databaseEnvironment = {
+    NODE_ENV: "production",
+    DATABASE_URL: `postgresql://fixture-platform:NEVER_RETURN@${host}:5432/neondb?sslmode=require`,
+    AICHM_APP_DATABASE_URL: `postgresql://fixture-app:NEVER_RETURN@${host}:5432/neondb`,
+  };
+
+  const admin = await call({ databaseEnvironment });
+  assert.equal(admin.status, 200);
+  assert.equal(admin.cacheControl, "private, no-store");
+  assert.deepEqual(admin.body.database, {
+    hostPolicySatisfied: true,
+    requiredTlsPolicySatisfied: false,
+  });
+  const responseText = JSON.stringify(admin.body);
+  for (const sensitive of [host, "fixture-platform", "fixture-app", "NEVER_RETURN"]) {
+    assert.equal(responseText.includes(sensitive), false);
+  }
+
+  const nonAdmin = await call({ authenticated: false, databaseEnvironment });
+  assert.equal(nonAdmin.status, 401);
+  assert.equal(nonAdmin.loaded, 0);
 });

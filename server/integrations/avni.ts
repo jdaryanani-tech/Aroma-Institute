@@ -5,6 +5,7 @@ import { z } from "zod";
 import { admissionsCaptureLimits } from "@shared/admissions-schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
 import { applicationRuntimeMode, db, pool } from "../db";
+import { inspectApplicationDatabaseEndpointPolicy } from "../db/application-runtime-connection";
 import { upsertIntegrationLead } from "../admissions/identity";
 import {
   admissionsIntegrationSchemaReady,
@@ -323,6 +324,7 @@ export function registerAvniIntegrationRoutes(
       const avniSchemaReady = await admissionsIntegrationSchemaReady(db);
       const registrationUrl = process.env[VSL_WEBHOOK_URL_ENV] ?? "";
       const crmReady = crm.crmPersistence && crm.identityTracking && crm.canonicalAssignments;
+      const databaseEndpointPolicy = inspectApplicationDatabaseEndpointPolicy(process.env);
       const evolutionMissingConfigurationNames = [
         ...(!process.env[EVOLUTION_API_KEY_ENV]?.trim() ? [EVOLUTION_API_KEY_ENV] : []),
         ...(!process.env[EVOLUTION_API_INSTANCE_ENV]?.trim() ? [EVOLUTION_API_INSTANCE_ENV] : []),
@@ -357,6 +359,8 @@ export function registerAvniIntegrationRoutes(
           },
         }),
         database: {
+          hostPolicySatisfied: databaseEndpointPolicy.hostPolicySatisfied,
+          requiredTlsPolicySatisfied: databaseEndpointPolicy.requiredTlsPolicySatisfied,
           connectionMode: applicationRuntimeMode.kind,
           leastPrivilegeVerified: runtimeDatabaseVerified,
           safeCode: applicationRuntimeMode.kind === "least_privilege"
