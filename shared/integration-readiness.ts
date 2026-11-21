@@ -57,6 +57,26 @@ export type MetaDiagnosticSummary = {
   formAccessChecked: boolean;
   formAccessGranted: boolean;
   hasAccessibleForm: boolean;
+  configuredPageStatus?: "missing" | "approved" | "mismatch";
+  configuredPageIsAichmPage?: boolean;
+  tokenDebugChecked?: boolean;
+  tokenValid?: boolean;
+  tokenTypeIsPage?: boolean;
+  tokenBelongsToConfiguredApp?: boolean;
+  tokenExpiryStatus?: "not_checked" | "valid" | "expired" | "never_expires" | "unknown";
+  tokenExpiresAt?: string | null;
+  dataAccessExpiryStatus?: "not_checked" | "valid" | "expired" | "never_expires" | "unknown";
+  dataAccessExpiresAt?: string | null;
+  permissionsChecked?: boolean;
+  leadRetrievalPermission?: boolean;
+  pageSubscriptionPermission?: boolean;
+  approvedFormAllowlistStatus?: "missing" | "empty" | "invalid" | "configured";
+  approvedFormCount?: number;
+  formCheckStatus?: "not_checked" | "complete" | "incomplete" | "failed";
+  accessibleApprovedFormCount?: number;
+  inaccessibleApprovedFormCount?: number | null;
+  allApprovedFormsAccessible?: boolean | null;
+  safeCode?: string | null;
   errorCategory?: string;
 };
 
@@ -393,6 +413,40 @@ export function applyMetaDiagnosticToChecklist(
   diagnostic: MetaDiagnosticSummary,
 ): IntegrationReadinessChecklist {
   const checks = checklist.meta.checks.map((item): ReadinessCheck => {
+    if (item.id === "meta-page" && diagnostic.configuredPageStatus) {
+      const tokenExpiryPassed =
+        diagnostic.tokenExpiryStatus === "valid" ||
+        diagnostic.tokenExpiryStatus === "never_expires";
+      const dataExpiryPassed =
+        diagnostic.dataAccessExpiryStatus === "valid" ||
+        diagnostic.dataAccessExpiryStatus === "never_expires";
+      const passed = diagnostic.configuredPageStatus === "approved" &&
+        diagnostic.configuredPageIsAichmPage === true &&
+        diagnostic.tokenDebugChecked === true &&
+        diagnostic.tokenValid === true &&
+        diagnostic.tokenTypeIsPage === true &&
+        diagnostic.tokenBelongsToConfiguredApp === true &&
+        tokenExpiryPassed && dataExpiryPassed &&
+        diagnostic.pageIdentityChecked && diagnostic.pageIdentityMatches;
+      return passed
+        ? check(item.id, item.label, "PASS", "The configured Page, app-bound token, Page identity, and expiry checks passed.")
+        : check(item.id, item.label, "BLOCKED", "The configured Page or Page-token identity, app, validity, or expiry check failed.", [
+            "Use a valid Page-scoped token for the approved AICHM Page and configured Meta app.",
+          ]);
+    }
+    if (item.id === "meta-api-access" && diagnostic.permissionsChecked !== undefined) {
+      const passed = diagnostic.tokenDebugChecked === true &&
+        diagnostic.tokenValid === true &&
+        diagnostic.tokenTypeIsPage === true &&
+        diagnostic.tokenBelongsToConfiguredApp === true &&
+        diagnostic.leadRetrievalPermission === true &&
+        diagnostic.pageSubscriptionPermission === true;
+      return passed
+        ? check(item.id, item.label, "PASS", "The token has the required Lead Ads retrieval and Page-subscription permissions.")
+        : check(item.id, item.label, "BLOCKED", "The Page token does not have all required permissions or could not be verified.", [
+            "Grant the required Meta permissions to the configured app and Page token.",
+          ]);
+    }
     if (item.id === "meta-config" && diagnostic.errorCategory &&
       ["missing_configuration", "invalid_configuration"].includes(diagnostic.errorCategory)) {
       return check(item.id, item.label, "BLOCKED", `Meta configuration failed the safe check (${diagnostic.errorCategory}).`, [
@@ -414,10 +468,26 @@ export function applyMetaDiagnosticToChecklist(
           ]);
     }
     if (item.id === "meta-forms" && diagnostic.formAccessChecked) {
-      return diagnostic.formAccessGranted && diagnostic.hasAccessibleForm
-        ? check(item.id, item.label, "PASS", "The Page form-list endpoint returned at least one accessible form.")
-        : check(item.id, item.label, "BLOCKED", "The Page form-list endpoint did not confirm an accessible form.", [
-            "Confirm Page role, lead access, and form visibility in Meta controls.",
+      if (diagnostic.approvedFormAllowlistStatus === undefined) {
+        return diagnostic.formAccessGranted && diagnostic.hasAccessibleForm
+          ? check(item.id, item.label, "PASS", "The Page form-list endpoint returned at least one accessible form.")
+          : check(item.id, item.label, "BLOCKED", "The Page form-list endpoint did not confirm an accessible form.", [
+              "Confirm Page role, lead access, and form visibility in Meta controls.",
+            ]);
+      }
+      if (diagnostic.approvedFormAllowlistStatus !== "configured" ||
+          diagnostic.allApprovedFormsAccessible !== true) {
+        return check(item.id, item.label, "BLOCKED", "The approved-form allowlist is missing or at least one approved form was not verified accessible.", [
+          "Verify and configure only the owner-approved AICHM form IDs, then confirm Page access in Meta controls.",
+        ]);
+      }
+      return check(item.id, item.label, "PASS", "Every configured approved form was found in the Page's accessible form list.");
+    }
+    if (item.id === "meta-lead-retrieval" && diagnostic.permissionsChecked !== undefined) {
+      return diagnostic.leadRetrievalPermission
+        ? check(item.id, item.label, "PASS", "The Page token's Lead Ads retrieval permission was verified.")
+        : check(item.id, item.label, "BLOCKED", "The Page token's Lead Ads retrieval permission is missing or unverified.", [
+            "Grant leads_retrieval and approved lead access without retrieving applicant data for this check.",
           ]);
     }
     if (item.id === "meta-api-access" && diagnostic.errorCategory &&

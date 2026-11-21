@@ -6,7 +6,7 @@ import { sameOriginCapture } from "../admissions/routes";
 import { saveMetaInstantLead } from "../admissions/identity";
 import {
   META_CONSENT_POLICY_VERSION, buildMetaCapiPayload, capiRetryDelayMs,
-  getMetaReadiness, isAcknowledgedCapiResponse,
+  getMetaAllowedFormIdsStatus, getMetaReadiness, isAcknowledgedCapiResponse,
   isValidMetaChallenge, parseMetaAllowedFormIds, verifyMetaWebhookSignature,
 } from "./config";
 import { safeMetaEventSourceUrl, visitorKey } from "./http";
@@ -18,7 +18,8 @@ import type { MetaFetchedLead } from "./webhook-handler";
 import { createMetaLeadgenHandler } from "./webhook-handler";
 import { createMetaGraphHttpError } from "./graph-error";
 import { META_LEADGEN_WEBHOOK_PATH } from "./webhook-diagnostics";
-import { runMetaPageSubscription, type MetaGraphFetch } from "./page-subscription";
+import type { MetaGraphFetch } from "./page-subscription";
+import { runMetaLeadAdsReadinessDiagnostic } from "./lead-ads-readiness";
 
 export const META_LEAD_ADS_DIAGNOSTICS_PATH = "/api/admin/meta/lead-ads-diagnostics";
 
@@ -29,6 +30,7 @@ export function registerMetaLeadAdsDiagnosticsRoute(
     authorizeAdmin?: RequestHandler;
     environment?: () => NodeJS.ProcessEnv;
     fetcher?: MetaGraphFetch;
+    now?: () => Date;
   } = {},
 ) {
   const authenticate = options.authenticate ?? requireLmsUser;
@@ -36,15 +38,16 @@ export function registerMetaLeadAdsDiagnosticsRoute(
   app.get(META_LEAD_ADS_DIAGNOSTICS_PATH, authenticate, authorizeAdmin, async (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     const environment = options.environment?.() ?? process.env;
-    const diagnostic = await runMetaPageSubscription({
+    const diagnostic = await runMetaLeadAdsReadinessDiagnostic({
       META_PAGE_ID: environment.META_PAGE_ID,
       META_APP_ID: environment.META_APP_ID,
+      META_APP_SECRET: environment.META_APP_SECRET,
       META_PAGE_ACCESS_TOKEN: environment.META_PAGE_ACCESS_TOKEN,
       META_GRAPH_API_VERSION: environment.META_GRAPH_API_VERSION,
+      META_ALLOWED_FORM_IDS: environment.META_ALLOWED_FORM_IDS,
     }, {
-      apply: false,
-      confirmationMatches: false,
       fetcher: options.fetcher,
+      now: options.now,
     });
     return void res.json({
       ...diagnostic,
@@ -96,10 +99,12 @@ export function registerMetaStatusRoute(
     res.setHeader("Cache-Control", "private, no-store");
     const env = environment();
     const readiness = getMetaReadiness(env);
-    const approvedFormIds = parseMetaAllowedFormIds(env.META_ALLOWED_FORM_IDS);
-    const approvedFormAllowlistConfigured = approvedFormIds !== null;
-    const approvedFormCount = approvedFormIds?.size ?? 0;
-    const allowlistStatus = { approvedFormAllowlistConfigured, approvedFormCount };
+    const allowlist = getMetaAllowedFormIdsStatus(env.META_ALLOWED_FORM_IDS);
+    const allowlistStatus = {
+      approvedFormAllowlistConfigured: allowlist.status === "configured",
+      approvedFormAllowlistStatus: allowlist.status,
+      approvedFormCount: allowlist.count,
+    };
 
     try {
       const schema = await readSchema();

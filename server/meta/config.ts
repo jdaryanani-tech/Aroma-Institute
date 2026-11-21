@@ -37,6 +37,18 @@ export function parseMetaAllowedFormIds(value: string | undefined): ReadonlySet<
   return new Set(ids);
 }
 
+export function getMetaAllowedFormIdsStatus(value: string | undefined): {
+  status: "missing" | "empty" | "invalid" | "configured";
+  count: number;
+} {
+  if (typeof value !== "string") return { status: "missing", count: 0 };
+  if (!value.trim()) return { status: "empty", count: 0 };
+  const ids = parseMetaAllowedFormIds(value);
+  return ids
+    ? { status: "configured", count: ids.size }
+    : { status: "invalid", count: 0 };
+}
+
 function missing(names: readonly string[], env: MetaEnvironment) {
   return names.filter((name) => !env[name]?.trim());
 }

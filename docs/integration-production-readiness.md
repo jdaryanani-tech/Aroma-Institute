@@ -196,36 +196,50 @@ AICHM Instant Form IDs in Meta and configure this allowlist through the
 approved secret/configuration flow. Do not copy historical or test form IDs
 without verifying that they are the intended active AICHM forms.
 
-The admin diagnostic at `GET /api/admin/meta/lead-ads-diagnostics` performs
-read-only Graph GET checks for:
+The admin diagnostic at `GET /api/admin/meta/lead-ads-diagnostics` is an
+explicit, admin-authenticated read-only check. It uses Graph GET requests only
+to validate the Page token with `debug_token`, compare `/me` with both the
+configured Page and the approved AICHM Page, inspect Page `subscribed_apps`,
+and compare the configured approved-form allowlist with the Page's accessible
+`leadgen_forms` inventory. It checks the token's `leads_retrieval` and
+`pages_manage_metadata` grants, app identity, token expiry and data-access
+expiry. Form inventory pagination is bounded to five pages; an incomplete
+inventory is reported as blocked, not assumed complete. It returns only booleans, safe
+categories, expiry timestamps, and aggregate form counts. It never returns
+token/app credentials, Page or form IDs, names, raw Graph messages, or lead
+submissions, and it does not modify Page subscriptions or approve forms.
 
-- `/me` token identity versus the configured Page,
-- Page `subscribed_apps` leadgen subscription,
-- Page `leadgen_forms` list access.
-
-It never reads a lead submission and does not modify Page subscriptions. A
-successful form-list request does **not** prove `leads_retrieval` or permission
-to read leads from every form. Before operational use:
+The diagnostic does not call any form `/leads` edge. A permission grant check
+does not prove that Meta will return a particular lead record. Before
+operational use:
 
 1. Confirm the intended app and Page in the authorized Meta business settings.
-2. Confirm the Page-scoped token is issued for the configured Page and app,
-   and has the currently required permissions, including `leads_retrieval`,
-   and that each intended form is accessible through Lead Access Manager.
+2. Run the admin-only diagnostic after authorizing its Meta Graph GET
+   requests. Resolve any failed token validity, configured Page/app identity,
+   expiry, `leads_retrieval`, `pages_manage_metadata`, or `leadgen` subscription
+   check.
 3. Verify active/inactive form inventory and form question mapping without
    exporting applicant data. Do not hardcode a previously observed form list.
-4. Confirm the app-level webhook callback and Page `leadgen` subscription
-   independently. Do not change subscriptions from this app's diagnostic.
-5. Verify a sanitized Production webhook POST status and reason code from
+4. Have an authorized owner confirm the intended active AICHM forms, configure
+   only those IDs in `META_ALLOWED_FORM_IDS`, and rerun the diagnostic to
+   verify access to every configured form. A missing, empty, malformed, or
+   duplicated allowlist continues to reject webhook intake; no form is selected
+   or approved automatically.
+5. Confirm the app-level webhook callback independently. Do not change
+   subscriptions from this app's diagnostic.
+6. Verify a sanitized Production webhook POST status and reason code from
    runtime telemetry. A Meta UI “success” or source test is not proof that CRM
    persistence and canonical identity linking succeeded.
-6. Confirm `META_APP_ID`, `META_APP_SECRET`, `META_WEBHOOK_VERIFY_TOKEN`,
+7. Confirm `META_APP_ID`, `META_APP_SECRET`, `META_WEBHOOK_VERIFY_TOKEN`,
    `META_PAGE_ID`, `META_PAGE_ACCESS_TOKEN`, `META_GRAPH_API_VERSION`, and
    `META_ALLOWED_FORM_IDS`
    through the approved secret-presence/format flow only. Never print values.
 
-The diagnostic deliberately does not call a form `/leads` edge, so
-lead-retrieval permission remains **NOT CHECKED** until verified through an
-authorized Meta control or separately approved, privacy-safe procedure.
+The diagnostic checks the token's reported permission grants but deliberately
+does not call a form `/leads` edge or fetch applicant data. Therefore successful
+permission checks do not establish end-to-end lead retrieval for a particular
+submission; use separately approved, privacy-safe operational telemetry for
+that evidence.
 `META_PIXEL_ID`, `META_CAPI_ACCESS_TOKEN`, and `META_CAPI_ENABLED` are separate
 Conversions API settings; they do not establish Lead Ads readiness.
 

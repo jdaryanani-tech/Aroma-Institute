@@ -56,6 +56,26 @@ type DatabaseRuntimeProbe = {
 };
 
 type MetaDiagnostic = MetaDiagnosticSummary & {
+  checkedAt: string;
+  configuredPageIsAichmPage: boolean;
+  tokenDebugChecked: boolean;
+  tokenValid: boolean;
+  tokenTypeIsPage: boolean;
+  tokenBelongsToConfiguredApp: boolean;
+  tokenExpiryStatus: "not_checked" | "valid" | "expired" | "never_expires" | "unknown";
+  tokenExpiresAt: string | null;
+  dataAccessExpiryStatus: "not_checked" | "valid" | "expired" | "never_expires" | "unknown";
+  dataAccessExpiresAt: string | null;
+  permissionsChecked: boolean;
+  leadRetrievalPermission: boolean;
+  pageSubscriptionPermission: boolean;
+  approvedFormAllowlistStatus: "missing" | "empty" | "invalid" | "configured";
+  approvedFormCount: number;
+  formCheckStatus: "not_checked" | "complete" | "incomplete" | "failed";
+  accessibleApprovedFormCount: number;
+  inaccessibleApprovedFormCount: number | null;
+  allApprovedFormsAccessible: boolean | null;
+  safeCode: string | null;
   graphHttpStatus?: number | null;
   graphErrorType?: string | null;
   graphErrorCode?: number | null;
@@ -64,6 +84,20 @@ type MetaDiagnostic = MetaDiagnosticSummary & {
   diagnosticOnly: boolean;
   requestApplied: boolean;
 };
+
+function diagnosticStatus(value: boolean | null | undefined): ReadinessStatus {
+  return value === null || value === undefined ? "NOT CHECKED" : value ? "PASS" : "BLOCKED";
+}
+
+function expiryDetail(
+  status: MetaDiagnostic["tokenExpiryStatus"],
+  expiresAt: string | null,
+): string {
+  if (status === "never_expires") return "Meta reports no expiry.";
+  if (status === "not_checked") return "Expiry was not checked.";
+  if (status === "unknown" || !expiresAt) return "Expiry could not be verified.";
+  return `${status === "expired" ? "Expired" : "Expires"}: ${expiresAt}`;
+}
 
 async function fetchReadiness(): Promise<IntegratedReadiness> {
   const response = await fetch("/api/admin/integrations/readiness", {
@@ -383,6 +417,119 @@ export default function IntegrationReadinessPanel() {
             {metaDiagnostic.graphErrorType ? ` · ${metaDiagnostic.graphErrorType}` : ""}
             {metaDiagnostic.graphErrorIsTransient === true ? " · transient" : ""}
           </small>}
+          {metaDiagnostic && <div className="integration-diagnostics-detail" data-testid="meta-lead-ads-readiness-result">
+            <h4>AICHM Meta setup result</h4>
+            <p>Read-only check. No lead was fetched, no form was approved, and no Page setting was changed.</p>
+            <ul className="integration-check-list">
+              <CheckRow item={{
+                id: "meta-configured-page-approved",
+                label: "Configured Page is the approved AICHM Page",
+                status: metaDiagnostic.configuredPageStatus === "approved" ? "PASS" : "BLOCKED",
+                detail: metaDiagnostic.configuredPageStatus === "missing"
+                  ? "The Page ID is not configured."
+                  : metaDiagnostic.configuredPageStatus === "mismatch"
+                    ? "The configured Page does not match the approved AICHM Page."
+                    : "The configured Page ID matches the approved AICHM Page.",
+                requiredActions: metaDiagnostic.configuredPageStatus === "approved" ? [] : ["Correct the Page ID using the approved configuration process."],
+              }} />
+              <CheckRow item={{
+                id: "meta-token-valid",
+                label: "Page token is valid, Page-scoped, and belongs to the configured app",
+                status: diagnosticStatus(metaDiagnostic.tokenDebugChecked
+                  ? metaDiagnostic.tokenValid && metaDiagnostic.tokenTypeIsPage && metaDiagnostic.tokenBelongsToConfiguredApp
+                  : null),
+                detail: "Token values and permission names are never displayed.",
+                requiredActions: [],
+              }} />
+              <CheckRow item={{
+                id: "meta-token-expiry",
+                label: "Page token expiry",
+                status: metaDiagnostic.tokenExpiryStatus === "not_checked"
+                  ? "NOT CHECKED"
+                  : diagnosticStatus(metaDiagnostic.tokenExpiryStatus === "valid" || metaDiagnostic.tokenExpiryStatus === "never_expires"),
+                detail: expiryDetail(metaDiagnostic.tokenExpiryStatus, metaDiagnostic.tokenExpiresAt),
+                requiredActions: [],
+              }} />
+              <CheckRow item={{
+                id: "meta-data-access-expiry",
+                label: "Data-access expiry",
+                status: metaDiagnostic.dataAccessExpiryStatus === "not_checked"
+                  ? "NOT CHECKED"
+                  : diagnosticStatus(metaDiagnostic.dataAccessExpiryStatus === "valid" || metaDiagnostic.dataAccessExpiryStatus === "never_expires"),
+                detail: expiryDetail(metaDiagnostic.dataAccessExpiryStatus, metaDiagnostic.dataAccessExpiresAt),
+                requiredActions: [],
+              }} />
+              <CheckRow item={{
+                id: "meta-leads-retrieval-permission",
+                label: "Lead Ads retrieval permission",
+                status: diagnosticStatus(metaDiagnostic.permissionsChecked
+                  ? metaDiagnostic.leadRetrievalPermission
+                  : metaDiagnostic.tokenDebugChecked ? false : null),
+                detail: "Only a permission boolean is shown.",
+                requiredActions: [],
+              }} />
+              <CheckRow item={{
+                id: "meta-page-subscription-permission",
+                label: "Page leadgen subscription permission",
+                status: diagnosticStatus(metaDiagnostic.permissionsChecked
+                  ? metaDiagnostic.pageSubscriptionPermission
+                  : metaDiagnostic.tokenDebugChecked ? false : null),
+                detail: "Only a permission boolean is shown.",
+                requiredActions: [],
+              }} />
+              <CheckRow item={{
+                id: "meta-page-identity",
+                label: "Page token identity",
+                status: diagnosticStatus(metaDiagnostic.pageIdentityChecked ? metaDiagnostic.pageIdentityMatches : null),
+                detail: "The token's Page identity is compared server-side; identifiers are not returned.",
+                requiredActions: [],
+              }} />
+              <CheckRow item={{
+                id: "meta-leadgen-subscription",
+                label: "App leadgen subscription",
+                status: diagnosticStatus(metaDiagnostic.subscriptionChecked
+                  ? metaDiagnostic.appInstalled && metaDiagnostic.leadgenSubscribed
+                  : null),
+                detail: metaDiagnostic.subscriptionChecked
+                  ? metaDiagnostic.appInstalled
+                    ? metaDiagnostic.leadgenSubscribed ? "The app is subscribed to leadgen." : "The app is not subscribed to leadgen."
+                    : "The configured app is not installed on this Page."
+                  : "The subscription was not checked.",
+                requiredActions: [],
+              }} />
+              <CheckRow item={{
+                id: "meta-approved-form-allowlist",
+                label: "Approved-form allowlist",
+                status: metaDiagnostic.approvedFormAllowlistStatus === "configured" ? "PASS" : "BLOCKED",
+                detail: metaDiagnostic.approvedFormAllowlistStatus === "configured"
+                  ? `${metaDiagnostic.approvedFormCount} approved form(s) configured.`
+                  : metaDiagnostic.approvedFormAllowlistStatus === "missing"
+                    ? "The allowlist is missing; no form is approved."
+                    : metaDiagnostic.approvedFormAllowlistStatus === "empty"
+                      ? "The allowlist is empty; no form is approved."
+                      : "The allowlist is invalid; no form is approved.",
+                requiredActions: metaDiagnostic.approvedFormAllowlistStatus === "configured"
+                  ? []
+                  : ["Have an authorized owner verify and approve the intended AICHM form IDs before configuring the allowlist."],
+              }} />
+              <CheckRow item={{
+                id: "meta-approved-forms-accessible",
+                label: "Configured approved forms accessible",
+                status: metaDiagnostic.formCheckStatus === "complete"
+                  ? diagnosticStatus(metaDiagnostic.allApprovedFormsAccessible)
+                  : metaDiagnostic.formCheckStatus === "failed" || metaDiagnostic.formCheckStatus === "incomplete"
+                    ? "BLOCKED"
+                    : "NOT CHECKED",
+                detail: metaDiagnostic.formCheckStatus === "complete"
+                  ? `${metaDiagnostic.accessibleApprovedFormCount} accessible; ${metaDiagnostic.inaccessibleApprovedFormCount ?? "unknown"} inaccessible.`
+                  : metaDiagnostic.approvedFormAllowlistStatus === "configured"
+                    ? "Form access was not fully verified."
+                    : "No approved forms are configured to check.",
+                requiredActions: [],
+              }} />
+            </ul>
+            {metaDiagnostic.safeCode && <small>Safe result: {metaDiagnostic.safeCode}</small>}
+          </div>}
         </section>
       </div>
 

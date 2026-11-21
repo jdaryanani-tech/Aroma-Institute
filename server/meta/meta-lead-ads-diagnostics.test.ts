@@ -8,15 +8,22 @@ import {
   registerMetaLeadAdsDiagnosticsRoute,
 } from "./routes";
 import type { MetaGraphFetch } from "./page-subscription";
+import { VERIFIED_AICHM_META_PAGE_ID } from "./lead-ads-readiness";
 
-const pageId = "1096372060227919";
+const pageId = VERIFIED_AICHM_META_PAGE_ID;
 const appId = "222222222222222";
 const token = "synthetic-page-token";
+const appSecret = "synthetic-app-secret";
+const formOne = "333333333333333";
+const formTwo = "444444444444444";
+const now = new Date("2026-11-21T00:00:00.000Z");
 const environment = {
   META_PAGE_ID: pageId,
   META_APP_ID: appId,
+  META_APP_SECRET: appSecret,
   META_PAGE_ACCESS_TOKEN: token,
   META_GRAPH_API_VERSION: "v99.0",
+  META_ALLOWED_FORM_IDS: `${formOne},${formTwo}`,
 } as NodeJS.ProcessEnv;
 
 function graphResponse(value: unknown, status = 200) {
@@ -31,6 +38,7 @@ async function callDiagnostic(options: {
   roles?: string[];
   authenticated?: boolean;
   fetcher?: MetaGraphFetch;
+  environment?: NodeJS.ProcessEnv;
 }) {
   const app = express();
   let calls = 0;
@@ -39,12 +47,28 @@ async function callDiagnostic(options: {
     calls += 1;
     methods.push(init?.method ?? "GET");
     const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname.endsWith("/debug_token")) {
+      return graphResponse({
+        data: {
+          is_valid: true,
+          app_id: appId,
+          type: "PAGE",
+          expires_at: Math.floor(now.getTime() / 1_000) + 3_600,
+          data_access_expires_at: Math.floor(now.getTime() / 1_000) + 7_200,
+          scopes: ["leads_retrieval", "pages_manage_metadata"],
+          granular_scopes: [
+            { scope: "leads_retrieval", target_ids: [pageId] },
+            { scope: "pages_manage_metadata", target_ids: [pageId] },
+          ],
+        },
+      });
+    }
     if (url.pathname.endsWith("/me")) return graphResponse({ id: pageId });
     if (url.pathname.endsWith("/subscribed_apps")) {
       return graphResponse({ data: [{ id: appId, subscribed_fields: ["leadgen"] }] });
     }
     if (url.pathname.endsWith("/leadgen_forms")) {
-      return graphResponse({ data: [{ id: "333333333333333", status: "ACTIVE" }] });
+      return graphResponse({ data: [{ id: formOne }, { id: formTwo }] });
     }
     throw new Error("unexpected_graph_path");
   });
@@ -61,8 +85,9 @@ async function callDiagnostic(options: {
   registerMetaLeadAdsDiagnosticsRoute(app, {
     authenticate,
     authorizeAdmin: requireLmsRole("admin"),
-    environment: () => environment,
+    environment: () => options.environment ?? environment,
     fetcher,
+    now: () => now,
   });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -96,22 +121,33 @@ test("Meta Page diagnostics are no-store and expose only safe readiness booleans
   const result = await callDiagnostic({});
   assert.equal(result.status, 200);
   assert.equal(result.cacheControl, "private, no-store, max-age=0");
+  assert.equal(result.body.configuredPageStatus, "approved");
+  assert.equal(result.body.tokenDebugChecked, true);
+  assert.equal(result.body.tokenValid, true);
+  assert.equal(result.body.tokenBelongsToConfiguredApp, true);
+  assert.equal(result.body.tokenExpiryStatus, "valid");
+  assert.equal(result.body.dataAccessExpiryStatus, "valid");
+  assert.equal(result.body.leadRetrievalPermission, true);
+  assert.equal(result.body.pageSubscriptionPermission, true);
   assert.equal(result.body.pageIdentityChecked, true);
   assert.equal(result.body.pageIdentityMatches, true);
   assert.equal(result.body.subscriptionChecked, true);
   assert.equal(result.body.leadgenSubscribed, true);
-  assert.equal(result.body.formAccessChecked, true);
-  assert.equal(result.body.formAccessGranted, true);
-  assert.equal(result.body.hasAccessibleForm, true);
+  assert.equal(result.body.approvedFormAllowlistStatus, "configured");
+  assert.equal(result.body.approvedFormCount, 2);
+  assert.equal(result.body.formCheckStatus, "complete");
+  assert.equal(result.body.accessibleApprovedFormCount, 2);
+  assert.equal(result.body.inaccessibleApprovedFormCount, 0);
+  assert.equal(result.body.allApprovedFormsAccessible, true);
   assert.equal(result.body.requestApplied, false);
   assert.equal(result.body.diagnosticOnly, true);
-  assert.equal(result.calls, 3);
-  assert.deepEqual(result.methods, ["GET", "GET", "GET"]);
+  assert.equal(result.calls, 4);
+  assert.deepEqual(result.methods, ["GET", "GET", "GET", "GET"]);
   const json = JSON.stringify(result.body);
-  for (const value of [pageId, appId, token, "333333333333333", "ACTIVE"]) {
+  for (const value of [pageId, appId, token, appSecret, formOne, formTwo, "ACTIVE"]) {
     assert.equal(json.includes(value), false);
   }
-  assert.equal(/access_token|lead_id|form_id|payload/i.test(json), false);
+  assert.equal(/access_token|input_token|lead_id|form_id|payload|granular_scopes/i.test(json), false);
 });
 
 test("Meta form permission failures are classified without leaking Graph details", async () => {
@@ -119,6 +155,18 @@ test("Meta form permission failures are classified without leaking Graph details
   const fetcher: MetaGraphFetch = async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     calls.push(url.pathname);
+    if (url.pathname.endsWith("/debug_token")) {
+      return graphResponse({
+        data: {
+          is_valid: true,
+          app_id: appId,
+          type: "PAGE",
+          expires_at: Math.floor(now.getTime() / 1_000) + 3_600,
+          data_access_expires_at: Math.floor(now.getTime() / 1_000) + 7_200,
+          scopes: ["leads_retrieval", "pages_manage_metadata"],
+        },
+      });
+    }
     if (url.pathname.endsWith("/me")) return graphResponse({ id: pageId });
     if (url.pathname.endsWith("/subscribed_apps")) {
       return graphResponse({ data: [{ id: appId, subscribed_fields: ["leadgen"] }] });
@@ -135,14 +183,11 @@ test("Meta form permission failures are classified without leaking Graph details
   };
   const result = await callDiagnostic({ fetcher });
   assert.equal(result.status, 200);
-  assert.equal(result.body.errorCategory, "permission_denied");
-  assert.equal(result.body.formAccessChecked, true);
-  assert.equal(result.body.formAccessGranted, false);
-  assert.equal(result.body.graphHttpStatus, 403);
-  assert.equal(result.body.graphErrorCode, 10);
+  assert.equal(result.body.safeCode, "permission_denied");
+  assert.equal(result.body.formCheckStatus, "failed");
   const serialized = JSON.stringify(result.body);
-  for (const value of [token, pageId, appId, "email@example.invalid", "private token="]) {
+  for (const value of [token, appSecret, pageId, appId, formOne, "email@example.invalid", "private token="]) {
     assert.equal(serialized.includes(value), false);
   }
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
 });

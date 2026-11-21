@@ -85,11 +85,12 @@ const testCases: Array<{
   configuredValue?: string;
   configured: boolean;
   count: number;
+  status: "missing" | "empty" | "invalid" | "configured";
 }> = [
-  { name: "absent allowlist", configured: false, count: 0 },
-  { name: "empty allowlist", configuredValue: "  ", configured: false, count: 0 },
-  { name: "valid allowlist", configuredValue: `${formIdOne}, ${formIdTwo}`, configured: true, count: 2 },
-  { name: "malformed allowlist", configuredValue: `${formIdOne},not-numeric`, configured: false, count: 0 },
+  { name: "absent allowlist", configured: false, count: 0, status: "missing" },
+  { name: "empty allowlist", configuredValue: "  ", configured: false, count: 0, status: "empty" },
+  { name: "valid allowlist", configuredValue: `${formIdOne}, ${formIdTwo}`, configured: true, count: 2, status: "configured" },
+  { name: "malformed allowlist", configuredValue: `${formIdOne},not-numeric`, configured: false, count: 0, status: "invalid" },
 ];
 
 for (const testCase of testCases) {
@@ -105,6 +106,7 @@ for (const testCase of testCases) {
     assert.equal(result.status, 200);
     assert.equal(result.cacheControl, "private, no-store");
     assert.equal(result.body.approvedFormAllowlistConfigured, testCase.configured);
+    assert.equal(result.body.approvedFormAllowlistStatus, testCase.status);
     assert.equal(result.body.approvedFormCount, testCase.count);
     assert.ok(result.requestedUrls.every((url) => url.startsWith("http://127.0.0.1:")));
 
