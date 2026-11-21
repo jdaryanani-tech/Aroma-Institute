@@ -37,6 +37,11 @@ import {
   AVNI_PROVIDER_REFERENCE_HMAC_KEYRING_ENV,
   readAvniHmacKeyringConfig,
 } from "./avni-provider-reference-hmac-config";
+import {
+  AVNI_RUNTIME_WRITER_ENABLED_ENV,
+  avniRuntimeWriterSafeStatus,
+  initializeAvniRuntimeWriter,
+} from "./avni-runtime-writer";
 import { registerAvniCrmFollowUpRoutes } from "../crm/avni-follow-up-routes";
 import {
   AVNI_PILOT_DISPATCH_GATE_ENV,
@@ -166,24 +171,38 @@ export function registerAvniLeadUpsertRoute(
 
 export function registerAvniIntegrationRoutes(
   app: Express,
-  options: { runtimeDatabaseVerified?: boolean } = {},
+  options: {
+    runtimeDatabaseVerified?: boolean;
+    /** Must come from an independently completed read-only catalog preflight. */
+    approvedSupabaseRuntimeLoginRole?: string | null;
+    supabaseRuntimeRolePreflightPassed?: boolean;
+    supabaseRuntimeSchemaPreflightPassed?: boolean;
+  } = {},
 ) {
   const runtimeDatabaseVerified = options.runtimeDatabaseVerified === true;
 
   const schemaReady = () => admissionsIntegrationSchemaReady(db);
   const hmacKeyring = readAvniHmacKeyringConfig();
+  const runtimeWriter = initializeAvniRuntimeWriter({
+    environment: process.env,
+    keyring: hmacKeyring,
+    approvedRuntimeLoginRole: options.approvedSupabaseRuntimeLoginRole,
+    runtimeRolePreflightPassed: options.supabaseRuntimeRolePreflightPassed,
+    runtimeSchemaPreflightPassed: options.supabaseRuntimeSchemaPreflightPassed,
+  });
+  const runtimeWriterStatus = avniRuntimeWriterSafeStatus(runtimeWriter);
   const evolutionPilotTransport = createEvolutionPilotTransport(
     createEvolutionPilotHttpClient({
       apiKey: process.env[EVOLUTION_API_KEY_ENV],
       instanceName: process.env[EVOLUTION_API_INSTANCE_ENV],
     }),
   );
-  // Keep a second, code-level off switch in addition to the environment gate.
-  // The runtime Supabase login/migrations are not approved or verified; no
-  // writer is attached, and the one-recipient route cannot begin a send.
+  // The runtime writer may be initialized only after an explicit opt-in and
+  // independent role preflight. Dispatch remains code-level hard-disabled;
+  // initializing a lazy pool never authorizes a send or changes control RPCs.
   const pilotDispatch = createAvniSingleRecipientPilotDispatcher({
     pool,
-    supabaseWriter: null,
+    supabaseWriter: runtimeWriter.writer,
     hmacKeyProvider: hmacKeyring.provider,
     transport: evolutionPilotTransport,
     grantEngine: createDatabasePilotGrantEngine(),
@@ -254,6 +273,7 @@ export function registerAvniIntegrationRoutes(
       "AICHM_VAPID_PRIVATE_KEY",
       "SUPABASE_AVNI_READONLY_DATABASE_URL",
       "SUPABASE_AVNI_RUNTIME_DATABASE_URL",
+      AVNI_RUNTIME_WRITER_ENABLED_ENV,
       "SUPABASE_DB_SSL_CA",
       AVNI_PROVIDER_REFERENCE_HMAC_KEYRING_ENV,
       EVOLUTION_API_KEY_ENV,
@@ -297,7 +317,9 @@ export function registerAvniIntegrationRoutes(
         providerClientWired: evolutionPilotTransport.configured,
         hmacKeyProviderWired: hmacKeyring.provider !== null,
         hmacKeyringState: hmacKeyring.state,
-        supabaseWriterPoolWired: false,
+        supabaseWriterPoolWired: runtimeWriterStatus.poolWired,
+        runtimeWriterState: runtimeWriterStatus.state,
+        writerAvailable: runtimeWriterStatus.writerAvailable,
         grantEngineWired: true,
         runtimeMigrationRequired: true,
         productionSendingAvailable: false,
@@ -356,7 +378,7 @@ export function registerAvniIntegrationRoutes(
               dispatcherActive: isVslDispatchEnabled(),
             },
             supabaseReaderConfigured: isSupabaseAvniReadConfigured(),
-            supabaseWriterAvailable: false,
+            supabaseWriterAvailable: runtimeWriterStatus.writerAvailable,
             evolutionTransportConfigured: evolutionPilotTransport.configured,
             evolutionMissingConfigurationNames,
             hmacKeyringState: hmacKeyring.state,
@@ -396,6 +418,7 @@ export function registerAvniIntegrationRoutes(
           conversationHistory: {
             readerConfigurationValid: isSupabaseAvniReadConfigured(),
             liveSchemaVerified: false,
+            // The pilot writer lacks the owner-only control-transition RPC.
             writerAvailable: false,
             safeCode: "supabase_runtime_login_and_migration_identity_unverified",
           },
@@ -406,7 +429,9 @@ export function registerAvniIntegrationRoutes(
           pilotDispatch: {
             hardDisabled: true,
             hmacKeyringState: hmacKeyring.state,
-            runtimeWriterConfigured: false,
+            runtimeWriterConfigured: runtimeWriterStatus.writerAvailable,
+            runtimeWriterPoolWired: runtimeWriterStatus.poolWired,
+            runtimeWriterState: runtimeWriterStatus.state,
             grantEngineConfigured: true,
             providerTransportConfigured: evolutionPilotTransport.configured,
             safeCode: "dispatch_disabled_until_schema_role_and_provider_contract_are_verified",

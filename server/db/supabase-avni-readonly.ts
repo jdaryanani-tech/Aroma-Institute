@@ -4,8 +4,8 @@ import { Pool, type PoolConfig } from "pg";
 import { z } from "zod";
 import { normalizeSupabaseCaCertificate } from "./supabase-migration";
 
-const PROJECT_REF = "xylqezjvqqqjozenuygh";
-const POOLER_HOST = "aws-0-ap-northeast-1.pooler.supabase.com";
+export const SUPABASE_AVNI_PROJECT_REF = "xylqezjvqqqjozenuygh";
+export const SUPABASE_AVNI_POOLER_HOST = "aws-0-ap-northeast-1.pooler.supabase.com";
 const URI_SECRET = "SUPABASE_AVNI_READONLY_DATABASE_URL";
 const CA_SECRET = "SUPABASE_DB_SSL_CA";
 
@@ -133,7 +133,7 @@ function validateUrl(raw: string) {
     throw new Error(`${URI_SECRET} must be a valid PostgreSQL URI.`);
   }
   if (!["postgres:", "postgresql:"].includes(url.protocol)
-    || url.hostname.toLowerCase() !== POOLER_HOST || url.port !== "5432" || url.pathname !== "/postgres") {
+    || url.hostname.toLowerCase() !== SUPABASE_AVNI_POOLER_HOST || url.port !== "5432" || url.pathname !== "/postgres") {
     throw new Error(`${URI_SECRET} must use the approved Supavisor host, port, and database.`);
   }
   let username = "";
@@ -142,7 +142,7 @@ function validateUrl(raw: string) {
   } catch {
     throw new Error(`${URI_SECRET} has invalid username encoding.`);
   }
-  if (username !== `aichm_crm_reader.${PROJECT_REF}` || !url.password) {
+  if (username !== `aichm_crm_reader.${SUPABASE_AVNI_PROJECT_REF}` || !url.password) {
     throw new Error(`${URI_SECRET} must authenticate as the dedicated read-only CRM role.`);
   }
   const sslModes = Array.from(url.searchParams.entries()).filter(([key]) => key.toLowerCase() === "sslmode");
@@ -303,7 +303,8 @@ export async function runSupabaseAvniReadDiagnostics(
     session = await connector(config);
     checks.tlsConnected = session.tls.encrypted;
     checks.tlsChainVerified = session.tls.authorized && !session.tls.authorizationErrorPresent;
-    checks.tlsHostnameVerified = checks.tlsChainVerified && session.tls.servername === POOLER_HOST;
+    checks.tlsHostnameVerified = checks.tlsChainVerified
+      && session.tls.servername === SUPABASE_AVNI_POOLER_HOST;
 
     const identity = await session.query(
       `SELECT current_database() AS database_name, current_user AS role_name,
