@@ -54,6 +54,90 @@ export function registerMetaLeadAdsDiagnosticsRoute(
   });
 }
 
+type MetaStatusSchema = {
+  consent: boolean;
+  touchpoints: boolean;
+  lead_links: boolean;
+  capi_outbox: boolean;
+};
+
+type MetaStatusRouteOptions = {
+  authenticate?: RequestHandler;
+  authorizeAdmin?: RequestHandler;
+  environment?: () => NodeJS.ProcessEnv;
+  readSchema?: () => Promise<MetaStatusSchema>;
+  readOutboxCounts?: () => Promise<Array<{ state: string; count: number }>>;
+};
+
+export function registerMetaStatusRoute(
+  app: Express,
+  options: MetaStatusRouteOptions = {},
+) {
+  const authenticate = options.authenticate ?? requireLmsUser;
+  const authorizeAdmin = options.authorizeAdmin ?? requireLmsRole("admin");
+  const environment = options.environment ?? (() => process.env);
+  const readSchema = options.readSchema ?? (async () => {
+    const result = await pool.query<MetaStatusSchema>(`SELECT
+      to_regclass('admissions_marketing_consent_events') IS NOT NULL AS consent,
+      to_regclass('admissions_lead_touchpoints') IS NOT NULL AS touchpoints,
+      to_regclass('admissions_meta_lead_links') IS NOT NULL AS lead_links,
+      to_regclass('admissions_meta_event_outbox') IS NOT NULL AS capi_outbox`);
+    if (!result.rows[0]) throw new Error("meta_status_schema_unavailable");
+    return result.rows[0];
+  });
+  const readOutboxCounts = options.readOutboxCounts ?? (async () => {
+    const result = await pool.query<{ state: string; count: number }>(
+      "SELECT state,count(*)::int count FROM admissions_meta_event_outbox GROUP BY state",
+    );
+    return result.rows;
+  });
+
+  app.get("/api/admin/meta/status", authenticate, authorizeAdmin, async (_req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const env = environment();
+    const readiness = getMetaReadiness(env);
+    const approvedFormIds = parseMetaAllowedFormIds(env.META_ALLOWED_FORM_IDS);
+    const approvedFormAllowlistConfigured = approvedFormIds !== null;
+    const approvedFormCount = approvedFormIds?.size ?? 0;
+    const allowlistStatus = { approvedFormAllowlistConfigured, approvedFormCount };
+
+    try {
+      const schema = await readSchema();
+      const counts = schema.capi_outbox ? await readOutboxCounts() : [];
+      return void res.json({
+        schemaReady: Object.values(schema).every(Boolean),
+        missingConfiguration: {
+          pixel: readiness.pixel.missing,
+          capi: readiness.capi.missing,
+          leadAds: readiness.leadAds.missing,
+          ...(readiness.capi.configured && !readiness.capi.enabled ? { capiFlag: "META_CAPI_ENABLED=true in production" } : {}),
+        },
+        pixelConfigured: readiness.pixel.configured,
+        capiEnabled: readiness.capi.enabled,
+        leadAdsConfigured: readiness.leadAds.configured,
+        ...allowlistStatus,
+        outbox: Object.fromEntries(counts.map((row) => [row.state, row.count])),
+        webhookPath: "/api/webhooks/meta/leadgen",
+      });
+    } catch {
+      return void res.json({
+        schemaReady: false,
+        missingConfiguration: {
+          pixel: readiness.pixel.missing,
+          capi: readiness.capi.missing,
+          leadAds: readiness.leadAds.missing,
+        },
+        pixelConfigured: readiness.pixel.configured,
+        capiEnabled: readiness.capi.enabled,
+        leadAdsConfigured: readiness.leadAds.configured,
+        ...allowlistStatus,
+        outbox: null,
+        webhookPath: "/api/webhooks/meta/leadgen",
+      });
+    }
+  });
+}
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
@@ -343,45 +427,6 @@ export function registerMetaRoutes(app: Express) {
     persistLead: saveMetaInstantLead,
   }));
 
-  app.get("/api/admin/meta/status", requireLmsUser, requireLmsRole("admin"), async (_req, res) => {
-    res.setHeader("Cache-Control", "private, no-store");
-    const readiness = getMetaReadiness();
-    try {
-      const schema = await pool.query(`SELECT
-        to_regclass('admissions_marketing_consent_events') IS NOT NULL AS consent,
-        to_regclass('admissions_lead_touchpoints') IS NOT NULL AS touchpoints,
-        to_regclass('admissions_meta_lead_links') IS NOT NULL AS lead_links,
-        to_regclass('admissions_meta_event_outbox') IS NOT NULL AS capi_outbox`);
-      const counts = schema.rows[0].capi_outbox
-        ? await pool.query("SELECT state,count(*)::int count FROM admissions_meta_event_outbox GROUP BY state")
-        : { rows: [] };
-      return void res.json({
-        schemaReady: Object.values(schema.rows[0]).every(Boolean),
-        missingConfiguration: {
-          pixel: readiness.pixel.missing,
-          capi: readiness.capi.missing,
-          leadAds: readiness.leadAds.missing,
-          ...(readiness.capi.configured && !readiness.capi.enabled ? { capiFlag: "META_CAPI_ENABLED=true in production" } : {}),
-        },
-        pixelConfigured: readiness.pixel.configured,
-        capiEnabled: readiness.capi.enabled,
-        leadAdsConfigured: readiness.leadAds.configured,
-        outbox: Object.fromEntries(counts.rows.map((r: { state: string; count: number }) => [r.state, r.count])),
-        webhookPath: "/api/webhooks/meta/leadgen",
-      });
-    } catch {
-      return void res.json({
-        schemaReady: false,
-        missingConfiguration: {
-          pixel: readiness.pixel.missing, capi: readiness.capi.missing, leadAds: readiness.leadAds.missing,
-        },
-        pixelConfigured: readiness.pixel.configured,
-        capiEnabled: readiness.capi.enabled,
-        leadAdsConfigured: readiness.leadAds.configured,
-        outbox: null,
-        webhookPath: "/api/webhooks/meta/leadgen",
-      });
-    }
-  });
+  registerMetaStatusRoute(app);
   registerMetaLeadAdsDiagnosticsRoute(app);
 }
