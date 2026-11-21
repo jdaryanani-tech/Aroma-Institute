@@ -1,14 +1,18 @@
 import type { Express, RequestHandler } from "express";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { admissionsCaptureLimits } from "@shared/admissions-schema";
 import { normalizeIndianMobile } from "@shared/indian-mobile";
 import { applicationRuntimeMode, db, pool } from "../db";
+import { sameOriginCapture } from "../admissions/routes";
 import {
   inspectApplicationDatabaseEndpointPolicy,
   inspectApplicationDatabaseStartupPreflight,
 } from "../db/application-runtime-connection";
+import { probeApplicationRuntimeDatabaseReadiness } from "../db/application-runtime-readiness-probe";
 import { upsertIntegrationLead } from "../admissions/identity";
 import {
   admissionsIntegrationSchemaReady,
@@ -343,6 +347,19 @@ export function registerAvniIntegrationRoutes(
   registerAdminIntegrationReadinessRoute(app, {
     authenticate: requireLmsUser,
     authorizeAdmin: requireLmsRole("admin"),
+    sameOriginWrite: sameOriginCapture,
+    probeDatabase: async () => {
+      const runtimeRoleMigrationSql = await readFile(
+        path.resolve(process.cwd(), "migrations/0016_crm_runtime_role_separation.sql"),
+        "utf8",
+      );
+      return probeApplicationRuntimeDatabaseReadiness({
+        environment: process.env,
+        mode: applicationRuntimeMode,
+        runtimeRoleMigrationSql,
+        connect: () => pool.connect(),
+      });
+    },
     load: async () => {
       const meta = getMetaReadiness();
       const crm = await inspectCrmSchema(pool);

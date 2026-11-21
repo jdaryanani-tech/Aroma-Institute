@@ -42,6 +42,19 @@ type DatabaseConnectionPreflight = {
   tlsPolicyPassed: boolean;
 };
 
+type DatabaseRuntimeProbe = {
+  endpointPolicyPassed: boolean;
+  tlsPolicyPassed: boolean;
+  endpointsMatch: boolean;
+  distinctApplicationLogin: boolean;
+  tlsConnectionRequired: boolean;
+  tlsActive: boolean | null;
+  runtimeLoginVerified: boolean;
+  effectiveMinimumGrantsVerified: boolean;
+  schemaMarkersVerified: boolean;
+  safeCode: string;
+};
+
 type MetaDiagnostic = MetaDiagnosticSummary & {
   graphHttpStatus?: number | null;
   graphErrorType?: string | null;
@@ -109,12 +122,17 @@ export default function IntegrationReadinessPanel() {
   const [supabaseChecks, setSupabaseChecks] = useState<Record<string, boolean> | null>(null);
   const [supabaseError, setSupabaseError] = useState("");
   const [checkingSupabase, setCheckingSupabase] = useState(false);
+  const [databaseProbe, setDatabaseProbe] = useState<DatabaseRuntimeProbe | null>(null);
+  const [databaseProbeError, setDatabaseProbeError] = useState("");
+  const [checkingDatabaseProbe, setCheckingDatabaseProbe] = useState(false);
 
   function refreshReadiness() {
     setMetaDiagnostic(null);
     setMetaError("");
     setSupabaseChecks(null);
     setSupabaseError("");
+    setDatabaseProbe(null);
+    setDatabaseProbeError("");
     void readiness.refetch();
   }
 
@@ -156,6 +174,25 @@ export default function IntegrationReadinessPanel() {
       setSupabaseError("Supabase read-only preflight is unavailable. No conversation or applicant records are shown.");
     } finally {
       setCheckingSupabase(false);
+    }
+  }
+
+  async function checkDatabaseRuntime() {
+    setCheckingDatabaseProbe(true);
+    setDatabaseProbe(null);
+    setDatabaseProbeError("");
+    try {
+      const response = await fetch("/api/admin/integrations/readiness/database-probe", {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error("Database readiness probe did not complete.");
+      setDatabaseProbe(await response.json() as DatabaseRuntimeProbe);
+    } catch {
+      setDatabaseProbeError("Database probe is unavailable. No connection or database details are shown.");
+    } finally {
+      setCheckingDatabaseProbe(false);
     }
   }
 
@@ -206,7 +243,7 @@ export default function IntegrationReadinessPanel() {
           <h3>CRM database endpoint configuration</h3>
           <span className="integration-area-status is-not-checked">Configuration only</span>
         </div>
-        <p>These checks inspect URL policy only. They do not connect to the database or verify its certificate, role, grants, or schema.</p>
+        <p>This section inspects URL policy only. The separate administrator-triggered probe verifies the current connection, runtime role, grants, and schema without reading customer rows.</p>
         <ul className="integration-check-list">
           <CheckRow item={{
             id: "database-host-policy",
@@ -232,7 +269,7 @@ export default function IntegrationReadinessPanel() {
           }} />
         </ul>
         {data.database.preflight && <div className="integration-diagnostics-detail" data-testid="crm-database-startup-preflight">
-          <h4>Startup connection preflight</h4>
+           <h4>Connection-free startup configuration preflight</h4>
           <p>Sanitized configuration checks only; no connection strings, usernames, passwords, or query values are shown.</p>
           <ul className="integration-check-list">
             {([
@@ -294,8 +331,11 @@ export default function IntegrationReadinessPanel() {
       <div className="integration-readiness-actions">
         <section>
           <h4>Safe read-only checks</h4>
-          <p>Meta checks make Graph GET requests only when clicked. Supabase checks use the configured restricted reader and synthetic empty lookups only.</p>
+          <p>The explicit CRM role/grant probe runs only after an administrator clicks. The baseline readiness request is separate; Meta and Supabase probes are also manual. The database probe uses a short read-only transaction and catalog metadata only, never customer rows.</p>
           <div className="integration-action-buttons">
+            <button className="crm-button crm-button-secondary" type="button" onClick={() => void checkDatabaseRuntime()} disabled={checkingDatabaseProbe}>
+              {checkingDatabaseProbe ? "Checking CRM database…" : "Run CRM database role/schema probe"}
+            </button>
             <button className="crm-button crm-button-secondary" type="button" onClick={() => void checkSupabaseReader()} disabled={checkingSupabase}>
               {checkingSupabase ? "Checking Supabase…" : "Run Supabase reader preflight"}
             </button>
@@ -304,7 +344,37 @@ export default function IntegrationReadinessPanel() {
             </button>
           </div>
           {supabaseError && <p className="crm-error" role="alert">{supabaseError}</p>}
+          {databaseProbeError && <p className="crm-error" role="alert">{databaseProbeError}</p>}
           {metaError && <p className="crm-error" role="alert">{metaError}</p>}
+          {databaseProbe && <div className="integration-diagnostics-detail" data-testid="crm-database-runtime-probe">
+            <h4>Current runtime database result</h4>
+            <p>Read-only metadata check; no customer rows or connection details are returned.</p>
+            <ul className="integration-check-list">
+              {([
+                ["Endpoint host policy", databaseProbe.endpointPolicyPassed],
+                ["Required TLS policy", databaseProbe.tlsPolicyPassed],
+                ["Application endpoints match", databaseProbe.endpointsMatch],
+                ["Distinct application login", databaseProbe.distinctApplicationLogin],
+                ["TLS requirement", databaseProbe.tlsPolicyPassed && (!databaseProbe.tlsConnectionRequired || databaseProbe.tlsActive === true)],
+                ["TLS active on this connection", databaseProbe.tlsActive],
+                ["Restricted runtime login", databaseProbe.runtimeLoginVerified],
+                ["Approved effective grants", databaseProbe.effectiveMinimumGrantsVerified],
+                ["Required schema markers", databaseProbe.schemaMarkersVerified],
+              ] as const).map(([label, passed]) => <CheckRow key={label} item={{
+                id: `runtime-probe-${label}`,
+                label,
+                status: passed === null ||
+                  (label === "TLS active on this connection" && passed === false && !databaseProbe.tlsConnectionRequired)
+                  ? "NOT CHECKED"
+                  : passed ? "PASS" : "BLOCKED",
+                detail: label === "TLS active on this connection" && passed === false && !databaseProbe.tlsConnectionRequired
+                  ? "TLS is not required for the current internal endpoint policy."
+                  : passed === null ? "The database check did not reach this metadata." : passed ? "Verified by the administrator-triggered read-only probe." : "The bounded metadata check did not verify this requirement.",
+                requiredActions: [],
+              }} />)}
+            </ul>
+            <small>Safe result: {databaseProbe.safeCode}</small>
+          </div>}
           {metaDiagnostic?.errorCategory && <small role="status">
             Meta safe result: {metaDiagnostic.errorCategory}
             {metaDiagnostic.graphHttpStatus ? ` · HTTP ${metaDiagnostic.graphHttpStatus}` : ""}

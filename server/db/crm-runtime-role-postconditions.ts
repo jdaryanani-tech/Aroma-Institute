@@ -14,6 +14,10 @@ const REQUIRED_RUNTIME_TABLES = [
   "lms_user_roles",
   "lms_audit_logs",
 ];
+export const CRM_RUNTIME_REQUIRED_SCHEMA_TABLES = Object.freeze([
+  ...REQUIRED_RUNTIME_TABLES,
+  ...CRM_TABLES,
+]);
 export const CRM_RUNTIME_TABLE_PRIVILEGES: Record<string, readonly string[]> = {
   sessions: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   inquiries: ["SELECT", "INSERT", "UPDATE"],

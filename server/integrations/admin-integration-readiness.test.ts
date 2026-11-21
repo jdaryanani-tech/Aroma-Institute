@@ -5,8 +5,10 @@ import test from "node:test";
 import { requireLmsRole, type LmsRole } from "../lms/auth";
 import {
   ADMIN_INTEGRATION_READINESS_PATH,
+  ADMIN_DATABASE_READINESS_PROBE_PATH,
   registerAdminIntegrationReadinessRoute,
 } from "./admin-integration-readiness";
+import { sameOriginCapture } from "../admissions/routes";
 import {
   inspectApplicationDatabaseEndpointPolicy,
   inspectApplicationDatabaseStartupPreflight,
@@ -17,9 +19,13 @@ async function call(options: {
   authenticated?: boolean;
   failLoad?: boolean;
   databaseEnvironment?: Record<string, string | undefined>;
+  method?: "GET" | "POST";
+  sameOrigin?: boolean;
+  failProbe?: boolean;
 }) {
   const app = express();
   let loaded = 0;
+  let probed = 0;
   const authenticate: RequestHandler = (req, res, next) => {
     if (options.authenticated === false) return void res.status(401).json({ code: "unauthorized" });
     req.lmsUser = {
@@ -33,6 +39,7 @@ async function call(options: {
   registerAdminIntegrationReadinessRoute(app, {
     authenticate,
     authorizeAdmin: requireLmsRole("admin"),
+    sameOriginWrite: sameOriginCapture,
     load: async () => {
       loaded += 1;
       if (options.failLoad) throw new Error("private runtime details");
@@ -53,18 +60,47 @@ async function call(options: {
         meta: { pageIdentity: "not_checked" },
       };
     },
+    probeDatabase: async () => {
+      probed += 1;
+      if (options.failProbe) {
+        throw new Error("synthetic-password host.internal private-query");
+      }
+      return {
+        endpointPolicyPassed: true,
+        tlsPolicyPassed: true,
+        endpointsMatch: true,
+        distinctApplicationLogin: true,
+        tlsConnectionRequired: true,
+        tlsActive: true,
+        runtimeLoginVerified: true,
+        effectiveMinimumGrantsVerified: true,
+        schemaMarkersVerified: true,
+        safeCode: "probe_passed",
+      };
+    },
   });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}${ADMIN_INTEGRATION_READINESS_PATH}`);
+    const method = options.method ?? "GET";
+    const origin = `http://127.0.0.1:${address.port}`;
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}${method === "POST" ? ADMIN_DATABASE_READINESS_PROBE_PATH : ADMIN_INTEGRATION_READINESS_PATH}`,
+      {
+        method,
+        headers: method === "POST" && options.sameOrigin !== false
+          ? { origin, "sec-fetch-site": "same-origin" }
+          : {},
+      },
+    );
     return {
       status: response.status,
       cacheControl: response.headers.get("cache-control"),
       body: await response.json(),
       loaded,
+      probed,
     };
   } finally {
     await new Promise<void>((resolve, reject) =>
@@ -144,4 +180,52 @@ test("database endpoint diagnostics remain admin-only and expose booleans only",
   const nonAdmin = await call({ authenticated: false, databaseEnvironment });
   assert.equal(nonAdmin.status, 401);
   assert.equal(nonAdmin.loaded, 0);
+});
+
+test("database role and schema probe runs only after an explicit same-origin admin POST", async () => {
+  const ordinaryRead = await call({});
+  assert.equal(ordinaryRead.status, 200);
+  assert.equal(ordinaryRead.probed, 0);
+
+  const explicitProbe = await call({ method: "POST" });
+  assert.equal(explicitProbe.status, 200);
+  assert.equal(explicitProbe.cacheControl, "private, no-store");
+  assert.equal(explicitProbe.probed, 1);
+  assert.deepEqual(explicitProbe.body, {
+    endpointPolicyPassed: true,
+    tlsPolicyPassed: true,
+    endpointsMatch: true,
+    distinctApplicationLogin: true,
+    tlsConnectionRequired: true,
+    tlsActive: true,
+    runtimeLoginVerified: true,
+    effectiveMinimumGrantsVerified: true,
+    schemaMarkersVerified: true,
+    safeCode: "probe_passed",
+  });
+});
+
+test("database role and schema probe denies unauthenticated and non-admin callers before probing", async () => {
+  const unauthenticated = await call({ method: "POST", authenticated: false });
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(unauthenticated.cacheControl, "private, no-store");
+  assert.equal(unauthenticated.probed, 0);
+  const admissions = await call({ method: "POST", roles: ["admissions"] });
+  assert.equal(admissions.status, 403);
+  assert.equal(admissions.cacheControl, "private, no-store");
+  assert.equal(admissions.probed, 0);
+});
+
+test("database role and schema probe rejects cross-origin and missing-origin writes", async () => {
+  const result = await call({ method: "POST", sameOrigin: false });
+  assert.equal(result.status, 403);
+  assert.equal(result.probed, 0);
+});
+
+test("database probe suppresses raw connection and catalog errors", async () => {
+  const result = await call({ method: "POST", failProbe: true });
+  assert.equal(result.status, 503);
+  assert.equal(result.cacheControl, "private, no-store");
+  assert.doesNotMatch(JSON.stringify(result.body), /synthetic-password|host\.internal|private-query/);
+  assert.equal(result.body.safeCode, "database_metadata_unavailable");
 });

@@ -805,3 +805,49 @@ test("explicit app mode requires the app group, a login, and a non-superuser rol
     );
   }
 });
+
+test("runtime role verifier supports an explicitly read-only diagnostic transaction", async () => {
+  const mode = resolveApplicationRuntimeMode({
+    DATABASE_URL: platformUrl,
+    [APP_DATABASE_URL_ENV]: appUrl,
+  });
+  const query = async () => ({
+    rows: [{
+      database_name: "heliumdb",
+      database_oid: "16384",
+      is_superuser: false,
+      can_login: true,
+      can_createdb: false,
+      can_createrole: false,
+      inherits: true,
+      bypass_rls: false,
+      in_recovery: false,
+      transaction_read_only: true,
+      other_group_member: false,
+      database_owner_member: false,
+      app_group_member: true,
+      app_group_exists: true,
+      app_group_can_login: false,
+      app_group_is_superuser: false,
+      app_group_can_createdb: false,
+      app_group_can_createrole: false,
+      app_group_inherits: false,
+      app_group_bypasses_rls: false,
+      app_group_has_parent_membership: false,
+      app_group_member_count: 1,
+      app_group_membership_admin_option: false,
+      owner_group_member: false,
+      migrator_group_member: false,
+      core_privileges_ok: true,
+      crm_assignment_read_only_ok: true,
+      assignment_function_execute: true,
+      schema_create: false,
+    }],
+  });
+  assert.deepEqual(await verifyApplicationRuntimePool(
+    { query } as never,
+    mode,
+    { databaseName: "heliumdb", databaseOid: "16384" },
+    { expectedTransactionReadOnly: true },
+  ), { status: "least_privilege_verified" });
+});

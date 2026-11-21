@@ -815,6 +815,10 @@ export async function verifyApplicationRuntimePool(
   pool: Pick<Pool, "query">,
   mode: ApplicationRuntimeMode,
   expectedIdentity?: ExpectedApplicationDatabaseIdentity,
+  options: {
+    expectedTransactionReadOnly?: boolean;
+    onQueryError?: (error: unknown) => void;
+  } = {},
 ): Promise<ApplicationRuntimeCheck> {
   if (mode.kind === "legacy") {
     return { status: "least_privilege_not_enabled" };
@@ -963,7 +967,8 @@ export async function verifyApplicationRuntimePool(
       LEFT JOIN pg_roles app_group ON app_group.rolname='aichm_app_runtime'
       WHERE d.datname=current_database()
     `));
-  } catch {
+  } catch (error) {
+    options.onQueryError?.(error);
     reject("APP_DATABASE_RUNTIME_IDENTITY_UNAVAILABLE");
   }
 
@@ -981,7 +986,7 @@ export async function verifyApplicationRuntimePool(
     !identity.inherits ||
     identity.bypass_rls ||
     identity.in_recovery ||
-    identity.transaction_read_only ||
+    identity.transaction_read_only !== (options.expectedTransactionReadOnly ?? false) ||
     identity.other_group_member ||
     identity.database_owner_member ||
     !identity.app_group_member ||
