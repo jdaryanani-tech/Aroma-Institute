@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { AlertTriangle, Check, RefreshCw, ShieldCheck } from "lucide-react";
 import {
   applyMetaDiagnosticToChecklist,
@@ -18,7 +18,28 @@ type IntegratedReadiness = {
   database: {
     hostPolicySatisfied: boolean;
     requiredTlsPolicySatisfied: boolean;
+    preflight?: {
+      platform: DatabaseConnectionPreflight;
+      application: DatabaseConnectionPreflight;
+      endpointDatabaseOptionsMatch: boolean;
+      distinctLoginConfigured: boolean;
+      rolePreflightChecked: boolean;
+      rolePreflightPassed: boolean;
+    };
   };
+};
+
+type DatabaseConnectionPreflight = {
+  configured: boolean;
+  parseable: boolean;
+  hostClassification:
+    | "approved_replit_managed_neon"
+    | "approved_internal_policy"
+    | "rejected"
+    | "unavailable";
+  hostPolicyPassed: boolean;
+  tlsEnabled: boolean;
+  tlsPolicyPassed: boolean;
 };
 
 type MetaDiagnostic = MetaDiagnosticSummary & {
@@ -210,6 +231,64 @@ export default function IntegrationReadinessPanel() {
               : ["Review the configured sslmode without weakening the existing TLS policy."],
           }} />
         </ul>
+        {data.database.preflight && <div className="integration-diagnostics-detail" data-testid="crm-database-startup-preflight">
+          <h4>Startup connection preflight</h4>
+          <p>Sanitized configuration checks only; no connection strings, usernames, passwords, or query values are shown.</p>
+          <ul className="integration-check-list">
+            {([
+              ["Platform database reference", data.database.preflight.platform],
+              ["Application database connection", data.database.preflight.application],
+            ] as const).map(([label, connection]) => <Fragment key={label}>
+              <CheckRow item={{
+                id: `${label}-host-policy`,
+                label: `${label}: approved host policy`,
+                status: connection.hostPolicyPassed ? "PASS" : "BLOCKED",
+                detail: `Classification: ${connection.hostClassification}; configured: ${connection.configured ? "yes" : "no"}; parseable: ${connection.parseable ? "yes" : "no"}.`,
+                requiredActions: connection.hostPolicyPassed ? [] : ["Check the configured endpoint against the existing host policy."],
+              }} />
+              <CheckRow item={{
+                id: `${label}-tls-policy`,
+                label: `${label}: TLS policy`,
+                status: connection.tlsPolicyPassed ? "PASS" : "BLOCKED",
+                detail: `TLS enabled: ${connection.tlsEnabled ? "yes" : "no"}.`,
+                requiredActions: connection.tlsPolicyPassed ? [] : ["Review the configured TLS mode without weakening the existing policy."],
+              }} />
+            </Fragment>)}
+            <CheckRow item={{
+              id: "database-endpoint-match",
+              label: "Endpoint, database, and options match",
+              status: data.database.preflight.endpointDatabaseOptionsMatch ? "PASS" : "BLOCKED",
+              detail: data.database.preflight.endpointDatabaseOptionsMatch
+                ? "The parsed platform and application endpoints match under the existing policy."
+                : "The endpoints are missing, invalid, or differ under the existing policy.",
+              requiredActions: data.database.preflight.endpointDatabaseOptionsMatch ? [] : ["Review endpoint/database/options alignment."],
+            }} />
+            <CheckRow item={{
+              id: "database-distinct-login",
+              label: "Distinct application login configured",
+              status: data.database.preflight.distinctLoginConfigured ? "PASS" : "BLOCKED",
+              detail: data.database.preflight.distinctLoginConfigured
+                ? "The application and platform logins are distinct."
+                : "A distinct application login is not confirmed.",
+              requiredActions: data.database.preflight.distinctLoginConfigured ? [] : ["Configure a distinct least-privilege application login."],
+            }} />
+            <CheckRow item={{
+              id: "database-role-preflight",
+              label: "Least-privilege role preflight",
+              status: !data.database.preflight.rolePreflightChecked
+                ? "NOT CHECKED"
+                : data.database.preflight.rolePreflightPassed ? "PASS" : "BLOCKED",
+              detail: !data.database.preflight.rolePreflightChecked
+                ? "The database role check has not run in this process."
+                : data.database.preflight.rolePreflightPassed
+                  ? "The startup role and privilege checks passed."
+                  : "The startup role or privilege checks failed.",
+              requiredActions: !data.database.preflight.rolePreflightChecked || data.database.preflight.rolePreflightPassed
+                ? []
+                : ["Review the safe startup failure code and role/grant preflight."],
+            }} />
+          </ul>
+        </div>}
       </section>}
 
       <div className="integration-readiness-actions">

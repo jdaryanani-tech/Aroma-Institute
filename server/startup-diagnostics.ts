@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import {
+  inspectApplicationDatabaseStartupPreflight,
+  type ApplicationDatabaseRolePreflightStatus,
+  type ApplicationDatabaseStartupPreflight,
+} from "./db/application-runtime-connection";
 
 export type StartupFailureStage = "module-load" | "server-start";
 
@@ -9,6 +14,7 @@ export type StartupFailureRecord = {
   errorClass: string;
   safeErrorCode?: string;
   stackFrames: string[];
+  databasePreflight?: ApplicationDatabaseStartupPreflight;
 };
 
 type ApplicationModule = {
@@ -19,6 +25,7 @@ type StartupDiagnosticsOptions = {
   correlationId?: string;
   logger?: (line: string) => void;
   setExitCode?: (code: number) => void;
+  environment?: Record<string, string | undefined>;
 };
 
 const SAFE_ERROR_CODES = new Set([
@@ -184,6 +191,7 @@ export function createStartupFailureRecord(
   stage: StartupFailureStage,
   error: unknown,
   correlationId: string = randomUUID(),
+  databasePreflight?: ApplicationDatabaseStartupPreflight,
 ): StartupFailureRecord {
   const safeCode = safeErrorCode(error);
   return {
@@ -193,7 +201,29 @@ export function createStartupFailureRecord(
     errorClass: errorClass(error),
     ...(safeCode ? { safeErrorCode: safeCode } : {}),
     stackFrames: safeStackFrames(error),
+    ...(databasePreflight ? { databasePreflight } : {}),
   };
+}
+
+function rolePreflightStatusFromError(error: unknown): ApplicationDatabaseRolePreflightStatus {
+  if (!error || typeof error !== "object") return { checked: false, passed: false };
+
+  try {
+    const raw = (error as {
+      applicationDatabaseRolePreflight?: unknown;
+    }).applicationDatabaseRolePreflight;
+    if (!raw || typeof raw !== "object") return { checked: false, passed: false };
+    const status = raw as Record<string, unknown>;
+    if (typeof status.checked !== "boolean" || typeof status.passed !== "boolean") {
+      return { checked: false, passed: false };
+    }
+    return {
+      checked: status.checked,
+      passed: status.checked && status.passed,
+    };
+  } catch {
+    return { checked: false, passed: false };
+  }
 }
 
 export async function runStartupWithDiagnostics(
@@ -211,6 +241,10 @@ export async function runStartupWithDiagnostics(
       stage,
       error,
       options.correlationId,
+      inspectApplicationDatabaseStartupPreflight(
+        options.environment ?? process.env,
+        rolePreflightStatusFromError(error),
+      ),
     );
     try {
       (options.logger ?? console.error)(JSON.stringify(record));

@@ -7,6 +7,7 @@ import {
   buildApplicationPoolConfig,
   classifyApplicationPreMigrationSqlError,
   inspectApplicationDatabaseEndpointPolicy,
+  inspectApplicationDatabaseStartupPreflight,
   resolveApplicationRuntimeMode,
   verifyApplicationPreMigrationPool,
   verifyApplicationRuntimePool,
@@ -79,6 +80,138 @@ test("endpoint readiness fails closed when either configured endpoint is absent 
     hostPolicySatisfied: false,
     requiredTlsPolicySatisfied: false,
   });
+});
+
+test("startup preflight reports only safe classes and booleans for matching Neon endpoints", () => {
+  const host = "ep-preflight-fixture.us-east-1.aws.neon.tech";
+  const platform = `postgresql://platform-user:platform-secret@${host}:5432/neondb?sslmode=require&application_name=platform`;
+  const app = `postgresql://app-user:app-secret@${host}:5432/neondb?sslmode=require&application_name=platform`;
+  const report = inspectApplicationDatabaseStartupPreflight({
+    DATABASE_URL: platform,
+    [APP_DATABASE_URL_ENV]: app,
+  }, { checked: true, passed: true });
+
+  assert.deepEqual(report, {
+    platform: {
+      configured: true,
+      parseable: true,
+      hostClassification: "approved_replit_managed_neon",
+      hostPolicyPassed: true,
+      tlsEnabled: true,
+      tlsPolicyPassed: true,
+    },
+    application: {
+      configured: true,
+      parseable: true,
+      hostClassification: "approved_replit_managed_neon",
+      hostPolicyPassed: true,
+      tlsEnabled: true,
+      tlsPolicyPassed: true,
+    },
+    endpointDatabaseOptionsMatch: true,
+    distinctLoginConfigured: true,
+    rolePreflightChecked: true,
+    rolePreflightPassed: true,
+  });
+
+  const serialized = JSON.stringify(report);
+  for (const sensitive of [
+    host, "platform-user", "platform-secret", "app-user", "app-secret",
+    "application_name",
+  ]) {
+    assert.equal(serialized.includes(sensitive), false);
+  }
+});
+
+test("startup preflight classifies internal, rejected, and unavailable endpoints safely", () => {
+  const internal = "postgresql://platform:platform-secret@helium/heliumdb?sslmode=disable";
+  const internalApp = "postgresql://app:app-secret@helium/heliumdb?sslmode=disable";
+  const acceptedInternal = inspectApplicationDatabaseStartupPreflight({
+    DATABASE_URL: internal,
+    [APP_DATABASE_URL_ENV]: internalApp,
+  });
+  assert.equal(acceptedInternal.platform.hostClassification, "approved_internal_policy");
+  assert.equal(acceptedInternal.application.hostClassification, "approved_internal_policy");
+  assert.equal(acceptedInternal.endpointDatabaseOptionsMatch, true);
+  assert.equal(acceptedInternal.distinctLoginConfigured, true);
+
+  const rejectedHost = "public.invalid.example";
+  const rejectedUrl = `postgresql://runtime:secret@${rejectedHost}/heliumdb?sslmode=require`;
+  const rejected = inspectApplicationDatabaseStartupPreflight({
+    DATABASE_URL: rejectedUrl,
+    [APP_DATABASE_URL_ENV]: rejectedUrl,
+  });
+  assert.equal(rejected.platform.hostClassification, "rejected");
+  assert.equal(rejected.platform.hostPolicyPassed, false);
+  assert.equal(rejected.endpointDatabaseOptionsMatch, true);
+
+  const missing = inspectApplicationDatabaseStartupPreflight({ NODE_ENV: "production" });
+  assert.equal(missing.platform.hostClassification, "unavailable");
+  assert.equal(missing.application.hostClassification, "unavailable");
+  assert.equal(missing.endpointDatabaseOptionsMatch, false);
+  assert.equal(missing.distinctLoginConfigured, false);
+  assert.equal(missing.rolePreflightChecked, false);
+  assert.equal(missing.rolePreflightPassed, false);
+
+  for (const serialized of [JSON.stringify(rejected), JSON.stringify(missing)]) {
+    for (const sensitive of [rejectedHost, "runtime", "secret", "postgresql://"]) {
+      assert.equal(serialized.includes(sensitive), false);
+    }
+  }
+});
+
+test("startup preflight distinguishes endpoint, option, login, TLS, and role failures", () => {
+  const neon = "ep-preflight-failure.us-east-1.aws.neon.tech";
+  const validPlatform = `postgresql://platform:secret@${neon}:5432/neondb?sslmode=require`;
+  const cases = [
+    {
+      name: "missing TLS",
+      app: `postgresql://app:secret@${neon}:5432/neondb`,
+      match: false,
+      distinct: true,
+      tls: false,
+    },
+    {
+      name: "different database",
+      app: `postgresql://app:secret@${neon}:5432/otherdb?sslmode=require`,
+      match: false,
+      distinct: true,
+      tls: true,
+    },
+    {
+      name: "different options",
+      app: `postgresql://app:secret@${neon}:5432/neondb?sslmode=require&application_name=other`,
+      match: false,
+      distinct: true,
+      tls: true,
+    },
+    {
+      name: "same login",
+      app: `postgresql://platform:another-secret@${neon}:5432/neondb?sslmode=require`,
+      match: true,
+      distinct: false,
+      tls: true,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const report = inspectApplicationDatabaseStartupPreflight({
+      DATABASE_URL: validPlatform,
+      [APP_DATABASE_URL_ENV]: scenario.app,
+    });
+    assert.equal(report.endpointDatabaseOptionsMatch, scenario.match, scenario.name);
+    assert.equal(report.distinctLoginConfigured, scenario.distinct, scenario.name);
+    assert.equal(report.application.tlsEnabled, scenario.tls, scenario.name);
+    assert.equal(report.application.tlsPolicyPassed, scenario.tls, scenario.name);
+  }
+
+  const unparseable = inspectApplicationDatabaseStartupPreflight({
+    DATABASE_URL: validPlatform,
+    [APP_DATABASE_URL_ENV]: "not-a-database-url",
+  });
+  assert.equal(unparseable.application.parseable, false);
+  assert.equal(unparseable.application.hostClassification, "unavailable");
+  assert.equal(unparseable.endpointDatabaseOptionsMatch, false);
 });
 
 test("Development without the explicit app URL retains legacy behavior and flags it", async () => {

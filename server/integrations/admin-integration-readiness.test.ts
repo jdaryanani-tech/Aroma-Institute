@@ -7,7 +7,10 @@ import {
   ADMIN_INTEGRATION_READINESS_PATH,
   registerAdminIntegrationReadinessRoute,
 } from "./admin-integration-readiness";
-import { inspectApplicationDatabaseEndpointPolicy } from "../db/application-runtime-connection";
+import {
+  inspectApplicationDatabaseEndpointPolicy,
+  inspectApplicationDatabaseStartupPreflight,
+} from "../db/application-runtime-connection";
 
 async function call(options: {
   roles?: string[];
@@ -36,7 +39,15 @@ async function call(options: {
       return {
         crm: { ready: true },
         ...(options.databaseEnvironment
-          ? { database: inspectApplicationDatabaseEndpointPolicy(options.databaseEnvironment) }
+          ? {
+              database: {
+                ...inspectApplicationDatabaseEndpointPolicy(options.databaseEnvironment),
+                preflight: inspectApplicationDatabaseStartupPreflight(
+                  options.databaseEnvironment,
+                  { checked: true, passed: false },
+                ),
+              },
+            }
           : {}),
         avni: { dispatchHardDisabled: true },
         meta: { pageIdentity: "not_checked" },
@@ -102,6 +113,28 @@ test("database endpoint diagnostics remain admin-only and expose booleans only",
   assert.deepEqual(admin.body.database, {
     hostPolicySatisfied: true,
     requiredTlsPolicySatisfied: false,
+    preflight: {
+      platform: {
+        configured: true,
+        parseable: true,
+        hostClassification: "approved_replit_managed_neon",
+        hostPolicyPassed: true,
+        tlsEnabled: true,
+        tlsPolicyPassed: true,
+      },
+      application: {
+        configured: true,
+        parseable: true,
+        hostClassification: "approved_replit_managed_neon",
+        hostPolicyPassed: true,
+        tlsEnabled: false,
+        tlsPolicyPassed: false,
+      },
+      endpointDatabaseOptionsMatch: false,
+      distinctLoginConfigured: true,
+      rolePreflightChecked: true,
+      rolePreflightPassed: false,
+    },
   });
   const responseText = JSON.stringify(admin.body);
   for (const sensitive of [host, "fixture-platform", "fixture-app", "NEVER_RETURN"]) {

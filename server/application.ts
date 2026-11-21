@@ -3,7 +3,10 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { applicationRuntimeMode, pool } from "./db";
-import { verifyApplicationRuntimePool } from "./db/application-runtime-connection";
+import {
+  verifyApplicationRuntimePool,
+  type ApplicationDatabaseRolePreflightStatus,
+} from "./db/application-runtime-connection";
 import {
   logMetaWebhookUnhandledError,
   metaWebhookBodyParserDiagnostic,
@@ -27,9 +30,39 @@ function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+function attachDatabaseRolePreflight(
+  error: unknown,
+  status: ApplicationDatabaseRolePreflightStatus,
+): unknown {
+  const target = error && typeof error === "object"
+    ? error
+    : new Error("Application startup failed");
+  try {
+    Object.defineProperty(target, "applicationDatabaseRolePreflight", {
+      configurable: true,
+      enumerable: false,
+      value: { checked: status.checked, passed: status.checked && status.passed },
+    });
+    return target;
+  } catch {
+    const safeError = new Error("Application startup failed") as Error & {
+      applicationDatabaseRolePreflight: ApplicationDatabaseRolePreflightStatus;
+    };
+    safeError.applicationDatabaseRolePreflight = {
+      checked: status.checked,
+      passed: status.checked && status.passed,
+    };
+    return safeError;
+  }
+}
+
 export async function startApplication(): Promise<void> {
   const app = express();
   const httpServer = createServer(app);
+  let databaseRolePreflight: ApplicationDatabaseRolePreflightStatus = {
+    checked: false,
+    passed: false,
+  };
 
   app.use(metaWebhookRequestIdMiddleware);
 
@@ -59,10 +92,14 @@ export async function startApplication(): Promise<void> {
   });
 
   try {
+    databaseRolePreflight.checked = applicationRuntimeMode.kind === "least_privilege";
     const databaseReadiness = await verifyApplicationRuntimePool(
       pool,
       applicationRuntimeMode,
     );
+    databaseRolePreflight.passed =
+      databaseRolePreflight.checked &&
+      databaseReadiness.status === "least_privilege_verified";
     if (process.env.NODE_ENV === "production"
       && databaseReadiness.status !== "least_privilege_verified") {
       const error = new Error("APP_DATABASE_RUNTIME_PRIVILEGES_NOT_READY") as Error & { code: string };
@@ -123,6 +160,6 @@ export async function startApplication(): Promise<void> {
     });
   } catch (error) {
     await pool.end().catch(() => undefined);
-    throw error;
+    throw attachDatabaseRolePreflight(error, databaseRolePreflight);
   }
 }

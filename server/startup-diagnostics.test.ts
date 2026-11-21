@@ -168,3 +168,142 @@ test("outer wrapper reports server-start failures and leaves successful startup 
   assert.deepEqual(lines, []);
   assert.deepEqual(exitCodes, []);
 });
+
+test("startup failure logs a redacted database preflight before setting exit status", async () => {
+  const order: string[] = [];
+  const lines: string[] = [];
+  const environment = {
+    NODE_ENV: "production",
+    DATABASE_URL: "postgresql://platform-user:PLATFORM_SECRET@ep-startup.us-east-1.aws.neon.tech:5432/db?sslmode=require&token=PLATFORM_QUERY_SECRET",
+    AICHM_APP_DATABASE_URL: "postgresql://app-user:APP_SECRET@ep-startup.us-east-1.aws.neon.tech:5432/db?sslmode=require&token=APP_QUERY_SECRET",
+  };
+
+  await runStartupWithDiagnostics(
+    async () => {
+      throw Object.assign(new Error("private database startup detail"), {
+        code: "APP_DATABASE_ENDPOINT_MISMATCH",
+      });
+    },
+    {
+      correlationId: "safe-db-preflight",
+      environment,
+      logger: line => {
+        order.push("log");
+        lines.push(line);
+      },
+      setExitCode: code => {
+        assert.equal(code, 1);
+        order.push("exit");
+      },
+    },
+  );
+
+  assert.deepEqual(order, ["log", "exit"]);
+  assert.equal(lines.length, 1);
+  const record = JSON.parse(lines[0]);
+  assert.equal(record.safeErrorCode, "APP_DATABASE_ENDPOINT_MISMATCH");
+  assert.deepEqual(record.databasePreflight, {
+    platform: {
+      configured: true,
+      parseable: true,
+      hostClassification: "approved_replit_managed_neon",
+      hostPolicyPassed: true,
+      tlsEnabled: true,
+      tlsPolicyPassed: true,
+    },
+    application: {
+      configured: true,
+      parseable: true,
+      hostClassification: "approved_replit_managed_neon",
+      hostPolicyPassed: true,
+      tlsEnabled: true,
+      tlsPolicyPassed: true,
+    },
+    endpointDatabaseOptionsMatch: false,
+    distinctLoginConfigured: true,
+    rolePreflightChecked: false,
+    rolePreflightPassed: false,
+  });
+  for (const sensitive of [
+    "platform-user", "PLATFORM_SECRET", "app-user", "APP_SECRET",
+    "PLATFORM_QUERY_SECRET", "APP_QUERY_SECRET", "private database startup detail",
+    "ep-startup.us-east-1.aws.neon.tech", "postgresql://",
+  ]) {
+    assert.equal(lines[0].includes(sensitive), false);
+  }
+});
+
+test("startup log reports a failed database role preflight only as booleans", async () => {
+  const lines: string[] = [];
+  await runStartupWithDiagnostics(
+    async () => ({
+      startApplication: async () => {
+        throw Object.assign(new Error("role details not safe to log"), {
+          code: "APP_DATABASE_RUNTIME_PRIVILEGES_NOT_READY",
+          applicationDatabaseRolePreflight: { checked: true, passed: false },
+        });
+      },
+    }),
+    {
+      correlationId: "role-preflight-failure",
+      environment: {
+        NODE_ENV: "production",
+        DATABASE_URL: "postgresql://platform:secret@helium/heliumdb",
+        AICHM_APP_DATABASE_URL: "postgresql://app:secret@helium/heliumdb",
+      },
+      logger: line => lines.push(line),
+      setExitCode: () => undefined,
+    },
+  );
+
+  const record = JSON.parse(lines[0]);
+  assert.equal(record.safeErrorCode, "APP_DATABASE_RUNTIME_PRIVILEGES_NOT_READY");
+  assert.equal(record.databasePreflight.rolePreflightChecked, true);
+  assert.equal(record.databasePreflight.rolePreflightPassed, false);
+  assert.equal(lines[0].includes("role details not safe to log"), false);
+  assert.equal(lines[0].includes("postgresql://"), false);
+  assert.equal(lines[0].includes("secret"), false);
+});
+
+test("legacy endpoint-policy startup failure reports rejected host without endpoint details", async () => {
+  const lines: string[] = [];
+  const exitOrder: string[] = [];
+  const rejectedEndpoint = "public-host.invalid.example";
+
+  await runStartupWithDiagnostics(
+    async () => {
+      throw Object.assign(new Error("connection policy rejected a sensitive endpoint"), {
+        code: "APP_DATABASE_ENDPOINT_NOT_INTERNAL",
+      });
+    },
+    {
+      correlationId: "legacy-host-policy-failure",
+      environment: {
+        NODE_ENV: "production",
+        DATABASE_URL: `postgresql://platform-user:PLATFORM_SECRET@${rejectedEndpoint}/database?token=SHARED_TOKEN`,
+        AICHM_APP_DATABASE_URL: `postgresql://app-user:APP_SECRET@${rejectedEndpoint}/database?token=SHARED_TOKEN`,
+      },
+      logger: line => {
+        lines.push(line);
+        exitOrder.push("log");
+      },
+      setExitCode: () => exitOrder.push("exit"),
+    },
+  );
+
+  assert.deepEqual(exitOrder, ["log", "exit"]);
+  assert.equal(lines.length, 1);
+  const record = JSON.parse(lines[0]);
+  assert.equal(record.safeErrorCode, "APP_DATABASE_ENDPOINT_NOT_INTERNAL");
+  assert.equal(record.databasePreflight.platform.hostClassification, "rejected");
+  assert.equal(record.databasePreflight.application.hostClassification, "rejected");
+  assert.equal(record.databasePreflight.endpointDatabaseOptionsMatch, true);
+  assert.equal(record.databasePreflight.distinctLoginConfigured, true);
+  for (const sensitive of [
+    rejectedEndpoint, "platform-user", "PLATFORM_SECRET", "app-user",
+    "APP_SECRET", "SHARED_TOKEN", "connection policy",
+    "postgresql://",
+  ]) {
+    assert.equal(lines[0].includes(sensitive), false);
+  }
+});

@@ -254,10 +254,113 @@ export type ApplicationDatabaseEndpointPolicyReadiness = {
   requiredTlsPolicySatisfied: boolean;
 };
 
+export type ApplicationDatabaseHostClassification =
+  | "approved_replit_managed_neon"
+  | "approved_internal_policy"
+  | "rejected"
+  | "unavailable";
+
+export type ApplicationDatabaseConnectionPreflight = {
+  configured: boolean;
+  parseable: boolean;
+  hostClassification: ApplicationDatabaseHostClassification;
+  hostPolicyPassed: boolean;
+  tlsEnabled: boolean;
+  tlsPolicyPassed: boolean;
+};
+
+export type ApplicationDatabaseStartupPreflight = {
+  platform: ApplicationDatabaseConnectionPreflight;
+  application: ApplicationDatabaseConnectionPreflight;
+  endpointDatabaseOptionsMatch: boolean;
+  distinctLoginConfigured: boolean;
+  rolePreflightChecked: boolean;
+  rolePreflightPassed: boolean;
+};
+
+export type ApplicationDatabaseRolePreflightStatus = {
+  checked: boolean;
+  passed: boolean;
+};
+
+function classifyApplicationDatabaseHost(
+  endpoint: Endpoint | null,
+): ApplicationDatabaseHostClassification {
+  if (!endpoint) return "unavailable";
+  if (isReplitManagedNeonHost(endpoint.host)) return "approved_replit_managed_neon";
+  if (isAllowedDatabaseHost(endpoint.host)) return "approved_internal_policy";
+  return "rejected";
+}
+
+function tlsIsExplicitlyEnabled(endpoint: Endpoint | null): boolean {
+  return Boolean(
+    endpoint &&
+    endpoint.sslModeEntries.length === 1 &&
+    ["require", "verify-ca", "verify-full"].includes(endpoint.sslModeEntries[0]),
+  );
+}
+
+function connectionPreflight(
+  raw: string | undefined,
+  label: "app" | "platform",
+): {
+  endpoint: ReturnType<typeof endpointFrom> | null;
+  report: ApplicationDatabaseConnectionPreflight;
+} {
+  const endpoint = endpointForReadiness(raw, label);
+  const hostClassification = classifyApplicationDatabaseHost(endpoint);
+  return {
+    endpoint,
+    report: {
+      configured: Boolean(raw?.trim()),
+      parseable: endpoint !== null,
+      hostClassification,
+      hostPolicyPassed: hostClassification === "approved_replit_managed_neon" ||
+        hostClassification === "approved_internal_policy",
+      tlsEnabled: tlsIsExplicitlyEnabled(endpoint),
+      tlsPolicyPassed: endpoint !== null && hasRequiredManagedNeonTls(endpoint),
+    },
+  };
+}
+
+/**
+ * Safe, connection-free startup summary. It intentionally reports only
+ * booleans and coarse host classes; parsed URL components and parser errors
+ * are never included.
+ */
+export function inspectApplicationDatabaseStartupPreflight(
+  environment: Record<string, string | undefined>,
+  rolePreflight: ApplicationDatabaseRolePreflightStatus = { checked: false, passed: false },
+): ApplicationDatabaseStartupPreflight {
+  const platform = connectionPreflight(environment[PLATFORM_DATABASE_URL_ENV], "platform");
+  const application = connectionPreflight(environment[APP_DATABASE_URL_ENV], "app");
+  const endpointDatabaseOptionsMatch = Boolean(
+    platform.endpoint &&
+    application.endpoint &&
+    platform.endpoint.host === application.endpoint.host &&
+    platform.endpoint.port === application.endpoint.port &&
+    platform.endpoint.database === application.endpoint.database &&
+    JSON.stringify(platform.endpoint.queryPolicy) === JSON.stringify(application.endpoint.queryPolicy),
+  );
+
+  return {
+    platform: platform.report,
+    application: application.report,
+    endpointDatabaseOptionsMatch,
+    distinctLoginConfigured: Boolean(
+      platform.endpoint &&
+      application.endpoint &&
+      platform.endpoint.user !== application.endpoint.user,
+    ),
+    rolePreflightChecked: rolePreflight.checked === true,
+    rolePreflightPassed: rolePreflight.checked === true && rolePreflight.passed === true,
+  };
+}
+
 function endpointForReadiness(
   raw: string | undefined,
   label: "app" | "platform",
-): Endpoint | null {
+): ReturnType<typeof endpointFrom> | null {
   try {
     return endpointFrom(raw, label);
   } catch {
