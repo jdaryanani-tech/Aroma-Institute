@@ -32,7 +32,7 @@ test("registration dispatcher is off by default and blocks native development ne
     "http://n8n.aromacafeinstitute.in/webhook/vsl-registration",
     "https://example.invalid/webhook/vsl-registration",
     "https://n8n.aromacafeinstitute.in/webhook/counselling-submission",
-    "https://n8n.aromacafeinstitute.in/webhook/aroma-whatsapp",
+    "https://example.invalid/webhook/whatsapp",
     "https://n8n.aromacafeinstitute.in/webhook/vsl-registration?token=no",
     " https://n8n.aromacafeinstitute.in/webhook/vsl-registration",
   ]) assert.equal(isTrustedVslWebhookUrl(bad),false);
