@@ -1,10 +1,45 @@
-node_modules
-dist
+# Dependencies and build/test output
+node_modules/
+dist/
 generated-artifacts/
 .local/aichm-backup-export/
 /playwright-report/
 /test-results/
-.DS_Store
-server/public
+server/public/
 vite.config.ts.*
+
+# Local environment files; keep the sanitized template tracked
+.env
+.env.*
+!.env.example
+
+# Private keys, certificates, and local credential stores
+*.pem
+*.key
+*.p8
+*.pk8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+*.der
+id_rsa
+id_ecdsa
+id_ed25519
+id_dsa
+
+# Local database/backup artifacts
+*.sql.gz
+*.dump
+*.dump.gz
+*.pgdump
+*.backup
+*.backup.*
+*.bak
+*.sqlite
+*.sqlite3
 *.tar.gz
+
+.DS_Store

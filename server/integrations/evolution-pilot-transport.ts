@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const AVNI_PILOT_MESSAGE = "Hi Jigar Welcome to Aroma Institute";
+export const AVNI_PILOT_MESSAGE = "Hello, welcome to Aroma Institute.";
 export const AVNI_PILOT_TIMEOUT_MS = 8_000;
 export const EVOLUTION_API_BASE_URL = "https://evo.aromacafeinstitute.in";
 export const EVOLUTION_API_KEY_ENV = "EVOLUTION_API_KEY";

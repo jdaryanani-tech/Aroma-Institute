@@ -6,19 +6,28 @@ import { db } from "../db";
 import { lmsAuditLogs, lmsAuthRateLimits, lmsUserRoles, lmsUsers } from "@shared/lms-schema";
 import { issueLmsPasswordSetupLinkInTransaction } from "./password-auth";
 
-const OWNER_PHONE = "+919687878669";
-const MASKED_OWNER = "***8669";
+const OWNER_PHONE_ENV = "ADMIN_BOOTSTRAP_OWNER_PHONE_E164";
 const ORIGIN = "https://aromacafeinstitute.in";
 const COMPLETE = "bootstrap.first_owner_created";
 const LOCKED = "bootstrap.first_owner_locked";
 const permanentActions = [COMPLETE, LOCKED, "bootstrap.admin_created"];
 const bodySchema = z.object({
-  phone: z.literal(OWNER_PHONE), secret: z.string().min(1).max(128),
+  phone: z.string().regex(/^\+[1-9][0-9]{7,14}$/),
+  secret: z.string().min(1).max(128),
   confirmOwner: z.literal(true),
 }).strict();
 const WINDOW = 15 * 60 * 1000;
 type Database = typeof db;
-type Configuration = { production: boolean; secret: string | undefined };
+type Configuration = {
+  production: boolean;
+  secret: string | undefined;
+  ownerPhone?: string | undefined;
+};
+type EnabledConfiguration = {
+  secret: string;
+  ownerPhone: string;
+  maskedPhone: string;
+};
 
 export function validBootstrapSecret(secret: string | undefined): secret is string {
   return !!secret && /^[A-Za-z0-9_-]{43,128}$/.test(secret) && new Set(secret).size >= 12;
@@ -43,24 +52,38 @@ export function registerFirstOwnerRoutes(app: Express, options: {
   const configuration = options.configuration ?? (() => ({
     production: process.env.NODE_ENV === "production",
     secret: process.env.ADMIN_BOOTSTRAP_SECRET,
+    ownerPhone: process.env[OWNER_PHONE_ENV],
   }));
   const configured = () => {
     const config = configuration();
-    return config.production && validBootstrapSecret(config.secret) ? config.secret : null;
+    const ownerPhone = config.ownerPhone ?? process.env[OWNER_PHONE_ENV];
+    if (
+      !config.production ||
+      !validBootstrapSecret(config.secret) ||
+      typeof ownerPhone !== "string" ||
+      !/^\+[1-9][0-9]{7,14}$/.test(ownerPhone)
+    ) {
+      return null;
+    }
+    return {
+      secret: config.secret,
+      ownerPhone,
+      maskedPhone: `***${ownerPhone.slice(-4)}`,
+    } satisfies EnabledConfiguration;
   };
   const auditFailure = async (reason: string) => {
     await database.insert(lmsAuditLogs).values({
       action: "bootstrap.first_owner_failed", entityType: "first_owner_bootstrap",
-      metadata: { reason, maskedOwner: MASKED_OWNER },
+      metadata: { reason },
     });
   };
-  async function unavailable() {
+  async function unavailable(ownerPhone: string) {
     const [admin] = await database.select({ id: lmsUserRoles.userId }).from(lmsUserRoles)
       .where(eq(lmsUserRoles.role, "admin")).limit(1);
     const [marker] = await database.select({ id: lmsAuditLogs.id }).from(lmsAuditLogs)
       .where(inArray(lmsAuditLogs.action, permanentActions)).limit(1);
     const [owner] = await database.select({ id: lmsUsers.id }).from(lmsUsers)
-      .where(eq(lmsUsers.phoneE164, OWNER_PHONE)).limit(1);
+      .where(eq(lmsUsers.phoneE164, ownerPhone)).limit(1);
     return !!(admin || marker || owner);
   }
   const trustedHost = (req: Request) => req.secure && req.get("host") === new URL(ORIGIN).host;
@@ -90,11 +113,12 @@ export function registerFirstOwnerRoutes(app: Express, options: {
   app.use("/admin/first-owner", (_req, res, next) => { protectResponse(res); next(); });
   app.get("/api/admin/first-owner/status", async (req, res) => {
     protectResponse(res);
-    if (!configured() || !trustedHost(req) || Object.keys(req.query).length)
+    const setup = configured();
+    if (!setup || !trustedHost(req) || Object.keys(req.query).length)
       return res.status(404).json({ message: "First-owner setup is unavailable." });
     try {
-      if (await unavailable()) return res.status(404).json({ message: "First-owner setup is unavailable. Use administrator sign-in or recovery." });
-      return res.json({ available: true, maskedPhone: MASKED_OWNER });
+      if (await unavailable(setup.ownerPhone)) return res.status(404).json({ message: "First-owner setup is unavailable. Use administrator sign-in or recovery." });
+      return res.json({ available: true, maskedPhone: setup.maskedPhone });
     } catch {
       return res.status(503).json({ message: "Owner setup is temporarily unavailable. No changes were made." });
     }
@@ -102,8 +126,8 @@ export function registerFirstOwnerRoutes(app: Express, options: {
 
   app.post("/api/admin/first-owner", async (req, res) => {
     protectResponse(res);
-    const expected = configured();
-    if (!expected) return res.status(404).json({ message: "First-owner setup is unavailable." });
+    const setup = configured();
+    if (!setup) return res.status(404).json({ message: "First-owner setup is unavailable." });
     try {
       // Persistent rate limits are separate from ordinary password-login buckets.
       if (!await allowAttempt(req, res)) return;
@@ -113,14 +137,14 @@ export function registerFirstOwnerRoutes(app: Express, options: {
       }
       const suppliedSecret = typeof req.body?.secret === "string" && req.body.secret.length <= 128
         ? req.body.secret : "";
-      if (!matchSecret(suppliedSecret, expected)) {
+      if (!matchSecret(suppliedSecret, setup.secret)) {
         await auditFailure("verification_failed");
         return res.status(403).json({ message: "Owner verification failed. No account was changed." });
       }
       const parsed = bodySchema.safeParse(req.body);
-      if (!parsed.success) {
+      if (!parsed.success || parsed.data.phone !== setup.ownerPhone) {
         await auditFailure("invalid_request");
-        return res.status(400).json({ message: "Enter the approved owner phone ending 8669, confirm it, and supply the bootstrap secret." });
+        return res.status(400).json({ message: "Enter the approved owner phone, confirm it, and supply the bootstrap secret." });
       }
       const result = await database.transaction(async tx => {
         // Serialize bootstrap attempts, and block concurrent role writes until commit.
@@ -131,28 +155,28 @@ export function registerFirstOwnerRoutes(app: Express, options: {
           .where(inArray(lmsAuditLogs.action, permanentActions)).limit(1);
         if (admin || marker) {
           await tx.insert(lmsAuditLogs).values({ action: LOCKED, entityType: "first_owner_bootstrap",
-            metadata: { reason: "bootstrap_closed", maskedOwner: MASKED_OWNER } });
+            metadata: { reason: "bootstrap_closed" } });
           return { error: "First-owner setup is permanently closed. Use administrator sign-in or recovery." };
         }
         const [existing] = await tx.select({ id: lmsUsers.id }).from(lmsUsers)
-          .where(eq(lmsUsers.phoneE164, OWNER_PHONE)).limit(1);
+          .where(eq(lmsUsers.phoneE164, setup.ownerPhone)).limit(1);
         if (existing) {
           await tx.insert(lmsAuditLogs).values({ action: LOCKED, entityType: "first_owner_bootstrap",
-            metadata: { reason: "owner_already_exists", maskedOwner: MASKED_OWNER } });
-          return { error: "Owner account ***8669 already exists. It was not modified. Use administrator recovery." };
+            metadata: { reason: "owner_already_exists" } });
+          return { error: "The configured owner account already exists. It was not modified. Use administrator recovery." };
         }
         const [owner] = await tx.insert(lmsUsers).values({
-          phoneE164: OWNER_PHONE, displayName: "AICHM Owner", isActive: true,
+          phoneE164: setup.ownerPhone, displayName: "AICHM Owner", isActive: true,
         }).returning({ id: lmsUsers.id });
         await tx.insert(lmsUserRoles).values({ userId: owner.id, role: "admin" });
-        const setup = await issueLmsPasswordSetupLinkInTransaction(tx, owner.id);
+        const passwordSetup = await issueLmsPasswordSetupLinkInTransaction(tx, owner.id);
         await tx.insert(lmsAuditLogs).values({
           actorId: owner.id, action: COMPLETE, entityType: "user", entityId: String(owner.id),
-          metadata: { maskedOwner: MASKED_OWNER, method: "secret_protected_first_owner",
-            setupExpiresAt: setup.expiresAt.toISOString() },
+          metadata: { method: "secret_protected_first_owner",
+            setupExpiresAt: passwordSetup.expiresAt.toISOString() },
         });
-        return { setupUrl: `${ORIGIN}${setup.setupPath}`, expiresAt: setup.expiresAt.toISOString(),
-          maskedPhone: MASKED_OWNER };
+        return { setupUrl: `${ORIGIN}${passwordSetup.setupPath}`, expiresAt: passwordSetup.expiresAt.toISOString(),
+          maskedPhone: `***${setup.ownerPhone.slice(-4)}` };
       });
       if ("error" in result) return res.status(409).json({ message: result.error });
       return res.status(201).json(result);
