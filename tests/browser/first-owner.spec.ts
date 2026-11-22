@@ -9,16 +9,16 @@ test("Chromium: first-owner setup stays disabled in workspace",async({page})=>{
 
 test("Chromium: private owner setup submits once and never stores inputs or setup URL",async({page})=>{
   await page.setViewportSize({width:390,height:844});
-  await page.route("**/api/admin/first-owner/status",route=>route.fulfill({json:{available:true,maskedPhone:"***8669"}}));
+  await page.route("**/api/admin/first-owner/status",route=>route.fulfill({json:{available:true}}));
   let posts=0;let release!:()=>void;
   const pending=new Promise<void>(resolve=>{release=resolve;});
   await page.route("**/api/admin/first-owner",async route=>{
     posts++;
     expect(route.request().method()).toBe("POST");
     expect(new URL(route.request().url()).search).toBe("");
-    expect(route.request().postDataJSON()).toEqual({phone:"+919687878669",secret:"synthetic-browser-secret",confirmOwner:true});
+    expect(route.request().postDataJSON()).toEqual({phone:"+12025550123",secret:"synthetic-browser-secret",confirmOwner:true});
     await pending;
-    await route.fulfill({status:201,json:{maskedPhone:"***8669",expiresAt:"2026-11-06T12:00:00Z",
+    await route.fulfill({status:201,json:{expiresAt:"2026-11-06T12:00:00Z",
       setupUrl:"https://aromacafeinstitute.in/learn/setup#token=synthetic-browser-token-not-valid"}});
   });
   await page.goto("/admin/first-owner");
@@ -29,7 +29,7 @@ test("Chromium: private owner setup submits once and never stores inputs or setu
   const submit=page.getByRole("button",{name:"Create one-time owner link"});
   await expect(submit).toBeDisabled();
   await page.screenshot({path:"generated-artifacts/first-owner-mobile.png"});
-  await page.getByLabel("Approved owner phone",{exact:true}).fill("+919687878669");
+  await page.getByLabel("Approved owner phone",{exact:true}).fill("+12025550123");
   await secret.fill("synthetic-browser-secret");
   await expect(submit).toBeDisabled();
   await page.getByRole("checkbox").check();
@@ -50,10 +50,10 @@ test("Chromium: private owner setup submits once and never stores inputs or setu
 });
 
 test("Chromium: rejected owner verification clears private inputs",async({page})=>{
-  await page.route("**/api/admin/first-owner/status",route=>route.fulfill({json:{available:true,maskedPhone:"***8669"}}));
+  await page.route("**/api/admin/first-owner/status",route=>route.fulfill({json:{available:true}}));
   await page.route("**/api/admin/first-owner",route=>route.fulfill({status:403,json:{message:"Owner verification failed. No account was changed."}}));
   await page.goto("/admin/first-owner");
-  await page.getByLabel("Approved owner phone",{exact:true}).fill("+919687878669");
+  await page.getByLabel("Approved owner phone",{exact:true}).fill("+12025550123");
   await page.getByLabel("Bootstrap secret",{exact:true}).fill("synthetic-wrong-secret");
   await page.getByRole("checkbox").check();
   await page.getByRole("button",{name:"Create one-time owner link"}).click();

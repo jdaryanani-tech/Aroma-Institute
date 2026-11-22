@@ -6,17 +6,22 @@ No production account, credential, schema, workflow or secret was changed.
 
 ## Owner release steps
 
-1. In Replit Secrets, configure **ADMIN_BOOTSTRAP_SECRET** for the production runtime.
+1. In Replit Secrets, configure **ADMIN_BOOTSTRAP_OWNER_PHONE_E164** and
+   **ADMIN_BOOTSTRAP_SECRET** for the production runtime. Set the phone secret
+   to the approved owner's exact E.164 number; do not put it in source, docs,
+   local examples, chat, command history or logs.
    Use a password manager to generate a cryptographically random 64-character hex
-   value (32 random bytes). Keep it private: never paste it into chat, a URL,
-   command history or logs. No example secret is supplied here.
+   bootstrap-secret value (32 random bytes). Keep it private: never paste it into
+   chat, a URL, command history or logs. No example secret is supplied here.
    The server accepts only 43–128 URL-safe ASCII characters with at least 12
-   distinct characters; missing, malformed or weak configuration stays disabled.
+   distinct characters; the owner phone must be valid E.164. Missing or malformed
+   configuration stays disabled.
 2. Review and publish the code yourself. No migration is needed for this feature.
 3. Open **https://aromacafeinstitute.in/admin/first-owner** on the main domain,
    not the workspace preview or a secondary hostname.
-4. Privately enter the approved owner's complete E.164 phone, enter the temporary
-   secret, and check the confirmation for **\*\*\*8669**. No other phone is eligible.
+4. Privately enter the exact owner phone configured in Replit Secrets, enter the
+   temporary secret, and confirm setup for the configured owner account. No other
+   phone is eligible.
 5. Submit once. The successful response shows the private HTTPS setup URL and its
    expiry. Copy it privately before leaving. It is shown only once and is not
    recoverable from the database: only its hash is stored.
@@ -43,17 +48,18 @@ is required if there is no other functioning admin.
 - Provision: `POST /api/admin/first-owner`.
 - POST body: `{phone: "<exact approved E.164>", secret: "<private value>", confirmOwner: true}`.
   Phone/secret are typed privately, never prefilled and never accepted via query.
-- Success 201: `{maskedPhone: "***8669", setupUrl: "<private HTTPS URL>", expiresAt: "<ISO timestamp>"}`.
+- Success 201: `{maskedPhone: "<server-derived mask>", setupUrl: "<private HTTPS URL>", expiresAt: "<ISO timestamp>"}`.
 - The production runtime uses the app's shared database pool backed by
   `AICHM_APP_DATABASE_URL`, the required least-privilege Production login. It
   does not accept a caller-supplied database or fall back to `DATABASE_URL`.
-- Requires production mode, valid secret configuration, HTTPS, canonical main host,
-  exact same-origin POST, exact owner phone and explicit confirmation.
+- Requires production mode, valid bootstrap-secret and owner-phone configuration,
+  HTTPS, canonical main host, exact same-origin POST, exact configured owner phone
+  and explicit confirmation.
 - No secret: 404. Wrong secret/origin: 403. Authorized but wrong phone/confirmation:
   400. Already closed/existing owner: 409. Rate limit: 429. Database failure: 503.
 - Before creation, persistent limits allow five POST attempts per IP and 30
   globally per 15 minutes. Separate hashed buckets do not alter normal login limits.
-- Failure audits contain static reasons and masked owner only; no submitted phone,
+- Failure audits contain static reason codes only; no submitted or configured phone,
   IP, secret, setup URL, token or credential. Throttle audit entries are bounded;
   further throttled requests remain counted in the persistent limiter.
 - All page/API responses are private/no-store with no-referrer and noindex headers.
@@ -64,8 +70,9 @@ is required if there is no other functioning admin.
 
 An advisory transaction lock serializes requests. A role-table lock prevents
 concurrent role writes while checking for zero admins (including inactive admins).
-The existing owner phone must also be absent. Existing accounts are never
-promoted, activated or reset by this flow. The student ending 6789 is untouched.
+The configured owner phone must also be absent. Existing accounts are never
+promoted, activated or reset by this flow. Other student records and tokens are
+untouched.
 
 In a single transaction, create the new active `lms_users` row with null
 `password_hash`, add its admin `lms_user_roles` row, issue the existing password
@@ -89,12 +96,9 @@ tables/columns.
 
 ## Safe verification
 
-Workspace results: TypeScript and production build passed. Default tests passed
-45 checks with six expected opt-in integration skips. The isolated first-owner
-suite passed both tests with no skips; the existing password/session integration
-passed separately in that same disposable cluster. Three targeted Chromium
-scenarios passed (the disabled-page assertion was corrected to distinguish its
-two sign-in links). No live bootstrap request was submitted.
+The default test command runs unit and mocked route tests; database/browser
+integration suites are opt-in and must use their isolated harnesses. Test output
+is not evidence of Production database or deployment readiness.
 
 - `npm run test:first-owner`: creates a new socket-only PostgreSQL cluster in
   ignored generated-artifacts, checks its identity, uses fixtures only, then removes

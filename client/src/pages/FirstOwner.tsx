@@ -3,16 +3,12 @@ import { Link } from "wouter";
 
 type Availability = {
   available: boolean;
-  maskedPhone?: string;
 };
 
 type SetupResult = {
   setupUrl: string;
   expiresAt: string;
-  maskedPhone: string;
 };
-
-const FALLBACK_PHONE = "***8669";
 
 async function readSafeMessage(response: Response, fallback: string) {
   try {
@@ -33,7 +29,6 @@ async function readSafeMessage(response: Response, fallback: string) {
 
 export default function FirstOwner() {
   const [availability, setAvailability] = useState<"checking" | "available" | "unavailable">("checking");
-  const [maskedPhone, setMaskedPhone] = useState(FALLBACK_PHONE);
   const [phone, setPhone] = useState("");
   const [secret, setSecret] = useState("");
   const [confirmed, setConfirmed] = useState(false);
@@ -64,9 +59,6 @@ export default function FirstOwner() {
           "available" in body &&
           body.available === true
         ) {
-          if ("maskedPhone" in body && typeof body.maskedPhone === "string") {
-            setMaskedPhone(body.maskedPhone);
-          }
           setAvailability("available");
         } else {
           setAvailability("unavailable");
@@ -115,14 +107,11 @@ export default function FirstOwner() {
           "setupUrl" in body &&
           typeof body.setupUrl === "string" &&
           "expiresAt" in body &&
-          typeof body.expiresAt === "string" &&
-          "maskedPhone" in body &&
-          typeof body.maskedPhone === "string"
+          typeof body.expiresAt === "string"
         ) {
           setResult({
             setupUrl: body.setupUrl,
             expiresAt: body.expiresAt,
-            maskedPhone: body.maskedPhone,
           });
         } else {
           setError("Setup could not be completed. Please try again later.");
@@ -255,7 +244,7 @@ export default function FirstOwner() {
                     onChange={(event) => setConfirmed(event.target.checked)}
                     disabled={disabled}
                   />
-                  <span>I confirm I am the institute founder and approve setup for <strong className="font-semibold text-[#eed08e]">{maskedPhone}</strong> only.</span>
+                  <span>I confirm I am the institute founder and approve setup for the configured owner account only.</span>
                 </label>
 
                 <button
@@ -274,7 +263,7 @@ export default function FirstOwner() {
               <div className="rounded-xl border border-[#8eaa80]/35 bg-[#263023] p-4" role="status">
                 <p className="font-semibold text-[#c4d5b6]">Owner setup link is ready</p>
                 <p className="mt-1.5 text-sm leading-6 text-[#c0c9b8]">
-                  This link is shown only once and expires in 24 hours. Share it privately with {result.maskedPhone}. Remove <code className="rounded bg-black/20 px-1.5 py-0.5 text-xs">ADMIN_BOOTSTRAP_SECRET</code> after successful setup.
+                  This link is shown only once and expires in 24 hours. Share it privately with the configured owner. Remove <code className="rounded bg-black/20 px-1.5 py-0.5 text-xs">ADMIN_BOOTSTRAP_SECRET</code> after successful setup.
                 </p>
               </div>
               <label className="mb-2 mt-5 block text-sm font-medium text-[#e9e1d2]" htmlFor="owner-setup-url">Private setup link</label>

@@ -28,7 +28,8 @@ test("first-owner isolated SQL/HTTP: production gating, audit, races, rollback, 
   assert.ok(parsed.searchParams.get("host")?.includes("/generated-artifacts/first-owner-db-"));
   assert.equal(process.env.DATABASE_URL,url);
   const secret=randomBytes(48).toString("base64url");
-  let config:{production:boolean;secret:string|undefined}={production:false,secret};
+  const phone="+12025550123";
+  let config:{production:boolean;secret:string|undefined;ownerPhone:string}={production:false,secret,ownerPhone:phone};
   const app=express();app.set("trust proxy",1);app.use(express.json());
   app.use(session({secret:randomBytes(32).toString("hex"),resave:false,saveUninitialized:false}));
   registerFirstOwnerRoutes(app,{configuration:()=>config});
@@ -36,7 +37,6 @@ test("first-owner isolated SQL/HTTP: production gating, audit, races, rollback, 
   const server=createServer(app);server.listen(0,"127.0.0.1");await once(server,"listening");
   const port=(server.address() as {port:number}).port;
   const origin=`http://127.0.0.1:${port}`;
-  const phone="+919687878669";
   const headers={"Content-Type":"application/json",Host:"aromacafeinstitute.in",
     Origin:"https://aromacafeinstitute.in","X-Forwarded-Proto":"https"};
   // Node fetch replaces Host here. Raw HTTP preserves it for canonical-host checks.
@@ -58,7 +58,7 @@ test("first-owner isolated SQL/HTTP: production gating, audit, races, rollback, 
   const status=()=>localRequest("/api/admin/first-owner/status");
   const reset=async()=>{
     await db.execute(sql`TRUNCATE lms_users, lms_audit_logs, lms_auth_rate_limits RESTART IDENTITY CASCADE`);
-    const [student]=await db.insert(lmsUsers).values({phoneE164:"+919000006789",displayName:"Synthetic student",passwordHash:"unchanged-synthetic-marker"}).returning();
+    const [student]=await db.insert(lmsUsers).values({phoneE164:"+12025550124",displayName:"Synthetic student",passwordHash:"unchanged-synthetic-marker"}).returning();
     await db.insert(lmsUserRoles).values({userId:student.id,role:"student"});
     await db.insert(lmsPasswordSetupTokens).values({userId:student.id,tokenHash:randomBytes(32).toString("hex"),expiresAt:new Date("2020-01-01")});
     return student;
@@ -68,19 +68,19 @@ test("first-owner isolated SQL/HTTP: production gating, audit, races, rollback, 
   try {
     await reset();
     assert.equal((await post()).status,404,"development never provisions");
-    config={production:true,secret:undefined};
+    config={production:true,secret:undefined,ownerPhone:phone};
     assert.equal((await status()).status,404);assert.equal((await post()).status,404);
-    config={production:true,secret:"x".repeat(64)};
+    config={production:true,secret:"x".repeat(64),ownerPhone:phone};
     assert.equal((await post()).status,404,"weak configuration stays disabled");
     assert.equal((await ownerRows()).length,0);
     assert.equal((await db.select().from(lmsAuditLogs)).length,0,"disabled route has no writes");
-    config={production:true,secret};
+    config={production:true,secret,ownerPhone:phone};
     assert.equal((await status()).status,200);
     assert.equal((await post({phone,secret:"wrong",confirmOwner:true})).status,403);
-    assert.equal((await post({phone:"+919000006789",secret,confirmOwner:true})).status,400);
+    assert.equal((await post({phone:"+12025550124",secret,confirmOwner:true})).status,400);
     assert.equal((await post({phone,secret,confirmOwner:false})).status,400);
     assert.equal((await post(undefined,{Origin:"https://untrusted.invalid"})).status,403);
-    assert.equal((await post({phone:"+919000006789",secret:"wrong",confirmOwner:true})).status,403,"no phone-validation oracle before authentication");
+    assert.equal((await post({phone:"+12025550124",secret:"wrong",confirmOwner:true})).status,403,"no phone-validation oracle before authentication");
     assert.equal((await ownerRows()).length,0);
     const failures=await db.select().from(lmsAuditLogs);
     assert.equal(failures.length,5);
@@ -134,7 +134,7 @@ test("first-owner isolated SQL/HTTP: production gating, audit, races, rollback, 
     assert.match(success.headers.get("cache-control")! ,/no-store/);
     const body=await success.json();
     assert.deepEqual(Object.keys(body).sort(),["expiresAt","maskedPhone","setupUrl"]);
-    assert.equal(body.maskedPhone,"***8669");
+    assert.equal(body.maskedPhone,"***0123");
     const setupUrl=new URL(body.setupUrl);
     assert.equal(setupUrl.origin,"https://aromacafeinstitute.in");
     assert.equal(setupUrl.pathname,"/learn/setup");assert.equal(setupUrl.search,"");
